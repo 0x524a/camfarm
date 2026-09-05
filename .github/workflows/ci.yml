@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # Asserts the property that matters for distribution: the artifact builds and
+  # its tests pass with cgo disabled entirely, so it runs in a scratch container
+  # and in CI with no system packages.
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: test
+        run: go test ./...
+
+  # The race detector requires cgo, which is why this is a separate job. That
+  # requirement is a property of the detector as a build-time tool, not of the
+  # shipped artifact -- the `build` job above is what proves the artifact is
+  # cgo-free. Both matter: mid-test mutation of a running fleet is a core
+  # feature, so racing is a real risk and -race is not box-ticking here.
+  race:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: test -race
+        run: go test -race ./...
