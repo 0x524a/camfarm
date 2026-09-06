@@ -64,10 +64,10 @@ func writeNonH264Stream(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-func TestParseMPEGTSNoH264Track(t *testing.T) {
+func TestParseMPEGTSNoVideoTrack(t *testing.T) {
 	_, err := parseMPEGTS(bytes.NewReader(writeNonH264Stream(t)))
-	if !errors.Is(err, ErrNoH264Track) {
-		t.Fatalf("err = %v, want ErrNoH264Track", err)
+	if !errors.Is(err, ErrNoVideoTrack) {
+		t.Fatalf("err = %v, want ErrNoVideoTrack", err)
 	}
 }
 

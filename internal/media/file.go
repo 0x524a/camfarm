@@ -43,3 +43,20 @@ func (FixtureSource) Describe() string { return "fixture:bundled" }
 
 // fixtureData exposes the embedded bytes to this package's tests.
 func fixtureData() []byte { return fixture.Bytes() }
+
+// FixtureH265Source reads the bundled H.265 media.
+type FixtureH265Source struct{}
+
+// Load parses the bundled H.265 fixture.
+func (FixtureH265Source) Load() (*Media, error) {
+	return parseMPEGTS(bytes.NewReader(fixture.BytesH265()))
+}
+
+// Deterministic reports true.
+func (FixtureH265Source) Deterministic() bool { return true }
+
+// Describe identifies the source.
+func (FixtureH265Source) Describe() string { return "fixture:bundled-h265" }
+
+// fixtureH265Data exposes the embedded H.265 bytes to this package's tests.
+func fixtureH265Data() []byte { return fixture.BytesH265() }

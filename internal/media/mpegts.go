@@ -8,8 +8,9 @@ import (
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
 )
 
-// ErrNoH264Track is returned when a source carries no H.264 video.
-var ErrNoH264Track = errors.New("media: no H264 track in source")
+// ErrNoVideoTrack is returned when a source carries no track in a codec this
+// package can serve.
+var ErrNoVideoTrack = errors.New("media: no supported video track in source")
 
 // parseMPEGTS reads an MPEG-TS stream into immutable media.
 func parseMPEGTS(r io.Reader) (*Media, error) {
@@ -18,18 +19,25 @@ func parseMPEGTS(r io.Reader) (*Media, error) {
 		return nil, fmt.Errorf("media: reading MPEG-TS: %w", err)
 	}
 
+	// First H.264 or H.265 track wins. Track order is the container's, not a
+	// map's, so this is deterministic for a given file.
 	var track *mpegts.Track
+	var ad codecAdapter
 	for _, t := range mr.Tracks() {
-		if _, ok := t.Codec.(*mpegts.CodecH264); ok {
-			track = t
+		switch t.Codec.(type) {
+		case *mpegts.CodecH264:
+			track, ad = t, h264Adapter{}
+		case *mpegts.CodecH265:
+			track, ad = t, h265Adapter{}
+		}
+		if track != nil {
 			break
 		}
 	}
 	if track == nil {
-		return nil, ErrNoH264Track
+		return nil, ErrNoVideoTrack
 	}
 
-	ad := h264Adapter{}
 	var ps paramSets
 	var samples []rawSample
 
@@ -47,7 +55,10 @@ func parseMPEGTS(r io.Reader) (*Media, error) {
 		}
 	})
 
-	mr.OnDataH264(track, func(pts, dts int64, au [][]byte) error {
+	// The callback body is codec-independent: mediacommon hands back the same
+	// (pts, dts, au) shape for both, and every codec-specific decision inside
+	// belongs to the adapter.
+	onData := func(pts, dts int64, au [][]byte) error {
 		nalus := copyNALUs(au)
 		if len(nalus) == 0 {
 			return nil
@@ -61,7 +72,14 @@ func parseMPEGTS(r io.Reader) (*Media, error) {
 			// the bitstream is the only authority available here.
 		})
 		return nil
-	})
+	}
+
+	switch ad.Codec() {
+	case CodecH264:
+		mr.OnDataH264(track, onData)
+	case CodecH265:
+		mr.OnDataH265(track, onData)
+	}
 
 	for {
 		if err := mr.Read(); err != nil {

@@ -12,7 +12,14 @@ import _ "embed"
 //go:embed fixture.ts
 var data []byte
 
-// Bytes returns the bundled MPEG-TS fixture. The returned slice is the
+//go:embed fixture_h265.ts
+var dataH265 []byte
+
+// Bytes returns the bundled H.264 MPEG-TS fixture. The returned slice is the
 // package-level embedded data itself, not a copy; every call returns the same
 // backing array. Callers must not mutate it.
 func Bytes() []byte { return data }
+
+// BytesH265 returns the bundled H.265 MPEG-TS fixture, under the same
+// no-mutation rule as Bytes.
+func BytesH265() []byte { return dataH265 }

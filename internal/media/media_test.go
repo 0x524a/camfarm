@@ -228,3 +228,85 @@ func fixtureBytesForTest(t *testing.T) []byte {
 	}
 	return b
 }
+
+// These constants describe the committed H.265 fixture. Like the H.264 set
+// above they are measured, not chosen. Step 6 of this task is where they get
+// their values; a guess here would be a test that asserts nothing.
+const (
+	fixtureH265Width  = 320
+	fixtureH265Height = 240
+	fixtureH265FPS    = 15.0
+)
+
+func TestFixtureH265SourceProperties(t *testing.T) {
+	m, err := (FixtureH265Source{}).Load()
+	if err != nil {
+		t.Fatalf("load H265 fixture: %v", err)
+	}
+
+	if m.Codec != CodecH265 {
+		t.Errorf("codec = %q, want %q", m.Codec, CodecH265)
+	}
+	if m.Width != fixtureH265Width || m.Height != fixtureH265Height {
+		t.Errorf("geometry = %dx%d, want %dx%d", m.Width, m.Height, fixtureH265Width, fixtureH265Height)
+	}
+	if m.FPS != fixtureH265FPS {
+		t.Errorf("fps = %v, want %v", m.FPS, fixtureH265FPS)
+	}
+
+	// All three parameter sets, which is what distinguishes H.265 from H.264
+	// here. A source missing any of them must have been refused by Validate.
+	if len(m.VPS) == 0 {
+		t.Error("VPS is empty")
+	}
+	if len(m.SPS) == 0 {
+		t.Error("SPS is empty")
+	}
+	if len(m.PPS) == 0 {
+		t.Error("PPS is empty")
+	}
+
+	if len(m.AUs) == 0 {
+		t.Fatal("no access units")
+	}
+	if !m.AUs[0].RandomAccess {
+		t.Error("first access unit is not a random-access point")
+	}
+	if m.AUs[0].DTS != 0 {
+		t.Errorf("first DTS = %d, want 0", m.AUs[0].DTS)
+	}
+
+	// More than one random-access point, which is the observable consequence of
+	// handling open-GOP CRA keyframes. -g 15 over 2 seconds at 15 fps puts a
+	// second keyframe mid-fixture; an implementation that recognised only IDR
+	// would find exactly one and still pass every other assertion here.
+	keyframes := 0
+	for _, au := range m.AUs {
+		if au.RandomAccess {
+			keyframes++
+		}
+	}
+	if keyframes < 2 {
+		t.Errorf("random-access points = %d, want at least 2 (open-GOP CRA keyframes not recognised?)", keyframes)
+	}
+
+	for i, au := range m.AUs {
+		if len(au.NALUs) == 0 {
+			t.Fatalf("access unit %d has no NALUs", i)
+		}
+		for j, n := range au.NALUs {
+			if len(n) == 0 {
+				t.Fatalf("access unit %d NALU %d is empty", i, j)
+			}
+		}
+	}
+}
+
+func TestFixtureH265ReportsDeterminism(t *testing.T) {
+	if !(FixtureH265Source{}).Deterministic() {
+		t.Error("H265 fixture source must be deterministic")
+	}
+	if (FixtureH265Source{}).Describe() == "" {
+		t.Error("Describe() must not be empty")
+	}
+}
