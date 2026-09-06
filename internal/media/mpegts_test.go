@@ -11,7 +11,8 @@ import (
 // TestCopyNALUsDoesNotAliasInput proves copyNALUs returns independently owned
 // memory: it mutates the source buffer after copying and checks the copy is
 // unaffected. If copyNALUs is changed to return its input unchanged (no copy),
-// this test fails -- see the fix report for that experiment's output.
+// this test fails deterministically -- verified by deleting the copy and
+// observing the failure.
 func TestCopyNALUsDoesNotAliasInput(t *testing.T) {
 	src := []byte{0x01, 0x02, 0x03, 0x04}
 	au := [][]byte{src[0:2], src[2:4]}
@@ -35,8 +36,7 @@ func TestCopyNALUsDoesNotAliasInput(t *testing.T) {
 // TestCopyNALUsDropsEmpty proves the empty-NALU guard in copyNALUs, which the
 // MPEG-TS pipeline itself never exercises: mediacommon's own Annex-B unmarshal
 // already drops zero-length segments before an access unit reaches our
-// OnDataH264 callback (see the fix report for why this can't be driven through
-// mpegts.Writer). This test drives the guard directly.
+// OnDataH264 callback. This test drives the guard directly.
 func TestCopyNALUsDropsEmpty(t *testing.T) {
 	out := copyNALUs([][]byte{{0x01}, {}, {0x02}})
 	if len(out) != 2 {

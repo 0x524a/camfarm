@@ -106,11 +106,16 @@ func TestVirtualNewTickerPanicsOnNonPositiveDuration(t *testing.T) {
 // lets one goroutine finish before the other is even scheduled, which starves
 // the race detector of an actual conflicting access. Advance reads and
 // rewrites a ticker's stopped and next fields under v.mu on every tick it
-// delivers; Stop must take the same lock before touching stopped, or the two
-// goroutines race on that field (and, were Stop ever changed to also touch
-// next, on that field too). This is the property the controller ruling on
-// Stop's implementation exists to guarantee -- see the fix report for the
-// experiment that shows an unguarded Stop fails this test under -race.
+// delivers, so Stop must take the same lock before touching stopped, or the
+// two goroutines race on that field. That guard's protection is verified by
+// the race detector (run this test with -race), and detection is
+// probabilistic per run: an unguarded Stop is not guaranteed to fail any
+// single run, only to become detectable given enough concurrent iterations.
+// The two behavioural assertions at the end of this test are general
+// correctness checks, not regression backstops for the race itself -- a data
+// race between a guarded and an unguarded write to a bool is not something a
+// deterministic assertion can distinguish, which is exactly why the race
+// detector exists.
 func TestVirtualConcurrentStopAndAdvance(t *testing.T) {
 	v := NewVirtual(time.Unix(0, 0).UTC())
 	tk := v.NewTicker(time.Nanosecond)

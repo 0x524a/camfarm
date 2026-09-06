@@ -52,12 +52,21 @@ type Stats struct {
 	Seed uint64
 	// FramesServed counts access units served. It is monotonic across loops of
 	// the source, so it doubles as the camera's position in the run.
-	FramesServed       uint64
-	LoopsCompleted     uint64
-	FaultsFired        uint64
+	FramesServed uint64
+	// LoopsCompleted counts completed passes over the source media.
+	LoopsCompleted uint64
+	// FaultsFired counts fault decisions that have fired for this camera.
+	FaultsFired uint64
+	// OutboundRTPPackets counts RTP packets sent on this camera's stream,
+	// read from the RTSP stream's own counters.
 	OutboundRTPPackets uint64
-	OutboundBytes      uint64
-	Readers            int
+	// OutboundBytes counts bytes sent on this camera's stream, read from the
+	// RTSP stream's own counters.
+	OutboundBytes uint64
+	// Readers is the number of sessions currently set up against this
+	// camera. Unlike the other fields, it is a live count, not a running
+	// total.
+	Readers int
 }
 
 // Fleet is a running set of synthetic cameras.
@@ -148,6 +157,9 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 		}
 		f.order = append(f.order, cs.ID)
 
+		// Faults is deliberately left unset: spec.validate() above rejects any
+		// camera with a non-empty Faults before this loop runs, so no camera
+		// reaching here has any.
 		cfg.Cameras = append(cfg.Cameras, rtsp.CameraConfig{
 			ID:    cs.ID,
 			Media: m,

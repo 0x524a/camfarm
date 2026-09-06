@@ -142,6 +142,9 @@ func (s Spec) validate() (Spec, error) {
 			return s, fmt.Errorf("camfarm: camera %q has unknown source kind %q", c.ID, c.Source.Kind)
 		}
 
+		// TODO: once a second codec exists, compare against the loaded
+		// source's actual codec (as checkAdvertised in camfarm.go does for
+		// width, height, and fps) rather than this literal string.
 		if c.Video.Codec != "" && c.Video.Codec != "H264" {
 			return s, fmt.Errorf("%w: camera %q advertises codec %q; only H264 is implemented",
 				ErrUnsupported, c.ID, c.Video.Codec)
