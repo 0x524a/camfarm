@@ -2,12 +2,14 @@ package rtsp
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
+	"github.com/bluenviron/gortsplib/v5/pkg/liberrors"
 
 	"github.com/0x524a/camfarm/internal/media"
 	"github.com/0x524a/camfarm/internal/obs"
@@ -52,6 +54,26 @@ func cameraID(i int) string {
 	return "cam-" + string(rune('0'+i/10)) + string(rune('0'+i%10))
 }
 
+// newTestClient builds a client against u, wired to record whether the
+// server forced a fallback to TCP. This server advertises no UDP ports, so
+// any test that performs SETUP is expected to see exactly that fallback.
+// Recording it instead of leaving it as a client-side log line means that
+// the day UDP support lands, an unexpected downgrade fails a test instead of
+// vanishing silently into stderr.
+func newTestClient(u *base.URL) (c *gortsplib.Client, switchedToTCP func() bool) {
+	var sawServerForcedTCP bool
+	c = &gortsplib.Client{
+		Scheme: u.Scheme,
+		Host:   u.Host,
+		OnTransportSwitch: func(err error) {
+			if _, ok := err.(liberrors.ErrClientSwitchToTCPDueToServer); ok {
+				sawServerForcedTCP = true
+			}
+		},
+	}
+	return c, func() bool { return sawServerForcedTCP }
+}
+
 func TestAddrIsNilBeforeStart(t *testing.T) {
 	s, err := New(Config{Host: "127.0.0.1", Obs: obs.New(10), Cameras: []CameraConfig{
 		{ID: "a", Media: testMedia(t), Seed: seed.Seed(1)},
@@ -94,7 +116,7 @@ func TestDescribeAdvertisesTheSourceParameterSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	c := &gortsplib.Client{Scheme: u.Scheme, Host: u.Host}
+	c, _ := newTestClient(u)
 	if err := c.Start(); err != nil {
 		t.Fatalf("client start: %v", err)
 	}
@@ -130,7 +152,7 @@ func TestUnknownCameraIsNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	c := &gortsplib.Client{Scheme: u.Scheme, Host: u.Host}
+	c, _ := newTestClient(u)
 	if err := c.Start(); err != nil {
 		t.Fatalf("client start: %v", err)
 	}
@@ -154,7 +176,7 @@ func TestFleetIsIndependentlyAddressable(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", id, err)
 		}
-		c := &gortsplib.Client{Scheme: u.Scheme, Host: u.Host}
+		c, switchedToTCP := newTestClient(u)
 		if err := c.Start(); err != nil {
 			t.Fatalf("client start %s: %v", id, err)
 		}
@@ -166,6 +188,10 @@ func TestFleetIsIndependentlyAddressable(t *testing.T) {
 		if err := c.SetupAll(desc.BaseURL, desc.Medias); err != nil {
 			c.Close()
 			t.Fatalf("SETUP %s: %v", id, err)
+		}
+		if !switchedToTCP() {
+			c.Close()
+			t.Fatalf("%s: SETUP did not fall back to TCP; server advertises no UDP ports", id)
 		}
 		if _, err := c.Play(nil); err != nil {
 			c.Close()
@@ -188,7 +214,7 @@ func TestReaderCountRisesAndFalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	c := &gortsplib.Client{Scheme: u.Scheme, Host: u.Host}
+	c, switchedToTCP := newTestClient(u)
 	if err := c.Start(); err != nil {
 		t.Fatalf("client start: %v", err)
 	}
@@ -198,6 +224,9 @@ func TestReaderCountRisesAndFalls(t *testing.T) {
 	}
 	if err := c.SetupAll(desc.BaseURL, desc.Medias); err != nil {
 		t.Fatalf("SETUP: %v", err)
+	}
+	if !switchedToTCP() {
+		t.Fatal("SETUP did not fall back to TCP; server advertises no UDP ports")
 	}
 	if _, err := c.Play(nil); err != nil {
 		t.Fatalf("PLAY: %v", err)
@@ -224,6 +253,52 @@ func waitForReaders(s *Server, id string, want int) int {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// TestConcurrentCloseAndDescribe races Close against a batch of in-flight
+// DESCRIBE requests. lookup resolves a camera under the read lock but used to
+// hand back a *camera pointer for the caller to dereference afterward, so
+// OnDescribe's read of cam.stream could race the cam.stream = nil write that
+// Close performs under the write lock. What is guaranteed here is only that
+// nothing panics and the race detector stays quiet: a request racing a
+// shutdown is allowed to fail, so no success is asserted on any Describe.
+func TestConcurrentCloseAndDescribe(t *testing.T) {
+	const n = 20
+	s := startServer(t, 1)
+
+	u, err := base.ParseURL(s.URL("cam-00"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	clients := make([]*gortsplib.Client, n)
+	for i := range clients {
+		c, _ := newTestClient(u)
+		if err := c.Start(); err != nil {
+			t.Fatalf("client start %d: %v", i, err)
+		}
+		clients[i] = c
+	}
+	defer func() {
+		for _, c := range clients {
+			c.Close()
+		}
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(len(clients) + 1)
+	for _, c := range clients {
+		c := c
+		go func() {
+			defer wg.Done()
+			c.Describe(u) //nolint:errcheck // racing a shutdown may legitimately fail
+		}()
+	}
+	go func() {
+		defer wg.Done()
+		s.Close()
+	}()
+	wg.Wait()
 }
 
 func TestRejectsBadConfig(t *testing.T) {

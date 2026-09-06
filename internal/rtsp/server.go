@@ -305,11 +305,22 @@ func (s *Server) streamStatsErr(id string) (packets, bytes uint64, err error) {
 	return st.OutboundRTPPackets, st.OutboundBytes, nil
 }
 
-// lookup resolves a request path to a camera.
-func (s *Server) lookup(path string) *camera {
+// lookup resolves a request path to a camera's id and stream, both read
+// while still holding the read lock.
+//
+// It returns values rather than a *camera: Close and Start's rollback path
+// nil out cam.stream under the write lock, and a caller dereferencing a
+// *camera after lookup returns would be reading that field with no lock
+// held at all, racing those writes. Handing back copies read under the lock
+// closes that window.
+func (s *Server) lookup(path string) (id string, stream *gortsplib.ServerStream, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.cams[strings.Trim(path, "/")]
+	cam, ok := s.cams[strings.Trim(path, "/")]
+	if !ok {
+		return "", nil, false
+	}
+	return cam.id, cam.stream, true
 }
 
 // --- gortsplib handlers ---
@@ -331,28 +342,28 @@ func (s *Server) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
 
 // OnDescribe answers DESCRIBE by path.
 func (s *Server) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error) {
-	cam := s.lookup(ctx.Path)
-	if cam == nil {
+	_, stream, ok := s.lookup(ctx.Path)
+	if !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
 	}
-	return &base.Response{StatusCode: base.StatusOK}, cam.stream, nil
+	return &base.Response{StatusCode: base.StatusOK}, stream, nil
 }
 
 // OnSetup answers SETUP by path and registers the session as a reader.
 func (s *Server) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response, *gortsplib.ServerStream, error) {
-	cam := s.lookup(ctx.Path)
-	if cam == nil {
+	id, stream, ok := s.lookup(ctx.Path)
+	if !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
 	}
 	s.mu.Lock()
-	s.readers[ctx.Session] = cam.id
+	s.readers[ctx.Session] = id
 	s.mu.Unlock()
-	return &base.Response{StatusCode: base.StatusOK}, cam.stream, nil
+	return &base.Response{StatusCode: base.StatusOK}, stream, nil
 }
 
 // OnPlay answers PLAY.
 func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
-	if cam := s.lookup(ctx.Path); cam == nil {
+	if _, _, ok := s.lookup(ctx.Path); !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil
 	}
 	return &base.Response{StatusCode: base.StatusOK}, nil
