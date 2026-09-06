@@ -174,7 +174,8 @@ DESCRIBE retry on a Digest 401, only when credentials are embedded in the URL.
 Switch to the latest one."* Anyone on the v4 line who runs `go get -u` gets an empty package and a
 compile failure.
 
-Latest is **`gortsplib/v5 v5.6.4`** (2026-08-18). There is no v6. v5 requires **Go ≥ 1.25**.
+Latest is **`gortsplib/v5 v5.6.5`**. There is no v6. Its own `go.mod` declares `go 1.26.0` — not
+merely "≥ 1.25" as first estimated, so camfarm's `go` directive tracks it at `1.26.0`.
 
 **camfarm starts on v5.** Note `NewServerStream` is gone: v5 constructs `&ServerStream{Server, Desc}`
 then calls `Initialize()`.
@@ -250,7 +251,7 @@ Six further requirements fall out of its workarounds:
 | Requirement | Origin |
 |---|---|
 | Silent by default, never stdout | Named three times; its `make demo` runs the camera as a separate process because "stdout banners would corrupt the stdio JSON-RPC stream" |
-| `Port: 0` with address **read-back** | It hand-rolls `freePort` with a documented race, "unavoidable until issue #63 allows Port 0 with address read-back" |
+| `Port: 0` with address **read-back** | It hand-rolls `freePort` with a documented race, "unavoidable until issue #63 allows Port 0 with address read-back" — **but `gortsplib.Server.NetListener()` already exists and returns the live listener**, so camfarm needs no such workaround: it panics if called before a successful `Start()`, so callers read it back after, not instead of, binding |
 | First-class inspection API | It reaches for `Server() *server.Server`, a leaked pointer, purely to assert PTZ state. "The decisive capability is `GetPTZState`: a test can assert that a dry-run left the camera **unmoved**" |
 | Faults recoverable in-process | "**per-entry mutex, not `sync.Once`.** `sync.Once` … cannot retry, so a camera that was down at startup would remain permanently unusable until the process restarted" |
 | Stable public spec type | "If `DefaultConfig` field names differ from those above, correct" — an API it cannot rely on |
@@ -352,6 +353,16 @@ The interface is the deliverable; further sources are additive.
 synthesise-and-encode path would have landed on MJPEG — which `rtspeek` explicitly rejects as a video
 format (§2.6), making it useless to the clients this farm exists to test.
 
+**`mediacommon/v2` has no Annex-B stream reader.** It ships `fmp4`, `mp4`, `mpegts` and `pmp4` under
+`pkg/formats/`, and nothing for raw Annex-B. That absence is why the bundled fixture is packaged as
+MPEG-TS rather than a raw `.h264` stream — there is a reader for the former and none for the latter.
+`h264.AnnexB.Unmarshal` exists for the small case where Annex-B bytes are already in hand (RTP
+packetization from access units already extracted from MPEG-TS), but it aliases its input: the final
+line of its implementation is `(*a)[i] = buf[positions[i].start:positions[i].end]`, a slice of the
+caller's buffer, not a copy. The media loader therefore copies each NALU out before handing it to the
+pump, so the fixture's underlying byte buffer cannot be mutated out from under a packet still in
+flight (`internal/media/media.go`, `copyNALUs`).
+
 **One committed fixture is required, not optional.** §2.6 establishes there is no media anywhere on
 the account to inherit. Without a bundled default, camfarm's own tests and every consumer's CI need
 media sourced before any test runs, which contradicts the project's purpose. Scope: a few hundred
@@ -412,7 +423,7 @@ that and immediately before the write, and `WriteResponse` is a bare `res.Marsha
 | Close-after-OPTIONS | Mid-handshake disconnect. **Already client-verified in `rtspeek`.** | Handler closes the conn |
 | Transport refusal (force TCP interleaved, refuse UDP) | Clients that do not fall back when their preferred transport is rejected. | SETUP response |
 | Basic when Digest expected | Clients that refuse to downgrade, or silently leak credentials. | `Server.AuthMethods`, exported |
-| Wrong realm, stale nonce | Credential caches keyed on realm; clients that loop or fail permanently. | `OnResponse` rewriting `WWW-Authenticate`, or returning a hand-built 401 and never calling `VerifyCredentials` |
+| Wrong realm, stale nonce | Credential caches keyed on realm; clients that loop or fail permanently. | `OnResponse` rewriting `WWW-Authenticate`, or returning a hand-built 401 and never calling `VerifyCredentials` — **correction:** `Server.AuthMethods` is exported and real, but there is no configurable `AuthRealm` anywhere in gortsplib v5.6.5; the realm is the hardcoded constant `serverAuthRealm = "ipcam"` (`server.go:19`), so this fault is reachable only through the `OnResponse` rewrite, never through a library option |
 
 ### 7.4 The framelag boundary
 
@@ -498,10 +509,20 @@ assuming it. Replaying a different spec under the same seed is an error, not a s
 
 ### 8.3 Two carve-outs, stated in the README
 
-1. **SSRC is not reproducible.** `gortsplib` assigns it from `crypto/rand` with no exported field,
-   unchanged from v4. Sequence numbers and timestamps *are* controllable — set
-   `rtph264.Encoder.SSRC` and `InitialSequenceNumber` directly, as `CreateEncoder()` sets neither.
-   SSRC is therefore excluded from replay assertions.
+1. **Correction, from running code.** `rtph264.Encoder.SSRC` and `InitialSequenceNumber` *are*
+   exported and settable — the prediction that they were not was wrong. Both halves below are now
+   **confirmed** by implementation rather than predicted:
+   - **Sequence number is reproducible.** The pump sets `InitialSequenceNumber` from the per-camera
+     seed, and `ServerStream`'s write path never rewrites `pkt.SequenceNumber`; it only reads the
+     value back afterward, to compute the `RTP-Info` header (`server_stream_format.go:173`). The
+     seed-derived initial sequence number survives to the client unchanged.
+   - **SSRC is not reproducible.** `ServerStream` overwrites it unconditionally on every write —
+     `pkt.SSRC = ssf.localSSRC` at `server_stream_format.go:103` — regardless of what the encoder
+     set. SSRC is therefore excluded from replay assertions; the pump sets it from the seed anyway,
+     so a writer that does not overwrite it (including the test recorder) still behaves
+     deterministically.
+   - There is also no `InitialTimestamp` field on the encoder, so per-packet timestamp assignment
+     (as the pump already does, via `pkt.Timestamp = ts`) is the only lever over timestamps.
 2. **Live upstream-RTSP sources are outside the guarantee.** Their bytes differ run to run. Faults
    over such a source remain seeded in their *decisions*, but the media is not reproducible. The
    fault engine warns when a non-deterministic source is combined with faults.
@@ -550,9 +571,12 @@ func Replay(ctx context.Context, seed uint64, specPath string) (*Fleet, error)
 
 Every element traces to a stated need in §2.9. Operator-chosen IDs and `ErrUnknownCamera` mirror the
 consumer's own registry. `Port: 0` with read-back, readiness and silence are its issue-#63
-workarounds. The `ProfileToken` and `PresetToken` guarantees replace configuration it mutates by
-hand. `Stats()` replaces the leaked `*server.Server` pointer with a first-class, seed-correlated
-read.
+workarounds — read-back is `gortsplib.Server.NetListener()`, which already exists (§2.9); no
+workaround was needed. The `ProfileToken` and `PresetToken` guarantees replace configuration it
+mutates by hand. `Stats()` replaces the leaked `*server.Server` pointer with a first-class,
+seed-correlated read. **Correction:** `Stats()` cannot forward a reader count from `ServerStream`,
+which exposes none; the implemented `Stats.Readers` is instead tracked by the RTSP handler itself, on
+every `SETUP`/session-close, and read back under the same lock as the rest of its state.
 
 **Error taxonomy**, kept distinct because conflation is a known consumer pain (upstream #64):
 
@@ -648,7 +672,11 @@ MediaSource ──parse once──▶ []AccessUnit (immutable, shared)
 
 Control flows the other way: control API → `Fleet` → `Camera` → ONVIF state, fault engine, or pump.
 
-### 10.4 Two implementation traps, designed around
+### 10.4 Implementation traps, designed around and found the hard way
+
+The first two were designed around before any code was written. The next three were found by
+building and running Task 6 and 7's code, and are recorded as corrections for the same reason as
+§8.3 and §7.3: running code disagreed with the design, and the design lost.
 
 - **Setup ordering.** `ServerStream.Initialize()` requires an already-started server, but `Handler`
   must be live before the first connection and `Start()` launches the accept loop immediately.
@@ -657,6 +685,29 @@ Control flows the other way: control API → `Fleet` → `Camera` → ONVIF stat
   avoid.
 - **Loop seam.** On EOF the pump rewinds while **continuing** timestamps, so a looping fixture does
   not accidentally resemble the timestamp-discontinuity fault injected deliberately.
+- **Trap A: lock-across-library-call deadlock.** `gortsplib.Server.Close()` tears down every live
+  session, and each teardown invokes the session-closed handler camfarm registers. A `Close()` that
+  holds the server's own write lock while calling into `gortsplib.Server.Close()` therefore waits on
+  a handler that is itself blocked waiting for that same lock — a deadlock that only manifests when a
+  session is open at close time, which is exactly the case a quick manual test skips. The same shape
+  showed up independently in the start-time error-rollback path, which also calls back into the
+  library while holding the lock it needs to roll back under. Resolution in both places: snapshot
+  what is needed under the lock, release the lock explicitly, then call into the library.
+- **Trap B: fixing Trap A exposed a data race.** Once `Close()` could actually complete, its clearing
+  of each camera's stream pointer began racing an *unlocked* read of that same field by request
+  handlers — handlers that had resolved a camera under a read lock, released it, and then read the
+  camera's fields with no lock held at all. Trap A's fix made this race newly reachable by making
+  `Close()` finish instead of hang. Resolution: the lookup returns values already resolved under the
+  read lock, not a pointer for the caller to dereference later, closing the window rather than
+  narrowing it. The general lesson generalizes past this one fix: resolving one concurrency defect
+  routinely unmasks another it was hiding, so a concurrency fix earns a re-review, not a checkmark.
+- **Trap C: no test-only pump-stepping accessor.** Pumps are constructed inside the same locked
+  sequence that launches their driver goroutine, so any accessor that handed one back would hand back
+  a pump whose driver is already running — and a pump is single-goroutine by design, not safe to step
+  from two places at once. Resolution: no such accessor exists. The observable counters a test needs
+  are already exposed, correctly synchronised, through the inspection recorder; tests that need
+  determinism at the pump level construct a pump directly instead of reaching into a running fleet
+  for one.
 
 ### 10.5 Decision 7 — discovery
 
@@ -791,8 +842,12 @@ conclude something about their own conformance.
 1. **The permanent name.** Unresolved, and now constrained by §11.2.
 2. **`CLAUDE.md` overstates the `onvif-mcp` relationship** (§2.9). Needs correcting to describe that
    project as a candidate consumer.
-3. **The bundled fixture's provenance and licence.** Needs sourcing; must be unambiguously
-   redistributable under MIT alongside the code.
+3. **Resolved. The bundled fixture's provenance and licence.** It is a synthetic `testsrc2` pattern
+   (320×240, 2 seconds, H.264) generated by the committed `scripts/gen-fixture.sh`, encoded with
+   ffmpeg 6.1.1. It contains no third-party footage and is redistributable under MIT alongside the
+   code. Regeneration is **not** byte-reproducible — a different ffmpeg build will encode differently
+   — so the committed artifact, not the script, is the authoritative fixture; the script documents
+   how it was produced, not a promise that re-running it reproduces the same bytes.
 4. **Events service.** Mandatory in both profiles, implemented nowhere, and a real consumer is
    blocked on it (§2.10). Not in v1 scope, but the highest-value candidate for what follows, and the
    architecture should not preclude it.

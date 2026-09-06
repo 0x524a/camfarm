@@ -64,7 +64,9 @@ their APIs, since they may still be in flux:
   video pipelines: `camfarm` produces controllable, faulty streams; `framelag` measures what happens
   to them end to end.
 - `/home/ritwik/devBed/rj/onvif-mcp/`: an MCP server exposing ONVIF camera control to LLM agents.
-  `camfarm` is how that project gets integration-tested without physical hardware.
+  `camfarm` is a candidate consumer for that project's integration tests, not its current test
+  strategy: as of this writing its own design doc and plan make no reference to `camfarm` and rely on
+  `onvif-go/server` directly plus hand-authored `httptest` fixtures.
 
 ## Open architectural decisions
 

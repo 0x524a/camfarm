@@ -20,6 +20,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ffprobe is the external decoder the media tests cross-check against.
+      # It is installed rather than skipped around: a test that quietly skips
+      # when its oracle is missing is worse than no test.
+      #
+      # This does not compromise the cgo-free claim. ffprobe runs as a
+      # subprocess; nothing links against it.
+      - name: install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffprobe -version | head -1
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -54,6 +66,18 @@ jobs:
       CGO_ENABLED: "1"
     steps:
       - uses: actions/checkout@v4
+
+      # ffprobe is the external decoder the media tests cross-check against.
+      # It is installed rather than skipped around: a test that quietly skips
+      # when its oracle is missing is worse than no test.
+      #
+      # This does not compromise the cgo-free claim. ffprobe runs as a
+      # subprocess; nothing links against it.
+      - name: install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffprobe -version | head -1
 
       - uses: actions/setup-go@v5
         with:
