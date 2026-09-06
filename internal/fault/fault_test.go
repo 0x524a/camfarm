@@ -168,3 +168,38 @@ func TestRejectsUnknownKindAndBadRate(t *testing.T) {
 		}
 	}
 }
+
+// Session, transport and control-plane kinds are catalogued and validated but
+// not frame-decided in this version: they fall through DecideFrame's switch to
+// an empty default. Rate: 1 makes this unambiguous -- a rate-based kind at
+// rate 1 fires on every frame, so if the switch ever started treating this
+// kind as rate-based, this test would catch it immediately.
+func TestNonFrameScopedKindNeverDecides(t *testing.T) {
+	e, err := New(seed.Seed(1), []Spec{{Kind: KindTeardownMidSession, Rate: 1}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for i := 0; i < 1000; i++ {
+		if d := e.DecideFrame(i); len(d) != 0 {
+			t.Fatalf("frame %d: non-frame-scoped kind decided %v", i, d)
+		}
+	}
+}
+
+func TestKnown(t *testing.T) {
+	for _, k := range []Kind{
+		KindFrameDrop,
+		KindKeyframeStarvation,
+		KindTeardownMidSession,
+		KindAcceptThenSilence,
+		KindSDPCodecLie,
+		KindSPSResolutionLie,
+	} {
+		if !Known(k) {
+			t.Errorf("Known(%q) = false, want true", k)
+		}
+	}
+	if Known("not-a-fault") {
+		t.Error(`Known("not-a-fault") = true, want false`)
+	}
+}
