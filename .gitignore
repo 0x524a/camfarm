@@ -1,3 +1,6 @@
 # Private, session-scoped Claude Code files: not for the public repository.
 CLAUDE.local.md
 ARCHITECTURE_PROMPT.md
+
+# Local Serena tooling state, not part of the project.
+.serena/
