@@ -3,4 +3,11 @@
 // The name must not embed the ONVIF word mark.
 module github.com/0x524a/camfarm
 
-go 1.25.0
+go 1.26.0
+
+require github.com/bluenviron/mediacommon/v2 v2.9.4
+
+require (
+	github.com/asticode/go-astikit v0.30.0 // indirect
+	github.com/asticode/go-astits v1.16.0 // indirect
+)
