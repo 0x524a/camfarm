@@ -12,6 +12,9 @@ type Codec string
 // CodecH264 is H.264.
 const CodecH264 Codec = "H264"
 
+// CodecH265 is H.265 / HEVC.
+const CodecH265 Codec = "H265"
+
 // AccessUnit is one coded picture, as a list of NAL units without start codes.
 type AccessUnit struct {
 	// NALUs are owned by this AccessUnit and must not be mutated.
