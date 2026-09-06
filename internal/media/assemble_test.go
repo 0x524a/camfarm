@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-// h264ParamSets returns a paramSets that Validate accepts, for tests that care
-// about assemble's own logic rather than parameter-set handling. Geometry is not
-// exercised by these, so the SPS need not be parseable -- tests that reach
-// Geometry say so explicitly.
+// minimalH264SPS returns a paramSets that Validate accepts, for tests that care
+// about assemble's own logic rather than parameter-set handling. The SPS must
+// still be a real, parseable one, since assemble always calls Geometry; see
+// the comment below for where it comes from.
 func minimalH264SPS(t *testing.T) paramSets {
 	t.Helper()
 	// A real, parseable baseline SPS is needed because assemble calls Geometry.

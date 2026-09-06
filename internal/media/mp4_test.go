@@ -1,10 +1,14 @@
 package media
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	mp4codecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mp4/codecs"
+	"github.com/bluenviron/mediacommon/v2/pkg/formats/pmp4"
 )
 
 // remuxFixture writes MPEG-TS fixture bytes to a temp file and remuxes them into
@@ -37,9 +41,9 @@ func remuxFixture(t *testing.T, src []byte, name string, extraArgs ...string) st
 	return out
 }
 
-// parseFile is the path most tests take: open a remuxed file and parse it as
-// ISOBMFF directly, without going through container sniffing, which arrives in a
-// later task.
+// parseISOBMFFFile is the path most tests take: open a remuxed file and parse
+// it as ISOBMFF directly, without going through container sniffing, which
+// arrives in a later task.
 func parseISOBMFFFile(t *testing.T, path string) *Media {
 	t.Helper()
 	f, err := os.Open(path)
@@ -134,5 +138,33 @@ func TestParseMP4NoVideoTrack(t *testing.T) {
 
 	if _, err := parseISOBMFF(f); err == nil {
 		t.Fatal("expected an error for an MP4 with no video track")
+	}
+}
+
+// TestMediaFromPMP4NoSamplesIsRecognisable pins the errNoSamples contract that
+// Task 5 depends on: a video track that parses structurally but carries zero
+// samples must produce an error errors.Is recognises as errNoSamples, since
+// that is exactly the signal the fragmented-MP4 reader uses to decide whether
+// to try harder rather than surface a confusing error to a caller.
+//
+// This is built by hand rather than through ffmpeg: mediacommon's own reader
+// has no way to produce a structurally-valid track with no samples (a real
+// plain MP4 always has at least one), so the only way to exercise this branch
+// at all is to construct the pmp4.Presentation directly.
+func TestMediaFromPMP4NoSamplesIsRecognisable(t *testing.T) {
+	pres := &pmp4.Presentation{
+		Tracks: []*pmp4.Track{
+			{
+				ID:        1,
+				TimeScale: 90000,
+				Codec:     &mp4codecs.H264{SPS: []byte{0x01}, PPS: []byte{0x02}},
+				Samples:   nil,
+			},
+		},
+	}
+
+	_, err := mediaFromPMP4(pres)
+	if !errors.Is(err, errNoSamples) {
+		t.Fatalf("mediaFromPMP4() error = %v, want errors.Is(err, errNoSamples)", err)
 	}
 }
