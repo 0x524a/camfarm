@@ -70,6 +70,8 @@ type Pump struct {
 // NewPump validates cfg and returns a Pump positioned at the first access unit.
 func NewPump(cfg PumpConfig) (*Pump, error) {
 	switch {
+	case cfg.CameraID == "":
+		return nil, errors.New("rtsp: pump has no camera ID")
 	case cfg.Media == nil:
 		return nil, errors.New("rtsp: pump has no media")
 	case cfg.Medi == nil:

@@ -193,10 +193,11 @@ func TestNewPumpRejectsBadConfig(t *testing.T) {
 	good := PumpConfig{CameraID: "c", Media: m, Medi: medi, Writer: &recorder{}, Obs: obs.New(1)}
 
 	bad := map[string]func(PumpConfig) PumpConfig{
-		"no media":  func(c PumpConfig) PumpConfig { c.Media = nil; return c },
-		"no writer": func(c PumpConfig) PumpConfig { c.Writer = nil; return c },
-		"no obs":    func(c PumpConfig) PumpConfig { c.Obs = nil; return c },
-		"no medi":   func(c PumpConfig) PumpConfig { c.Medi = nil; return c },
+		"no camera id": func(c PumpConfig) PumpConfig { c.CameraID = ""; return c },
+		"no media":     func(c PumpConfig) PumpConfig { c.Media = nil; return c },
+		"no writer":    func(c PumpConfig) PumpConfig { c.Writer = nil; return c },
+		"no obs":       func(c PumpConfig) PumpConfig { c.Obs = nil; return c },
+		"no medi":      func(c PumpConfig) PumpConfig { c.Medi = nil; return c },
 		"bad fault": func(c PumpConfig) PumpConfig {
 			c.Faults = []fault.Spec{{Kind: "nope", Rate: 1}}
 			return c

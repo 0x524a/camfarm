@@ -77,7 +77,6 @@ type Server struct {
 	cams    map[string]*camera
 	order   []string
 	readers map[*gortsplib.ServerSession]string
-	pumps   map[string]*Pump
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 }
@@ -100,7 +99,6 @@ func New(cfg Config) (*Server, error) {
 		ck:      cfg.Clock,
 		cams:    make(map[string]*camera, len(cfg.Cameras)),
 		readers: make(map[*gortsplib.ServerSession]string),
-		pumps:   make(map[string]*Pump, len(cfg.Cameras)),
 	}
 	if s.log == nil {
 		s.log = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -129,6 +127,31 @@ func New(cfg Config) (*Server, error) {
 		s.order = append(s.order, cc.ID)
 	}
 	return s, nil
+}
+
+// buildPumps constructs one pump per camera, keyed by camera ID. Caller holds
+// s.mu (write lock); cam.stream and cam.medi must already be initialized for
+// every camera in s.order. On failure it returns the ID of the camera whose
+// pump could not be built, so the caller can report it.
+func (s *Server) buildPumps() (pumps map[string]*Pump, failedID string, err error) {
+	pumps = make(map[string]*Pump, len(s.order))
+	for _, id := range s.order {
+		cam := s.cams[id]
+		pump, err := NewPump(PumpConfig{
+			CameraID: cam.id,
+			Media:    cam.cfg.Media,
+			Medi:     cam.medi,
+			Writer:   cam.stream,
+			Seed:     cam.cfg.Seed,
+			Faults:   cam.cfg.Faults,
+			Obs:      s.cfg.Obs,
+		})
+		if err != nil {
+			return nil, id, err
+		}
+		pumps[id] = pump
+	}
+	return pumps, "", nil
 }
 
 // Start binds the listener and initializes every stream.
@@ -204,40 +227,28 @@ func (s *Server) Start() error {
 	// unwinds the same way the stream-initialization failure above does: release
 	// the lock before calling into gortsplib.
 	ctx, cancel := context.WithCancel(context.Background())
-	for _, id := range s.order {
-		cam := s.cams[id]
-		pump, err := NewPump(PumpConfig{
-			CameraID: cam.id,
-			Media:    cam.cfg.Media,
-			Medi:     cam.medi,
-			Writer:   cam.stream,
-			Seed:     cam.cfg.Seed,
-			Faults:   cam.cfg.Faults,
-			Obs:      s.cfg.Obs,
-		})
-		if err != nil {
-			cancel()
-			streams := make([]*gortsplib.ServerStream, 0, len(s.order))
-			for _, done := range s.order {
-				if c := s.cams[done]; c.stream != nil {
-					streams = append(streams, c.stream)
-					c.stream = nil
-				}
+	pumps, failedPumpID, pumpErr := s.buildPumps()
+	if pumpErr != nil {
+		cancel()
+		streams := make([]*gortsplib.ServerStream, 0, len(s.order))
+		for _, done := range s.order {
+			if c := s.cams[done]; c.stream != nil {
+				streams = append(streams, c.stream)
+				c.stream = nil
 			}
-			s.mu.Unlock()
-
-			for _, stream := range streams {
-				stream.Close()
-			}
-			srv.Close()
-			return fmt.Errorf("rtsp: building pump for %q: %w", id, err)
 		}
-		s.pumps[id] = pump
+		s.mu.Unlock()
+
+		for _, stream := range streams {
+			stream.Close()
+		}
+		srv.Close()
+		return fmt.Errorf("rtsp: building pump for %q: %w", failedPumpID, pumpErr)
 	}
 	s.cancel = cancel
 
 	for _, id := range s.order {
-		pump := s.pumps[id]
+		pump := pumps[id]
 		camID := id
 		s.wg.Add(1)
 		go func() {
@@ -321,14 +332,6 @@ func (s *Server) Has(id string) bool {
 	defer s.mu.RUnlock()
 	_, ok := s.cams[id]
 	return ok
-}
-
-// Pump returns a camera's pump, or nil. Intended for deterministic stepping in
-// tests; the driver goroutine owns it otherwise.
-func (s *Server) Pump(id string) *Pump {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.pumps[id]
 }
 
 // Path returns the request path a camera answers on.
