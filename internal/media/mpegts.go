@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
 )
 
@@ -30,7 +29,9 @@ func parseMPEGTS(r io.Reader) (*Media, error) {
 		return nil, ErrNoH264Track
 	}
 
-	m := &Media{Codec: CodecH264}
+	ad := h264Adapter{}
+	var ps paramSets
+	var samples []rawSample
 
 	// Separate decoders for PTS and DTS. One decoder fed both series would
 	// interleave two sequences through a single 33-bit wraparound detector; that
@@ -51,19 +52,13 @@ func parseMPEGTS(r io.Reader) (*Media, error) {
 		if len(nalus) == 0 {
 			return nil
 		}
-		for _, n := range nalus {
-			switch h264.NALUType(n[0] & 0x1F) {
-			case h264.NALUTypeSPS:
-				m.SPS = n
-			case h264.NALUTypePPS:
-				m.PPS = n
-			}
-		}
-		m.AUs = append(m.AUs, AccessUnit{
-			NALUs:        nalus,
-			PTS:          ptsDec.Decode(pts),
-			DTS:          dtsDec.Decode(dts),
-			RandomAccess: h264.IsRandomAccess(nalus),
+		ad.Classify(nalus, &ps)
+		samples = append(samples, rawSample{
+			NALUs: nalus,
+			PTS:   ptsDec.Decode(pts),
+			DTS:   dtsDec.Decode(dts),
+			// SyncKnown stays false: MPEG-TS carries no sync-sample table, so
+			// the bitstream is the only authority available here.
 		})
 		return nil
 	})
@@ -79,22 +74,8 @@ func parseMPEGTS(r io.Reader) (*Media, error) {
 	if decodeErr != nil {
 		return nil, fmt.Errorf("media: decoding MPEG-TS: %w", decodeErr)
 	}
-	if len(m.AUs) == 0 {
-		return nil, errors.New("media: source contains no access units")
-	}
-	if len(m.SPS) == 0 || len(m.PPS) == 0 {
-		return nil, errors.New("media: source carries no in-band SPS/PPS")
-	}
 
-	var sps h264.SPS
-	if err := sps.Unmarshal(m.SPS); err != nil {
-		return nil, fmt.Errorf("media: parsing SPS: %w", err)
-	}
-	m.Width = sps.Width()
-	m.Height = sps.Height()
-	m.FPS = sps.FPS()
-
-	return m, nil
+	return assemble(ad, ps, samples)
 }
 
 // copyNALUs returns a copy of every non-empty NALU in au, dropping empty ones.

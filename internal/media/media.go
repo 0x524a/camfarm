@@ -28,7 +28,12 @@ type AccessUnit struct {
 
 // Media is parsed, immutable source video.
 type Media struct {
-	Codec  Codec
+	Codec Codec
+	// VPS is the H.265 video parameter set. It is nil for H.264, which has no
+	// equivalent. A nil check is sufficient to tell the two apart, so this stays
+	// a plain field rather than forcing a type switch on every consumer: each
+	// one already branches on Codec where codec-specific behaviour is needed.
+	VPS    []byte
 	SPS    []byte
 	PPS    []byte
 	Width  int
