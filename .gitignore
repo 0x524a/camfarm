@@ -4,3 +4,10 @@ ARCHITECTURE_PROMPT.md
 
 # Local Serena tooling state, not part of the project.
 .serena/
+
+# Per-developer Claude Code state. `.claude/settings.json` is deliberately not
+# ignored, so project-level configuration can be shared if that is ever wanted.
+# Worktrees live here as embedded git repositories: committing one would write a
+# gitlink with no submodule URL, which clones cannot populate.
+.claude/settings.local.json
+.claude/worktrees/
