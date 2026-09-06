@@ -359,9 +359,15 @@ MPEG-TS rather than a raw `.h264` stream — there is a reader for the former an
 `h264.AnnexB.Unmarshal` exists for the small case where Annex-B bytes are already in hand (RTP
 packetization from access units already extracted from MPEG-TS), but it aliases its input: the final
 line of its implementation is `(*a)[i] = buf[positions[i].start:positions[i].end]`, a slice of the
-caller's buffer, not a copy. The media loader therefore copies each NALU out before handing it to the
-pump, so the fixture's underlying byte buffer cannot be mutated out from under a packet still in
-flight (`internal/media/media.go`, `copyNALUs`).
+caller's buffer, not a copy. `copyNALUs` (`internal/media/mpegts.go:112`) copies each NALU out of
+that buffer before handing it to the pump — deliberate insurance, not a fix for a hazard that is live
+today. At the pinned `mediacommon`/`go-astits` versions each PES payload already arrives through a
+fresh per-call allocation, so nothing currently aliases a reused buffer; the copy guards against a
+future dependency upgrade that starts reusing one, since `mediacommon` still ships
+`NextBytesNoCopy` and its own (now-deprecated) `mpegts/buffered_reader.go` shows it once had a
+buffer-reusing reader on this same path. Because the parsed `*Media` is shared read-only across every
+camera in the fleet, that failure mode would be silent corruption rather than a crash — worth one
+extra allocation per NALU at load time to rule out in advance.
 
 **One committed fixture is required, not optional.** §2.6 establishes there is no media anywhere on
 the account to inherit. Without a bundled default, camfarm's own tests and every consumer's CI need
