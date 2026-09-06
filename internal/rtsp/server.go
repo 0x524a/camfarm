@@ -7,6 +7,7 @@
 package rtsp
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -76,6 +77,9 @@ type Server struct {
 	cams    map[string]*camera
 	order   []string
 	readers map[*gortsplib.ServerSession]string
+	pumps   map[string]*Pump
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 }
 
 // New validates cfg and returns an unstarted server.
@@ -96,6 +100,7 @@ func New(cfg Config) (*Server, error) {
 		ck:      cfg.Clock,
 		cams:    make(map[string]*camera, len(cfg.Cameras)),
 		readers: make(map[*gortsplib.ServerSession]string),
+		pumps:   make(map[string]*Pump, len(cfg.Cameras)),
 	}
 	if s.log == nil {
 		s.log = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -195,6 +200,54 @@ func (s *Server) Start() error {
 		return fmt.Errorf("rtsp: initializing stream for %q: %w", failedID, initErr)
 	}
 
+	// Build one pump per camera before publishing s.srv, so a failure here
+	// unwinds the same way the stream-initialization failure above does: release
+	// the lock before calling into gortsplib.
+	ctx, cancel := context.WithCancel(context.Background())
+	for _, id := range s.order {
+		cam := s.cams[id]
+		pump, err := NewPump(PumpConfig{
+			CameraID: cam.id,
+			Media:    cam.cfg.Media,
+			Medi:     cam.medi,
+			Writer:   cam.stream,
+			Seed:     cam.cfg.Seed,
+			Faults:   cam.cfg.Faults,
+			Obs:      s.cfg.Obs,
+		})
+		if err != nil {
+			cancel()
+			streams := make([]*gortsplib.ServerStream, 0, len(s.order))
+			for _, done := range s.order {
+				if c := s.cams[done]; c.stream != nil {
+					streams = append(streams, c.stream)
+					c.stream = nil
+				}
+			}
+			s.mu.Unlock()
+
+			for _, stream := range streams {
+				stream.Close()
+			}
+			srv.Close()
+			return fmt.Errorf("rtsp: building pump for %q: %w", id, err)
+		}
+		s.pumps[id] = pump
+	}
+	s.cancel = cancel
+
+	for _, id := range s.order {
+		pump := s.pumps[id]
+		camID := id
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			pump.run(ctx, s.ck, func(err error) {
+				s.log.Warn("pump write failed", "camera", camID, "err", err)
+			})
+		}()
+	}
+
 	s.srv = srv
 	addr := srv.NetListener().Addr().String()
 	n := len(s.order)
@@ -204,18 +257,29 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Close stops the server and every stream. Safe to call more than once.
+// Close stops the pumps, then the server and every stream. Safe to call more
+// than once.
 //
 // The lock is released before calling into gortsplib: Server.Close tears down
 // live sessions, and each teardown invokes OnSessionClose on its own goroutine,
 // which needs the same lock to drop its reader registration. Holding the lock
 // across that call would deadlock Close against every session it is trying to
 // close.
+//
+// s.wg.Wait() must run after the lock is released, for the same reason, and
+// before the streams are closed: a pump holds its own reference to its stream
+// and keeps writing to it until its context is cancelled and it returns, so
+// closing streams while a pump might still be running would be a write to a
+// closed stream.
 func (s *Server) Close() {
 	s.mu.Lock()
 	if s.srv == nil {
 		s.mu.Unlock()
 		return
+	}
+	if s.cancel != nil {
+		s.cancel()
+		s.cancel = nil
 	}
 	srv := s.srv
 	s.srv = nil
@@ -227,6 +291,8 @@ func (s *Server) Close() {
 		}
 	}
 	s.mu.Unlock()
+
+	s.wg.Wait()
 
 	for _, stream := range streams {
 		stream.Close()
@@ -255,6 +321,14 @@ func (s *Server) Has(id string) bool {
 	defer s.mu.RUnlock()
 	_, ok := s.cams[id]
 	return ok
+}
+
+// Pump returns a camera's pump, or nil. Intended for deterministic stepping in
+// tests; the driver goroutine owns it otherwise.
+func (s *Server) Pump(id string) *Pump {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pumps[id]
 }
 
 // Path returns the request path a camera answers on.

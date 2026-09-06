@@ -8,8 +8,10 @@ import (
 
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
+	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/gortsplib/v5/pkg/liberrors"
+	"github.com/pion/rtp"
 
 	"github.com/0x524a/camfarm/internal/media"
 	"github.com/0x524a/camfarm/internal/obs"
@@ -299,6 +301,53 @@ func TestConcurrentCloseAndDescribe(t *testing.T) {
 		s.Close()
 	}()
 	wg.Wait()
+}
+
+func TestMediaReachesAClient(t *testing.T) {
+	s := startServer(t, 2)
+
+	for _, id := range []string{"cam-00", "cam-01"} {
+		u, err := base.ParseURL(s.URL(id))
+		if err != nil {
+			t.Fatalf("parse %s: %v", id, err)
+		}
+		c := &gortsplib.Client{Scheme: u.Scheme, Host: u.Host}
+		if err := c.Start(); err != nil {
+			t.Fatalf("client start %s: %v", id, err)
+		}
+		desc, _, err := c.Describe(u)
+		if err != nil {
+			c.Close()
+			t.Fatalf("DESCRIBE %s: %v", id, err)
+		}
+		if err := c.SetupAll(desc.BaseURL, desc.Medias); err != nil {
+			c.Close()
+			t.Fatalf("SETUP %s: %v", id, err)
+		}
+		got := make(chan struct{}, 1)
+		c.OnPacketRTPAny(func(*description.Media, format.Format, *rtp.Packet) {
+			select {
+			case got <- struct{}{}:
+			default:
+			}
+		})
+		if _, err := c.Play(nil); err != nil {
+			c.Close()
+			t.Fatalf("PLAY %s: %v", id, err)
+		}
+		select {
+		case <-got:
+		case <-time.After(10 * time.Second):
+			c.Close()
+			t.Fatalf("no RTP from %s within 10s", id)
+		}
+		c.Close()
+	}
+
+	// The stream's own counters must agree that data went out.
+	if pkts, bytes := s.StreamStats("cam-00"); pkts == 0 || bytes == 0 {
+		t.Errorf("StreamStats = %d packets, %d bytes; want both non-zero", pkts, bytes)
+	}
 }
 
 func TestRejectsBadConfig(t *testing.T) {
