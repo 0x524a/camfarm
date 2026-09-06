@@ -32,8 +32,16 @@ type Recorder struct {
 	maxEvents int
 	seq       uint64
 	dropped   uint64
-	events    []Event
-	counters  map[string]*Counters
+	// events is a ring buffer: the oldest retained event lives at index
+	// head, and count of them are held, wrapping through len(events).
+	// Evicting the oldest event to make room for a new one is then an O(1)
+	// index update rather than an O(maxEvents) shift of the whole slice --
+	// that shift would happen under a mutex shared by every camera in the
+	// fleet, on every Fault() call once the log is full.
+	events   []Event
+	head     int
+	count    int
+	counters map[string]*Counters
 }
 
 // New returns a Recorder keeping at most maxEvents events. A non-positive
@@ -83,6 +91,9 @@ func (r *Recorder) Fault(cameraID string, frameIndex int, kind, detail string) {
 		r.dropped++
 		return
 	}
+	if r.events == nil {
+		r.events = make([]Event, r.maxEvents)
+	}
 	ev := Event{
 		Seq:        r.seq,
 		CameraID:   cameraID,
@@ -90,14 +101,19 @@ func (r *Recorder) Fault(cameraID string, frameIndex int, kind, detail string) {
 		Kind:       kind,
 		Detail:     detail,
 	}
-	if len(r.events) == r.maxEvents {
-		// Keep the most recent: a failing test cares about what just happened.
-		copy(r.events, r.events[1:])
-		r.events[len(r.events)-1] = ev
-		r.dropped++
+	if r.count < r.maxEvents {
+		// Still filling the buffer for the first time: append after the
+		// existing count, no eviction yet.
+		r.events[(r.head+r.count)%r.maxEvents] = ev
+		r.count++
 		return
 	}
-	r.events = append(r.events, ev)
+	// Full: overwrite the oldest slot and advance head past it. Keeping the
+	// most recent event is the point -- a failing test cares about what just
+	// happened.
+	r.events[r.head] = ev
+	r.head = (r.head + 1) % r.maxEvents
+	r.dropped++
 }
 
 // Counters returns a snapshot for one camera. An unknown camera reads as zero.
@@ -111,11 +127,17 @@ func (r *Recorder) Counters(cameraID string) Counters {
 }
 
 // Events returns a copy of the retained event log, oldest first.
+//
+// The log is stored as a ring buffer, so this un-rotates it: index 0 of the
+// backing array is not necessarily the oldest event once the buffer has
+// wrapped.
 func (r *Recorder) Events() []Event {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]Event, len(r.events))
-	copy(out, r.events)
+	out := make([]Event, r.count)
+	for i := 0; i < r.count; i++ {
+		out[i] = r.events[(r.head+i)%r.maxEvents]
+	}
 	return out
 }
 

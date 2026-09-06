@@ -73,9 +73,27 @@ func TestEventLogIsBoundedAndReportsDrops(t *testing.T) {
 	if ev[len(ev)-1].FrameIndex != 9 {
 		t.Errorf("last event frame = %d, want 9", ev[len(ev)-1].FrameIndex)
 	}
+	// Events() is documented oldest-first. Pin the whole sequence, not just the
+	// tail: checking only the last element would not catch a reversed log.
+	want := []int{6, 7, 8, 9}
+	for i, w := range want {
+		if ev[i].FrameIndex != w {
+			t.Fatalf("event[%d].FrameIndex = %d, want %d (full order = %v)", i, ev[i].FrameIndex, w, frameIndices(ev))
+		}
+	}
 	if got := r.Dropped(); got != 6 {
 		t.Errorf("Dropped() = %d, want 6", got)
 	}
+}
+
+// frameIndices extracts FrameIndex from a slice of Events, for failure
+// messages.
+func frameIndices(ev []Event) []int {
+	out := make([]int, len(ev))
+	for i, e := range ev {
+		out[i] = e.FrameIndex
+	}
+	return out
 }
 
 func TestEventsReturnsACopy(t *testing.T) {
