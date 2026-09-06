@@ -60,6 +60,31 @@ func TestStreamLabelsAreIndependent(t *testing.T) {
 	}
 }
 
+// A zero root is what an uninitialised Spec gives a caller, so it is the most
+// likely root in a bug report -- it must derive seeds with the same properties
+// as any other root, not some degenerate all-zero sequence.
+func TestZeroRootDerivesDistinctNonZeroSeeds(t *testing.T) {
+	root := Seed(0)
+
+	a := root.Camera(0)
+	b := root.Camera(0)
+	if a != b {
+		t.Fatalf("Camera(0) not deterministic from zero root: %#x vs %#x", a, b)
+	}
+
+	seen := map[Seed]int{}
+	for i := 0; i < 1000; i++ {
+		s := root.Camera(i)
+		if s == Seed(0) {
+			t.Fatalf("camera %d derives a zero seed from a zero root", i)
+		}
+		if prev, dup := seen[s]; dup {
+			t.Fatalf("camera %d collides with %d at %#x", i, prev, s)
+		}
+		seen[s] = i
+	}
+}
+
 func TestRandIsReproducible(t *testing.T) {
 	s := Seed(0x3f2a9c81).Camera(3).Stream("fault")
 

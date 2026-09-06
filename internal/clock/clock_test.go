@@ -84,6 +84,22 @@ func TestVirtualStopSilencesTicker(t *testing.T) {
 	}
 }
 
+// NewTicker documents that it panics on a non-positive interval; nothing
+// exercised that path before this test.
+func TestVirtualNewTickerPanicsOnNonPositiveDuration(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Second} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("NewTicker(%v) did not panic", d)
+				}
+			}()
+			v := NewVirtual(time.Unix(0, 0).UTC())
+			v.NewTicker(d)
+		}()
+	}
+}
+
 // TestVirtualConcurrentStopAndAdvance exercises Stop and Advance from two
 // goroutines at once, for a sustained stretch of wall-clock time rather than
 // a fixed number of iterations: a short, fixed-count race window frequently
