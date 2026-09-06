@@ -11,3 +11,6 @@ ARCHITECTURE_PROMPT.md
 # gitlink with no submodule URL, which clones cannot populate.
 .claude/settings.local.json
 .claude/worktrees/
+
+# Subagent-driven-development scratch: ledger, briefs, review packages.
+.superpowers/
