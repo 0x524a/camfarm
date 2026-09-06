@@ -302,6 +302,15 @@ func TestFixtureH265SourceProperties(t *testing.T) {
 	}
 }
 
+func fixtureH265BytesForTest(t *testing.T) []byte {
+	t.Helper()
+	b := fixtureH265Data()
+	if len(b) == 0 {
+		t.Fatal("embedded H265 fixture is empty")
+	}
+	return b
+}
+
 func TestFixtureH265ReportsDeterminism(t *testing.T) {
 	if !(FixtureH265Source{}).Deterministic() {
 		t.Error("H265 fixture source must be deterministic")

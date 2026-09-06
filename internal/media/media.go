@@ -48,7 +48,6 @@ type Media struct {
 // units. It is derived from FPS when the bitstream declares timing, and from
 // the mean DTS delta otherwise.
 func (m *Media) FrameDuration() int64 {
-	const clockRate = 90000
 	if m.FPS > 0 {
 		return int64(clockRate / m.FPS)
 	}
