@@ -3,9 +3,10 @@
 Date: 2026-09-05
 Status: design approved, implementation not started
 
-`camfarm` is a working name. It is unverified for availability or collision and must be settled
-before any public push. One constraint now applies to the choice: see
-[Naming and public claims](#11-naming-and-public-claims).
+`camfarm` is the settled name, checked for availability and collision on 2026-09-06 and kept. See
+[Consequence for the permanent name](#112-consequence-for-the-permanent-name) for what was checked
+and which alternatives were weighed, and [Naming and public claims](#11-naming-and-public-claims)
+for the one constraint that applies to it.
 
 ---
 
@@ -807,8 +808,21 @@ cannot be cited as required.
 ### 11.2 Consequence for the permanent name
 
 The word mark must not appear in the project's official name. **Any candidate name embedding "onvif"
-is ruled out.** `camfarm` remains a placeholder pending a check for availability, connotation and
-collision.
+is ruled out.** `camfarm` satisfies that, and was settled on 2026-09-06 after the check this section
+previously deferred.
+
+What was checked: no module matching `camfarm` exists on `pkg.go.dev`, so the Go module namespace is
+clear. GitHub has one exact-name repository, an unrelated ★1 TypeScript project in another field;
+it cannot conflict technically, because module paths are namespaced by owner
+(`github.com/0x524a/camfarm`). Not checked, and recorded as such: domain availability, npm and PyPI,
+trademark registers, and connotation in other languages.
+
+Alternatives weighed and rejected, both clean on GitHub and `pkg.go.dev`: `camerafarm`, which removes
+any ambiguity in the contraction at the cost of three characters, and `camfleet`, which has the
+distinction of matching `Fleet` — the package's central exported type, returned by `Start` and
+receiver of every top-level method. `camfleet` was the stronger candidate on those grounds and was
+declined in favour of keeping the established name. Recorded so that a later reader sees the name was
+verified and kept, rather than assuming the question was dropped.
 
 ### 11.3 Scope — what this does not do
 

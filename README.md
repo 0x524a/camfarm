@@ -1,7 +1,5 @@
 # camfarm
 
-`camfarm` is a working name and not final.
-
 A synthetic RTSP camera farm for testing video-analytics pipelines without
 physical hardware. It serves N fake cameras from one process, and it is built so
 that misbehaviour can be injected deterministically: a fault fires because a

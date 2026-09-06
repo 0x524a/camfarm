@@ -5,8 +5,10 @@ repository.
 
 ## Project name
 
-`camfarm` is a working name and a placeholder. Settle on a permanent name before the first push to a
-public remote; do not treat the current name as final.
+`camfarm` is settled, kept deliberately rather than by default. Availability and collision were
+checked on 2026-09-06: no module on `pkg.go.dev` matches, and the one exact-name GitHub repository
+is an unrelated project in another field, which cannot conflict in any case because Go module paths
+are namespaced by owner. The name must not embed the ONVIF word mark, and does not.
 
 ## What this project is
 
