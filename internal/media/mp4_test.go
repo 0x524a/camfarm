@@ -5,8 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
 	mp4codecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mp4/codecs"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/pmp4"
 )
@@ -169,6 +171,74 @@ func TestMediaFromPMP4NoSamplesIsRecognisable(t *testing.T) {
 	}
 }
 
+// TestParseISOBMFFNoSamplesEitherInterpretation pins the wrap that keeps
+// errNoSamples from escaping parseISOBMFF as its own bare, internal-only
+// sentinel. It writes a bare fMP4 init segment: ftyp+moov+mvex/trex describing
+// one H.264 track, but no moof/mdat pairs after it. Against that:
+//
+//   - the plain-MP4 reader either fails to parse it (the moov here has no
+//     sample tables filled in the way a real plain MP4's would) or parses it
+//     and finds zero samples, so either way parseISOBMFF falls through to the
+//     fragmented reader rather than returning early;
+//   - the fragmented reader parses the init segment fine (Init.Unmarshal does
+//     not require any moof to follow) but Parts.Unmarshal finds zero parts,
+//     since there is no moof box anywhere in the file, so mediaFromFMP4 also
+//     returns errNoSamples.
+//
+// That is the end of the line for both interpretations, and errNoSamples's own
+// doc comment says it "must not escape this package as a user-facing error",
+// so parseISOBMFF must wrap it with context there rather than returning it
+// bare. This goes through the real parseISOBMFF entry point end to end on
+// marshaled bytes, rather than unit-testing mediaFromPMP4/mediaFromFMP4 in
+// isolation, so it reproduces the dual-failure path exactly as a caller would
+// hit it.
+func TestParseISOBMFFNoSamplesEitherInterpretation(t *testing.T) {
+	ps := minimalH264SPS(t)
+	init := fmp4.Init{
+		Tracks: []*fmp4.InitTrack{
+			{
+				ID:        1,
+				TimeScale: 90000,
+				Codec:     &mp4codecs.H264{SPS: ps.SPS, PPS: ps.PPS},
+			},
+		},
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "init-only.mp4")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := init.Marshal(f); err != nil {
+		f.Close()
+		t.Fatalf("Init.Marshal: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	f, err = os.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+
+	_, parseErr := parseISOBMFF(f)
+	if parseErr == nil {
+		t.Fatal("parseISOBMFF() error = nil, want a wrapped errNoSamples")
+	}
+	if !errors.Is(parseErr, errNoSamples) {
+		t.Fatalf("parseISOBMFF() error = %v, want errors.Is(err, errNoSamples)", parseErr)
+	}
+	if parseErr.Error() == errNoSamples.Error() {
+		t.Fatalf("parseISOBMFF() error = %q, want wrapped with context, not the bare sentinel", parseErr.Error())
+	}
+	if !strings.Contains(parseErr.Error(), "plain or fragmented") {
+		t.Fatalf("parseISOBMFF() error = %q, want it to describe both interpretations having been tried", parseErr.Error())
+	}
+}
+
 // fragFlags makes ffmpeg emit a fragmented MP4: an empty moov followed by one
 // moof/mdat pair per keyframe-led fragment.
 var fragFlags = []string{"-movflags", "+frag_keyframe+empty_moov"}
@@ -222,10 +292,10 @@ func TestParseFragmentedMP4H265(t *testing.T) {
 	}
 }
 
-// TestFragmentedTimestampsAreMonotonic covers the join between fragments, which
-// is where a per-fragment DTS reset would show up: each moof carries a tfdt
-// baseTime, and ignoring it in favour of restarting at zero would make the
-// second fragment's timestamps go backwards.
+// TestParseFragmentedMP4TimestampsAreMonotonic covers the join between
+// fragments, which is where a per-fragment DTS reset would show up: each moof
+// carries a tfdt baseTime, and ignoring it in favour of restarting at zero
+// would make the second fragment's timestamps go backwards.
 func TestParseFragmentedMP4TimestampsAreMonotonic(t *testing.T) {
 	m := parseISOBMFFFile(t, remuxFixture(t, fixtureBytesForTest(t), "out.mp4", fragFlags...))
 	for i := 1; i < len(m.AUs); i++ {
