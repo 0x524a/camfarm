@@ -168,3 +168,70 @@ func TestMediaFromPMP4NoSamplesIsRecognisable(t *testing.T) {
 		t.Fatalf("mediaFromPMP4() error = %v, want errors.Is(err, errNoSamples)", err)
 	}
 }
+
+// fragFlags makes ffmpeg emit a fragmented MP4: an empty moov followed by one
+// moof/mdat pair per keyframe-led fragment.
+var fragFlags = []string{"-movflags", "+frag_keyframe+empty_moov"}
+
+func TestParseFragmentedMP4H264(t *testing.T) {
+	m := parseISOBMFFFile(t, remuxFixture(t, fixtureBytesForTest(t), "out.mp4", fragFlags...))
+
+	if m.Codec != CodecH264 {
+		t.Errorf("codec = %q, want %q", m.Codec, CodecH264)
+	}
+	if m.Width != fixtureWidth || m.Height != fixtureHeight {
+		t.Errorf("geometry = %dx%d, want %dx%d", m.Width, m.Height, fixtureWidth, fixtureHeight)
+	}
+	if len(m.AUs) != fixtureAUs {
+		t.Errorf("access units = %d, want %d", len(m.AUs), fixtureAUs)
+	}
+	if m.AUs[0].DTS != 0 {
+		t.Errorf("first DTS = %d, want 0", m.AUs[0].DTS)
+	}
+}
+
+// TestParseFragmentedMP4RandomAccess pins the outcome that assemble's
+// container/bitstream cross-check would normally guard, since this path
+// cannot use that check: see the SyncKnown: false comment in mediaFromFMP4.
+// The codec adapter is the only source of the random-access decision here,
+// so this asserts its answer directly rather than trusting a container
+// declaration mediacommon cannot reliably surface on this path.
+func TestParseFragmentedMP4RandomAccess(t *testing.T) {
+	m := parseISOBMFFFile(t, remuxFixture(t, fixtureBytesForTest(t), "out.mp4", fragFlags...))
+
+	want := map[int]bool{}
+	for _, k := range fixtureKeyframes {
+		want[k] = true
+	}
+	for i, au := range m.AUs {
+		if au.RandomAccess != want[i] {
+			t.Errorf("AU %d: RandomAccess = %v, want %v", i, au.RandomAccess, want[i])
+		}
+	}
+}
+
+func TestParseFragmentedMP4H265(t *testing.T) {
+	m := parseISOBMFFFile(t, remuxFixture(t, fixtureH265BytesForTest(t), "out.mp4", fragFlags...))
+
+	if m.Codec != CodecH265 {
+		t.Errorf("codec = %q, want %q", m.Codec, CodecH265)
+	}
+	if len(m.VPS) == 0 || len(m.SPS) == 0 || len(m.PPS) == 0 {
+		t.Errorf("parameter sets: vps=%d sps=%d pps=%d, want all non-empty",
+			len(m.VPS), len(m.SPS), len(m.PPS))
+	}
+}
+
+// TestFragmentedTimestampsAreMonotonic covers the join between fragments, which
+// is where a per-fragment DTS reset would show up: each moof carries a tfdt
+// baseTime, and ignoring it in favour of restarting at zero would make the
+// second fragment's timestamps go backwards.
+func TestParseFragmentedMP4TimestampsAreMonotonic(t *testing.T) {
+	m := parseISOBMFFFile(t, remuxFixture(t, fixtureBytesForTest(t), "out.mp4", fragFlags...))
+	for i := 1; i < len(m.AUs); i++ {
+		if m.AUs[i].DTS <= m.AUs[i-1].DTS {
+			t.Fatalf("DTS not increasing at %d: %d then %d (fragment boundary handled wrong?)",
+				i, m.AUs[i-1].DTS, m.AUs[i].DTS)
+		}
+	}
+}
