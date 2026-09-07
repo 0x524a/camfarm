@@ -260,12 +260,13 @@ func TestParseFragmentedMP4H264(t *testing.T) {
 	}
 }
 
-// TestParseFragmentedMP4RandomAccess pins the outcome that assemble's
-// container/bitstream cross-check would normally guard, since this path
-// cannot use that check: see the SyncKnown: false comment in mediaFromFMP4.
-// The codec adapter is the only source of the random-access decision here,
-// so this asserts its answer directly rather than trusting a container
-// declaration mediacommon cannot reliably surface on this path.
+// TestParseFragmentedMP4RandomAccess asserts the adapter's random-access
+// answer at every AU index, which matters most at each fragment's first
+// sample: that is the one index where assemble's container/bitstream
+// cross-check is skipped, because mediacommon cannot surface the container's
+// declaration there (see the SyncKnown: i != 0 comment in mediaFromFMP4).
+// For every other sample the cross-check is live and agrees, so this test is
+// the sole guard only at fragment boundaries, not across the whole path.
 func TestParseFragmentedMP4RandomAccess(t *testing.T) {
 	m := parseISOBMFFFile(t, remuxFixture(t, fixtureBytesForTest(t), "out.mp4", fragFlags...))
 
