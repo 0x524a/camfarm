@@ -8,6 +8,7 @@ import (
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph264"
+	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph265"
 	"github.com/pion/rtp"
 
 	"github.com/0x524a/camfarm/internal/clock"
@@ -31,6 +32,18 @@ type packetWriter interface {
 	WritePacketRTP(*description.Media, *rtp.Packet) error
 }
 
+// rtpEncoder is the narrow slice of a gortsplib RTP encoder the pump needs.
+//
+// Both rtph264.Encoder and rtph265.Encoder satisfy it structurally with
+// identical signatures, which is why Step needs no codec branch at all:
+// everything after Encode -- timestamp arithmetic, the fault seam, the loop
+// seam, sequence-number derivation -- is codec-independent. Keeping the branch
+// at construction rather than in Step is what makes this change unable to
+// regress any determinism guarantee.
+type rtpEncoder interface {
+	Encode(au [][]byte) ([]*rtp.Packet, error)
+}
+
 // PumpConfig configures a Pump.
 type PumpConfig struct {
 	CameraID string
@@ -50,7 +63,7 @@ type Pump struct {
 	id     string
 	medi   *description.Media
 	w      packetWriter
-	enc    *rtph264.Encoder
+	enc    rtpEncoder
 	aus    []media.AccessUnit
 	obs    *obs.Recorder
 	faults *fault.Engine
@@ -65,6 +78,38 @@ type Pump struct {
 	// restart. It is int64 and converted on use: RTP timestamps are 32-bit and
 	// wrapping is correct behaviour, not an error.
 	tsOffset int64
+}
+
+// newEncoder builds the seeded RTP encoder for a codec.
+func newEncoder(c media.Codec, payloadType uint8, ssrc *uint32, initialSeq *uint16) (rtpEncoder, error) {
+	switch c {
+	case media.CodecH264:
+		enc := &rtph264.Encoder{
+			PayloadType:           payloadType,
+			PacketizationMode:     1,
+			SSRC:                  ssrc,
+			InitialSequenceNumber: initialSeq,
+		}
+		if err := enc.Init(); err != nil {
+			return nil, fmt.Errorf("rtsp: initializing H264 RTP encoder: %w", err)
+		}
+		return enc, nil
+	case media.CodecH265:
+		// MaxDONDiff is left at its zero value deliberately: Init rejects any
+		// other value ("not supported (yet)"), and zero is correct anyway for a
+		// single-layer synthetic source with no decoding-order reordering.
+		enc := &rtph265.Encoder{
+			PayloadType:           payloadType,
+			SSRC:                  ssrc,
+			InitialSequenceNumber: initialSeq,
+		}
+		if err := enc.Init(); err != nil {
+			return nil, fmt.Errorf("rtsp: initializing H265 RTP encoder: %w", err)
+		}
+		return enc, nil
+	default:
+		return nil, fmt.Errorf("rtsp: no RTP encoder for codec %q", c)
+	}
 }
 
 // NewPump validates cfg and returns a Pump positioned at the first access unit.
@@ -100,14 +145,9 @@ func NewPump(cfg PumpConfig) (*Pump, error) {
 	ssrc := uint32(r.Uint64())
 	initialSeq := uint16(r.Uint64())
 
-	enc := &rtph264.Encoder{
-		PayloadType:           96,
-		PacketizationMode:     1,
-		SSRC:                  &ssrc,
-		InitialSequenceNumber: &initialSeq,
-	}
-	if err := enc.Init(); err != nil {
-		return nil, fmt.Errorf("rtsp: initializing RTP encoder: %w", err)
+	enc, err := newEncoder(cfg.Media.Codec, 96, &ssrc, &initialSeq)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Pump{

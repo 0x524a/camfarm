@@ -63,7 +63,9 @@ type camera struct {
 	cfg    CameraConfig
 	stream *gortsplib.ServerStream
 	medi   *description.Media
-	forma  *format.H264
+	// forma is the interface rather than a concrete type: a fleet may mix codecs,
+	// so this is per camera.
+	forma format.Format
 }
 
 // Server serves a fleet of synthetic RTSP cameras.
@@ -79,6 +81,33 @@ type Server struct {
 	readers map[*gortsplib.ServerSession]string
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
+}
+
+// newFormat builds the gortsplib format describing a camera's codec.
+func newFormat(m *media.Media) (format.Format, error) {
+	switch m.Codec {
+	case media.CodecH264:
+		return &format.H264{
+			PayloadTyp:        96,
+			SPS:               m.SPS,
+			PPS:               m.PPS,
+			PacketizationMode: 1,
+		}, nil
+	case media.CodecH265:
+		// There is deliberately no PacketizationMode here: RFC 7798 has no
+		// equivalent of RFC 6184's, so aggregation versus fragmentation is
+		// chosen per NALU by size rather than configured up front. Mirroring the
+		// H.264 literal and deleting this field is the natural mistake, and it
+		// is a compile error rather than a silent one.
+		return &format.H265{
+			PayloadTyp: 96,
+			VPS:        m.VPS,
+			SPS:        m.SPS,
+			PPS:        m.PPS,
+		}, nil
+	default:
+		return nil, fmt.Errorf("rtsp: no RTP format for codec %q", m.Codec)
+	}
 }
 
 // New validates cfg and returns an unstarted server.
@@ -119,6 +148,11 @@ func New(cfg Config) (*Server, error) {
 		}
 		if len(cc.Media.SPS) == 0 || len(cc.Media.PPS) == 0 {
 			return nil, fmt.Errorf("rtsp: camera %q media carries no SPS/PPS", cc.ID)
+		}
+		// H.265 needs three parameter sets, not two. Refused here rather than
+		// serving a stream no client can decode.
+		if cc.Media.Codec == media.CodecH265 && len(cc.Media.VPS) == 0 {
+			return nil, fmt.Errorf("rtsp: camera %q H265 media carries no VPS", cc.ID)
 		}
 		if _, dup := s.cams[cc.ID]; dup {
 			return nil, fmt.Errorf("rtsp: duplicate camera ID %q", cc.ID)
@@ -180,12 +214,12 @@ func (s *Server) Start() error {
 	var initErr error
 	for _, id := range s.order {
 		cam := s.cams[id]
-		cam.forma = &format.H264{
-			PayloadTyp:        96,
-			SPS:               cam.cfg.Media.SPS,
-			PPS:               cam.cfg.Media.PPS,
-			PacketizationMode: 1,
+		forma, err := newFormat(cam.cfg.Media)
+		if err != nil {
+			failedID, initErr = id, err
+			break
 		}
+		cam.forma = forma
 		cam.medi = &description.Media{
 			Type:    description.MediaTypeVideo,
 			Formats: []format.Format{cam.forma},

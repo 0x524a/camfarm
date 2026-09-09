@@ -1,6 +1,7 @@
 package rtsp
 
 import (
+	"bytes"
 	"strings"
 	"sync"
 	"testing"
@@ -362,5 +363,80 @@ func TestRejectsBadConfig(t *testing.T) {
 		if _, err := New(cfg); err == nil {
 			t.Errorf("%s: New succeeded, want an error", name)
 		}
+	}
+}
+
+// TestH265CameraAdvertisesVPS proves an H.265 camera reaches the wire as H.265
+// with all three parameter sets in its format, which is what a client needs to
+// decode. The H.264 path is unchanged and covered by the existing tests.
+func TestH265CameraAdvertisesVPS(t *testing.T) {
+	m, err := (media.FixtureH265Source{}).Load()
+	if err != nil {
+		t.Fatalf("load H265 fixture: %v", err)
+	}
+
+	forma, err := newFormat(m)
+	if err != nil {
+		t.Fatalf("newFormat: %v", err)
+	}
+	h265, ok := forma.(*format.H265)
+	if !ok {
+		t.Fatalf("newFormat returned %T, want *format.H265", forma)
+	}
+	if !bytes.Equal(h265.VPS, m.VPS) {
+		t.Error("format VPS does not match the media's")
+	}
+	if !bytes.Equal(h265.SPS, m.SPS) || !bytes.Equal(h265.PPS, m.PPS) {
+		t.Error("format SPS/PPS does not match the media's")
+	}
+	if got := forma.RTPMap(); !strings.Contains(got, "H265") {
+		t.Errorf("RTPMap = %q, want it to name H265", got)
+	}
+}
+
+func TestNewFormatH264Unchanged(t *testing.T) {
+	m, err := (media.FixtureSource{}).Load()
+	if err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	forma, err := newFormat(m)
+	if err != nil {
+		t.Fatalf("newFormat: %v", err)
+	}
+	h264, ok := forma.(*format.H264)
+	if !ok {
+		t.Fatalf("newFormat returned %T, want *format.H264", forma)
+	}
+	if h264.PacketizationMode != 1 {
+		t.Errorf("PacketizationMode = %d, want 1", h264.PacketizationMode)
+	}
+}
+
+func TestNewFormatRejectsUnknownCodec(t *testing.T) {
+	if _, err := newFormat(&media.Media{Codec: media.Codec("VP9")}); err == nil {
+		t.Fatal("expected an error for an unknown codec")
+	}
+}
+
+// TestH265CameraMissingVPSRefused proves the guard: H.265 needs three parameter
+// sets, and a camera lacking VPS must be refused at construction rather than
+// producing a stream no client can decode.
+func TestH265CameraMissingVPSRefused(t *testing.T) {
+	m, err := (media.FixtureH265Source{}).Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	stripped := *m
+	stripped.VPS = nil
+
+	_, err = New(Config{
+		Obs:     obs.New(16),
+		Cameras: []CameraConfig{{ID: "cam", Media: &stripped}},
+	})
+	if err == nil {
+		t.Fatal("expected an error for H265 media with no VPS")
+	}
+	if !strings.Contains(err.Error(), "VPS") {
+		t.Errorf("err = %q, want it to mention VPS", err.Error())
 	}
 }
