@@ -401,6 +401,13 @@ of sample durations. None is reliably caught by a per-container test, because a 
 test asserts against numbers derived the same wrong way. Comparing two independent paths to
 the same source catches all three.
 
+**Amended during implementation.** Byte-identity is asserted on VCL NALUs and on
+the parameter sets, not on whole access units. An MP4 muxer relocates parameter
+sets out-of-band into avcC or hvcC and may legitimately add or drop access-unit
+delimiters and SEI, so a whole-AU comparison fails for reasons that are a
+muxer's prerogative rather than a difference in coded video. The narrowed
+assertion still catches all three bugs this section names.
+
 ### 11.2 Remaining coverage
 
 - **Adapter table tests** with hand-built NALU lists, no container and no fixture. This is
@@ -473,6 +480,11 @@ line in the README's scope section.
 
 §5.5's disagreement-is-an-error rule may reject legal files. Validated against a real file
 before the slice is considered done; reversal, if needed, is a documented decision.
+
+**Validation outcome:** A 1920×1080 30fps H.264 test file (Liberty Bell, 5 minutes) loaded
+without error. Parsed to 9000 access units with 100 random-access frames and first DTS at 0,
+exactly matching expectation for that geometry, frame rate, and duration. The sync cross-check
+found no disagreement and did not reject a legal real-world file; no reversal is needed.
 
 ## 14. Public API delta
 
