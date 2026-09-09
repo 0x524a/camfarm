@@ -4,19 +4,42 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
+// ffprobeCodecName maps a fleet-advertised codec to the name ffprobe reports for
+// it. ffprobe calls H.265 "hevc", so comparing against the advertised string
+// directly would fail for a perfectly good stream.
+func ffprobeCodecName(advertised string) string {
+	switch advertised {
+	case "H264":
+		return "h264"
+	case "H265":
+		return "hevc"
+	default:
+		return strings.ToLower(advertised)
+	}
+}
+
 // TestFFprobeDecodesEveryCamera is the external oracle. A stream that an
 // independent decoder cannot play is broken however well it parses.
 func TestFFprobeDecodesEveryCamera(t *testing.T) {
+	h265Path := filepath.Join(t.TempDir(), "h265.ts")
+	if err := os.WriteFile(h265Path, h265FixtureBytes(t), 0o600); err != nil {
+		t.Fatalf("write H265 fixture: %v", err)
+	}
+
 	f := StartT(t, Spec{
 		Seed: 0x3f2a9c81,
 		Cameras: []CameraSpec{
 			{ID: "front-door"},
 			{ID: "lobby"},
+			{ID: "hevc-cam", Source: SourceSpec{Kind: SourceFile, Path: h265Path}},
 		},
 	})
 
@@ -51,8 +74,8 @@ func TestFFprobeDecodesEveryCamera(t *testing.T) {
 			t.Fatalf("%s: ffprobe saw %d video streams, want 1\n%s", st.ID, len(got.Streams), out)
 		}
 		s := got.Streams[0]
-		if s.CodecName != "h264" {
-			t.Errorf("%s: ffprobe decoded codec %q, want h264", st.ID, s.CodecName)
+		if want := ffprobeCodecName(st.Codec); s.CodecName != want {
+			t.Errorf("%s: ffprobe decoded codec %q, want %q", st.ID, s.CodecName, want)
 		}
 		// The decoded geometry must match what the fleet advertised. A mismatch
 		// here would be the sps_resolution_lie fault firing by accident, which
@@ -112,9 +135,19 @@ func TestTwentyFiveCamerasOnOneListener(t *testing.T) {
 // The whole point: the same seed and spec give the same camera seeds, so a
 // recorded failure can be reconstructed.
 func TestSameSeedReproducesCameraSeeds(t *testing.T) {
+	h265Path := filepath.Join(t.TempDir(), "h265.ts")
+	if err := os.WriteFile(h265Path, h265FixtureBytes(t), 0o600); err != nil {
+		t.Fatalf("write H265 fixture: %v", err)
+	}
+
 	spec := Spec{
-		Seed:    0xdeadbeefcafe,
-		Cameras: []CameraSpec{{ID: "a"}, {ID: "b"}, {ID: "c"}},
+		Seed: 0xdeadbeefcafe,
+		Cameras: []CameraSpec{
+			{ID: "a"},
+			{ID: "b"},
+			{ID: "c"},
+			{ID: "d", Source: SourceSpec{Kind: SourceFile, Path: h265Path}},
+		},
 	}
 
 	collect := func() (map[string]uint64, string) {

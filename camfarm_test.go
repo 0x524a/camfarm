@@ -5,8 +5,12 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/0x524a/camfarm/internal/media/fixture"
 )
 
 func minimalSpec() Spec {
@@ -229,4 +233,125 @@ func (f *fakeTB) Fatalf(format string, a ...any) { f.failed = format }
 
 func discardLoggerForTest() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// h265FixtureBytes writes the bundled H.265 fixture out through the media
+// package's own source, so this test does not duplicate the embed.
+func h265FixtureBytes(t *testing.T) []byte {
+	t.Helper()
+	b := fixture.BytesH265()
+	if len(b) == 0 {
+		t.Fatal("embedded H265 fixture is empty")
+	}
+	return b
+}
+
+// TestSpecAcceptsH265Source proves an H.265 camera reaches a running fleet and
+// reports its codec, which is the whole feature from a caller's point of view.
+func TestSpecAcceptsH265Camera(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h265.ts")
+	if err := os.WriteFile(path, h265FixtureBytes(t), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f := StartT(t, Spec{
+		Seed: 0x1234,
+		Cameras: []CameraSpec{{
+			ID:     "hevc",
+			Source: SourceSpec{Kind: SourceFile, Path: path},
+		}},
+	})
+
+	list := f.List()
+	if len(list) != 1 {
+		t.Fatalf("cameras = %d, want 1", len(list))
+	}
+	if list[0].Codec != "H265" {
+		t.Errorf("codec = %q, want H265", list[0].Codec)
+	}
+}
+
+// TestVideoSpecMatchingSourcePasses proves the redefined semantics: a value equal
+// to the source's own is an honoured request for passthrough, not a rejection.
+func TestVideoSpecMatchingSourcePasses(t *testing.T) {
+	f := StartT(t, Spec{
+		Seed: 1,
+		Cameras: []CameraSpec{{
+			ID:    "cam",
+			Video: VideoSpec{Codec: "H264", Width: 320, Height: 240, FPS: 15},
+		}},
+	})
+	if got := f.List()[0].Width; got != 320 {
+		t.Errorf("width = %d, want 320", got)
+	}
+}
+
+// TestVideoSpecRescaleRefusedNamingFutureBehaviour pins the mitigation for the
+// accepted risk in the design: because a spec refused today will silently begin
+// rescaling on a later version, the refusal must name that future behaviour so
+// the upgrade is at least legible from the error a developer sees now.
+func TestVideoSpecRescaleRefusedNamingFutureBehaviour(t *testing.T) {
+	_, err := Start(context.Background(), Spec{
+		Seed:    1,
+		Cameras: []CameraSpec{{ID: "cam", Video: VideoSpec{Width: 1920, Height: 1080}}},
+	})
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v, want ErrUnsupported", err)
+	}
+	if !strings.Contains(err.Error(), "rescaling is not implemented") {
+		t.Errorf("err = %q, want it to name rescaling as the unimplemented behaviour", err.Error())
+	}
+}
+
+func TestVideoSpecTranscodeRefusedNamingFutureBehaviour(t *testing.T) {
+	_, err := Start(context.Background(), Spec{
+		Seed:    1,
+		Cameras: []CameraSpec{{ID: "cam", Video: VideoSpec{Codec: "H265"}}},
+	})
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v, want ErrUnsupported", err)
+	}
+	if !strings.Contains(err.Error(), "transcoding") {
+		t.Errorf("err = %q, want it to name transcoding as the unimplemented behaviour", err.Error())
+	}
+}
+
+func TestSpecRejectsUnknownCodec(t *testing.T) {
+	_, err := Start(context.Background(), Spec{
+		Seed:    1,
+		Cameras: []CameraSpec{{ID: "cam", Video: VideoSpec{Codec: "VP9"}}},
+	})
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v, want ErrUnsupported", err)
+	}
+}
+
+// TestMixedCodecFleet proves per-camera codec dispatch is genuinely per camera
+// rather than per fleet.
+func TestMixedCodecFleet(t *testing.T) {
+	dir := t.TempDir()
+	h265Path := filepath.Join(dir, "h265.ts")
+	if err := os.WriteFile(h265Path, h265FixtureBytes(t), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f := StartT(t, Spec{
+		Seed: 0xABCD,
+		Cameras: []CameraSpec{
+			{ID: "avc"},
+			{ID: "hevc", Source: SourceSpec{Kind: SourceFile, Path: h265Path}},
+		},
+	})
+
+	byID := map[string]string{}
+	for _, s := range f.List() {
+		byID[s.ID] = s.Codec
+	}
+	if byID["avc"] != "H264" {
+		t.Errorf("avc codec = %q, want H264", byID["avc"])
+	}
+	if byID["hevc"] != "H265" {
+		t.Errorf("hevc codec = %q, want H265", byID["hevc"])
+	}
 }

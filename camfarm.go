@@ -227,22 +227,29 @@ func sourceDescription(s SourceSpec) string {
 	return src.Describe()
 }
 
-// checkAdvertised refuses a VideoSpec that disagrees with the source.
+// checkAdvertised refuses a VideoSpec asking for output the source cannot supply
+// as-is.
 //
-// Advertising a capability the stream does not deliver is a catalogued fault,
-// not a configuration option, so it is refused here rather than silently
-// honoured.
+// VideoSpec names the desired output (see its own documentation). This version
+// passes a source through and cannot transform it, so a request equal to the
+// source's own value is honoured and any other value is refused. Each refusal
+// names the behaviour that will eventually satisfy it, because that behaviour
+// arriving is a silent semantic change for a caller whose spec is refused today.
 func checkAdvertised(cs CameraSpec, m *media.Media) error {
+	if cs.Video.Codec != "" && media.Codec(cs.Video.Codec) != m.Codec {
+		return fmt.Errorf("%w: camera %q requests codec %q but its source is %q; transcoding between codecs is not implemented in this version",
+			ErrUnsupported, cs.ID, cs.Video.Codec, m.Codec)
+	}
 	if cs.Video.Width != 0 && cs.Video.Width != m.Width {
-		return fmt.Errorf("%w: camera %q advertises width %d but its source is %d wide; a deliberate mismatch is the sps_resolution_lie fault, not yet implemented",
+		return fmt.Errorf("%w: camera %q requests width %d but its source is %d wide; rescaling is not implemented in this version",
 			ErrUnsupported, cs.ID, cs.Video.Width, m.Width)
 	}
 	if cs.Video.Height != 0 && cs.Video.Height != m.Height {
-		return fmt.Errorf("%w: camera %q advertises height %d but its source is %d high; a deliberate mismatch is the sps_resolution_lie fault, not yet implemented",
+		return fmt.Errorf("%w: camera %q requests height %d but its source is %d high; rescaling is not implemented in this version",
 			ErrUnsupported, cs.ID, cs.Video.Height, m.Height)
 	}
 	if cs.Video.FPS != 0 && cs.Video.FPS != m.FPS {
-		return fmt.Errorf("%w: camera %q advertises %v fps but its source is %v; a deliberate mismatch is a catalogued fault, not yet implemented",
+		return fmt.Errorf("%w: camera %q requests %v fps but its source is %v; frame-rate conversion is not implemented in this version",
 			ErrUnsupported, cs.ID, cs.Video.FPS, m.FPS)
 	}
 	return nil

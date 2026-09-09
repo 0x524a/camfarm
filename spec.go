@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/0x524a/camfarm/internal/fault"
+	"github.com/0x524a/camfarm/internal/media"
 )
 
 // SourceKind selects where a camera's video comes from.
@@ -30,11 +31,19 @@ type SourceSpec struct {
 	Path string `json:"path,omitempty"`
 }
 
-// VideoSpec describes what a camera advertises.
+// VideoSpec describes the video a camera should produce.
 //
-// Zero fields mean "derive from the source". A value that disagrees with the
-// source is a deliberate lie about capabilities, which is a catalogued fault
-// rather than a configuration option, so this version rejects it.
+// Zero fields mean "whatever the source provides". A non-zero field is a request
+// for that output value, which this version can satisfy only when it already
+// matches the source, because it can pass a source through but not transform it.
+// Any other value is refused with ErrUnsupported.
+//
+// Note for callers pinning this API: these fields name the *desired output*, so
+// a spec that is refused today will be satisfied by rescaling or transcoding in a
+// later version rather than continuing to be refused. That is a deliberate
+// trade, taken for a smaller API surface than a separate output block would give;
+// the refusal messages name the behaviour that will eventually replace them so
+// the change is legible before it happens.
 type VideoSpec struct {
 	Codec  string  `json:"codec,omitempty"`
 	Width  int     `json:"width,omitempty"`
@@ -142,12 +151,16 @@ func (s Spec) validate() (Spec, error) {
 			return s, fmt.Errorf("camfarm: camera %q has unknown source kind %q", c.ID, c.Source.Kind)
 		}
 
-		// TODO: once a second codec exists, compare against the loaded
-		// source's actual codec (as checkAdvertised in camfarm.go does for
-		// width, height, and fps) rather than this literal string.
-		if c.Video.Codec != "" && c.Video.Codec != "H264" {
-			return s, fmt.Errorf("%w: camera %q advertises codec %q; only H264 is implemented",
-				ErrUnsupported, c.ID, c.Video.Codec)
+		// Only the string is checked here; comparing it against the loaded
+		// source's actual codec needs the source, so checkAdvertised in
+		// camfarm.go does that.
+		if c.Video.Codec != "" {
+			switch media.Codec(c.Video.Codec) {
+			case media.CodecH264, media.CodecH265:
+			default:
+				return s, fmt.Errorf("%w: camera %q requests codec %q; this version implements %q and %q",
+					ErrUnsupported, c.ID, c.Video.Codec, media.CodecH264, media.CodecH265)
+			}
 		}
 
 		for _, f := range c.Faults {
