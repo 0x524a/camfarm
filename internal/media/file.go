@@ -8,7 +8,8 @@ import (
 	"github.com/0x524a/camfarm/internal/media/fixture"
 )
 
-// FileSource reads media from an MPEG-TS file on disk.
+// FileSource reads media from a file on disk. The container is detected from
+// content, not from the filename.
 type FileSource struct {
 	Path string
 }
@@ -20,7 +21,7 @@ func (s *FileSource) Load() (*Media, error) {
 		return nil, fmt.Errorf("media: opening source: %w", err)
 	}
 	defer f.Close()
-	return parseMPEGTS(f)
+	return parseAny(f)
 }
 
 // Deterministic reports true: a file replays identically.
