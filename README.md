@@ -7,7 +7,7 @@ seed said it would, and the same seed and fleet spec reproduce it.
 
 ## Status
 
-Early. This version serves media and nothing else:
+Early:
 
 - **Works:** N RTSP cameras behind one listener, each on its own path; H.264 and
   H.265, served as whatever the source already is; MPEG-TS, plain MP4, and
