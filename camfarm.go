@@ -10,6 +10,7 @@ import (
 
 	"github.com/0x524a/camfarm/internal/media"
 	"github.com/0x524a/camfarm/internal/obs"
+	"github.com/0x524a/camfarm/internal/onvif"
 	"github.com/0x524a/camfarm/internal/rtsp"
 	"github.com/0x524a/camfarm/internal/seed"
 )
@@ -76,6 +77,7 @@ type Fleet struct {
 	log      *slog.Logger
 	rec      *obs.Recorder
 	srv      *rtsp.Server
+	onvifSrv *onvif.Server
 
 	mu        sync.Mutex
 	closed    bool
@@ -175,6 +177,34 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 		return nil, err
 	}
 	f.srv = srv
+
+	onvifCfg := onvif.Config{
+		Host: valid.Listen.Host,
+		Port: valid.Listen.ONVIFPort,
+		Log:  log,
+	}
+	for _, cs := range valid.Cameras {
+		cam := f.cameras[cs.ID]
+		onvifCfg.Cameras = append(onvifCfg.Cameras, onvif.CameraConfig{
+			ID:       cs.ID,
+			Media:    cam.media,
+			RTSPURL:  srv.URL(cs.ID),
+			Username: cs.Auth.Username,
+			Password: cs.Auth.Password,
+			Seed:     cam.seed,
+		})
+	}
+
+	onvifSrv, err := onvif.New(onvifCfg)
+	if err != nil {
+		srv.Close()
+		return nil, err
+	}
+	if err := onvifSrv.Start(); err != nil {
+		srv.Close()
+		return nil, err
+	}
+	f.onvifSrv = onvifSrv
 
 	if ctx != nil && ctx.Done() != nil {
 		watchCtx, cancel := context.WithCancel(ctx)
@@ -325,6 +355,9 @@ func (f *Fleet) Close() error {
 		stop()
 	}
 	f.srv.Close()
+	if f.onvifSrv != nil {
+		f.onvifSrv.Close()
+	}
 	f.log.Info("fleet closed")
 	return nil
 }
@@ -334,6 +367,11 @@ func (c *Camera) ID() string { return c.id }
 
 // RTSPURL returns the camera's stream URL.
 func (c *Camera) RTSPURL() string { return c.fleet.srv.URL(c.id) }
+
+// ONVIFEndpoint returns the camera's ONVIF base URL, e.g.
+// "http://127.0.0.1:PORT/onvif/front-door". Append "/device" or "/media" for
+// the two services this version serves.
+func (c *Camera) ONVIFEndpoint() string { return c.fleet.onvifSrv.Endpoint(c.id) }
 
 // Stats returns the camera's counters.
 func (c *Camera) Stats() Stats {
