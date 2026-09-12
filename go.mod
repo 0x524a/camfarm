@@ -26,3 +26,5 @@ require (
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
+
+replace github.com/0x524a/onvif-go => /home/ritwik/devBed/rj/onvif-go

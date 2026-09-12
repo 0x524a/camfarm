@@ -51,6 +51,17 @@ type VideoSpec struct {
 	FPS    float64 `json:"fps,omitempty"`
 }
 
+// AuthSpec configures a camera's ONVIF HTTP Digest challenge.
+//
+// The zero value means open — consistent with the pattern VideoSpec already
+// establishes ("zero fields mean whatever"), and consistent with RTSP itself
+// having no auth today. A camera only challenges when both fields are
+// non-empty.
+type AuthSpec struct {
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+}
+
 // FaultSpec configures one fault.
 type FaultSpec struct {
 	// Kind names a catalogued fault.
@@ -67,6 +78,9 @@ type ListenSpec struct {
 	// RTSPPort of zero requests an ephemeral port, readable back via
 	// Fleet.Addr.
 	RTSPPort int `json:"rtspPort,omitempty"`
+	// ONVIFPort of zero requests an ephemeral port for the ONVIF HTTP
+	// listener, readable back via Camera.ONVIFEndpoint.
+	ONVIFPort int `json:"onvifPort,omitempty"`
 }
 
 // CameraSpec describes one camera.
@@ -76,6 +90,7 @@ type CameraSpec struct {
 	Source SourceSpec  `json:"source,omitempty"`
 	Video  VideoSpec   `json:"video,omitempty"`
 	Faults []FaultSpec `json:"faults,omitempty"`
+	Auth   AuthSpec    `json:"auth,omitempty"`
 }
 
 // Spec describes a fleet.
@@ -175,6 +190,10 @@ func (s Spec) validate() (Spec, error) {
 			// which is worse than refusing.
 			return s, fmt.Errorf("%w: fault %q is catalogued but its effect is not implemented in this version",
 				ErrUnsupported, f.Kind)
+		}
+
+		if (c.Auth.Username == "") != (c.Auth.Password == "") {
+			return s, fmt.Errorf("camfarm: camera %q sets one of auth username/password but not both", c.ID)
 		}
 	}
 
