@@ -22,7 +22,6 @@ func digestAuthorization(username, password, method, uri, realm, nonce string) s
 		username, realm, nonce, uri, nc, cnonce, response)
 }
 
-
 func TestDigestNoAuthorizationChallenges(t *testing.T) {
 	d := newDigestAuth("admin", "secret", seed.Seed(1))
 	req := httptest.NewRequest("POST", "/onvif/cam/device", nil)
@@ -131,4 +130,3 @@ func extractNonce(t *testing.T, wwwAuth string) string {
 	}
 	return rest[:j]
 }
-
