@@ -71,6 +71,10 @@ func (d *digestAuth) verify(r *http.Request) bool {
 	}
 
 	ha1 := md5Hex(d.username + ":" + authRealm + ":" + d.password)
+	// params["uri"] is the client's own claim, taken as-is with no check
+	// against r.URL or the real request path. A real Digest server would
+	// cross-validate the two; camfarm does not, consistent with this type's
+	// "not a security boundary" doc comment above.
 	ha2 := md5Hex(r.Method + ":" + params["uri"])
 	want := md5Hex(strings.Join([]string{ha1, params["nonce"], params["nc"], params["cnonce"], params["qop"], ha2}, ":"))
 	if want != params["response"] {
