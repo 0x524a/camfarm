@@ -70,26 +70,31 @@ their APIs, since they may still be in flux:
   strategy: as of this writing its own design doc and plan make no reference to `camfarm` and rely on
   `onvif-go/server` directly plus hand-authored `httptest` fixtures.
 
+## Resolved architectural decisions
+
+1. **The central build decision: resolved as depend.** `internal/onvif` imports `onvif-go`'s
+   `server/` package directly (a real, direct `go.mod` require, not a `replace`-only placeholder) and
+   builds `camfarm`'s own transport, SOAP envelope handling, Digest auth, and dispatch natively around
+   it, rather than extracting, reimplementing, or upstreaming the generalization. Shipped throughout
+   the ONVIF control-plane slice (`docs/superpowers/plans/2026-09-09-onvif-control-plane-slice1.md`);
+   see that plan's design doc for the reasoning. This keeps one source of truth for the ONVIF SOAP
+   control-plane logic in `onvif-go` and accepts the coupling that comes with it — a future need to
+   diverge from `onvif-go`'s shape would have to be revisited then, not assumed away now.
+
+2. **Scope: RTSP only, or RTSP plus the ONVIF control plane: resolved as both, incrementally.**
+   `main` now serves RTSP media plus a real ONVIF control-plane slice (Device and Media services,
+   HTTP Digest auth, no WS-Security UsernameToken) — see the README's Status section for the current
+   "Works" list, which is the source of truth for what has actually shipped rather than this file.
+   This does not resolve how much further ONVIF goes: PTZ, Imaging, and WS-Discovery remain deferred,
+   not decided against, simply not built yet. Treat any future slice's own design doc as the place
+   that widens this, not an assumption made here.
+
 ## Open architectural decisions
 
 None of the following has been decided. Frame each honestly with evidence before committing to an
 answer; do not invent a decision that has not been made.
 
-1. **The central build decision.** Depend on `onvif-go`'s `server/` package as an import, extract
-   and generalize the relevant parts into this repository, or reimplement from scratch. Depending keeps
-   one source of truth for the ONVIF control-plane logic and lets improvements flow both ways, but
-   couples the two repositories and constrains this project to whatever shape that package already has.
-   Extracting risks two copies of the same ONVIF server drifting apart over time. Reimplementing
-   duplicates working code for no clear benefit. A fourth option: contribute the generalization
-   upstream to `onvif-go` itself, with this project becoming a thin fleet orchestrator over it.
-   Everything else about the ONVIF side of this project follows from how this is resolved, so resolve
-   it first.
-
-2. **Scope: RTSP only, or RTSP plus the ONVIF control plane.** The ONVIF half is the entire
-   differentiator against `mediamtx` plus ffmpeg loops, and it is also most of the remaining work.
-   Decide explicitly whether the first usable version includes it or defers it.
-
-3. **Where the video comes from.** Candidates: live-generated synthetic test patterns (needs an
+1. **Where the video comes from.** Candidates: live-generated synthetic test patterns (needs an
    encoder in the loop), pre-encoded looping fixture files (cheap, portable, but limited variety), or
    passthrough of a user-supplied file. Encoder options if generation is live: pure Go (very limited
    H.264/H.265 support today), cgo bindings to ffmpeg (capable, but costs portability and CI
@@ -97,7 +102,7 @@ answer; do not invent a decision that has not been made.
    decision determines whether the project can stay `CGO_ENABLED=0`, which in turn determines how
    easily it runs in CI and in a scratch container.
 
-4. **The fault-injection catalogue.** This is the actual value this project adds and deserves the
+2. **The fault-injection catalogue.** This is the actual value this project adds and deserves the
    most design attention of anything here. Candidates worth weighing: frame drop at a set rate, jitter
    and burst delay, mid-stream bitrate and resolution change, keyframe starvation, SDP that
    misdescribes the actual codec, a `DESCRIBE` response advertising capabilities the stream does not
@@ -107,28 +112,28 @@ answer; do not invent a decision that has not been made.
    each candidate to the standard that it maps to a real class of field bug rather than being arbitrary
    chaos for its own sake.
 
-5. **Determinism and reproducibility mechanics.** How a seed is threaded through fault selection,
+3. **Determinism and reproducibility mechanics.** How a seed is threaded through fault selection,
    how a failing test reports the seed and fleet spec needed to reproduce the failure, and what "replay
    this exact run" looks like as a developer-facing workflow.
 
-6. **Scale model.** Streams-per-process versus a process per camera, the resource ceiling of each
+4. **Scale model.** Streams-per-process versus a process per camera, the resource ceiling of each
    approach, and roughly how many cameras a developer laptop can serve under each. The answer here
    should be measured, not asserted; build the harness to make that measurement rather than guessing at
    a number up front.
 
-7. **Discovery.** Whether to implement a WS-Discovery responder so real ONVIF clients can find the
+5. **Discovery.** Whether to implement a WS-Discovery responder so real ONVIF clients can find the
    fake fleet via multicast, and if so, how to handle the practical failure modes: multicast inside
    Docker, multicast in CI runners, and multicast across network namespaces. This is a common source of
    "works on a laptop, fails in CI," so the design needs to account for it rather than discover it
    later.
 
-8. **Configuration surface.** A declarative fleet spec (for example YAML) describing the fleet up
+6. **Configuration surface.** A declarative fleet spec (for example YAML) describing the fleet up
    front, versus a runtime API for adding, removing, and mutating cameras while a test is running,
    versus offering both. Note that both `framelag` and `onvif-mcp` will want to drive this farm
    programmatically in the middle of a test run, which bears on how much a static declarative spec
    alone can cover.
 
-9. **Library or binary.** This needs to be usable as a Go library from another project's tests,
+7. **Library or binary.** This needs to be usable as a Go library from another project's tests,
    something like `camfarm.Start(spec)` inside a `TestMain`, and not only as a standalone binary,
    because making other repositories testable without hardware is the whole point of building it. Frame
    what that implies for the public API surface: what must be stable, what can change, and what a
