@@ -6,7 +6,7 @@ module github.com/0x524a/camfarm
 go 1.26.0
 
 require (
-	github.com/0x524a/onvif-go v0.0.0-00010101000000-000000000000
+	github.com/0x524a/onvif-go v1.1.6-0.20260912192404-86280cbb6b0d
 	github.com/bluenviron/gortsplib/v5 v5.6.5
 	github.com/bluenviron/mediacommon/v2 v2.9.4
 	github.com/pion/rtp v1.10.5
@@ -27,5 +27,3 @@ require (
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
-
-replace github.com/0x524a/onvif-go => /home/ritwik/devBed/rj/onvif-go
