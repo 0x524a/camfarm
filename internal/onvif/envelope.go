@@ -11,10 +11,15 @@ import (
 const soapContentType = `application/soap+xml; charset=utf-8`
 
 // parseAction extracts the SOAP body's first child element's local name (the
-// action) and its raw inner XML, by tokenizing rather than unmarshaling into
-// a namespace-pinned struct. Matching only the local name is what lets this
+// action) and that element's own XML, re-wrapped under its local name with
+// its inner content untouched, by tokenizing rather than unmarshaling into a
+// namespace-pinned struct. Matching only the local name is what lets this
 // accept SOAP 1.1 and SOAP 1.2 envelopes alike, and is why this package owns
 // its own transport instead of reusing onvif-go's client-side Envelope type.
+// The wrapping tag matters: onvif-go's request structs (e.g. the one behind
+// HandleGetStreamURI) have no XMLName and expect fields like ProfileToken as
+// a *child* of the root element, so passing the action's inner XML alone —
+// with ProfileToken itself as the root — would leave those fields unset.
 func parseAction(soapBody []byte) (name string, payload []byte, err error) {
 	dec := xml.NewDecoder(bytes.NewReader(soapBody))
 	depth := 0
@@ -40,7 +45,8 @@ func parseAction(soapBody []byte) (name string, payload []byte, err error) {
 				if err := dec.DecodeElement(&raw, &t); err != nil {
 					return "", nil, fmt.Errorf("onvif: decoding action %q: %w", t.Name.Local, err)
 				}
-				return t.Name.Local, raw.Inner, nil
+				outer := fmt.Sprintf("<%s>%s</%s>", t.Name.Local, raw.Inner, t.Name.Local)
+				return t.Name.Local, []byte(outer), nil
 			}
 		case xml.EndElement:
 			depth--
