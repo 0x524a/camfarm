@@ -105,6 +105,38 @@ func TestServerCredentialedCameraChallenges(t *testing.T) {
 	}
 }
 
+func TestServerStartTwiceFails(t *testing.T) {
+	srv := startTestServer(t, CameraConfig{ID: "cam", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/cam", Seed: seed.Seed(1)})
+
+	if err := srv.Start(); err == nil {
+		t.Error("second Start() succeeded, want an error")
+	}
+}
+
+func TestServerAddrNilAfterClose(t *testing.T) {
+	srv, err := New(Config{Host: "127.0.0.1", Cameras: []CameraConfig{
+		{ID: "cam", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/cam", Seed: seed.Seed(1)},
+	}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if srv.Addr() == nil {
+		t.Fatal("Addr() = nil after Start, want a bound address")
+	}
+
+	srv.Close()
+
+	if addr := srv.Addr(); addr != nil {
+		t.Errorf("Addr() = %v after Close, want nil", addr)
+	}
+	if ep := srv.Endpoint("cam"); ep != "" {
+		t.Errorf("Endpoint(%q) = %q after Close, want \"\"", "cam", ep)
+	}
+}
+
 func TestServerTwoCamerasIndependentEndpoints(t *testing.T) {
 	srv := startTestServer(t,
 		CameraConfig{ID: "a", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/a", Seed: seed.Seed(1)},

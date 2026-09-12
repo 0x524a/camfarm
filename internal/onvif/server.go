@@ -148,13 +148,19 @@ func New(cfg Config) (*Server, error) {
 
 // Start binds the listener and begins serving.
 func (s *Server) Start() error {
+	s.mu.Lock()
+	if s.ln != nil || s.http != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("onvif: already started")
+	}
+
 	ln, err := net.Listen("tcp", net.JoinHostPort(s.cfg.Host, strconv.Itoa(s.cfg.Port)))
 	if err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("onvif: listen: %w", err)
 	}
 	httpSrv := &http.Server{Handler: s.mux}
 
-	s.mu.Lock()
 	s.ln = ln
 	s.http = httpSrv
 	s.mu.Unlock()
@@ -174,6 +180,7 @@ func (s *Server) Close() {
 	s.mu.Lock()
 	httpSrv := s.http
 	s.http = nil
+	s.ln = nil
 	s.mu.Unlock()
 
 	if httpSrv != nil {
@@ -181,7 +188,8 @@ func (s *Server) Close() {
 	}
 }
 
-// Addr returns the bound address, or nil before a successful Start.
+// Addr returns the bound address, or nil before a successful Start or after
+// Close.
 func (s *Server) Addr() *net.TCPAddr {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -196,8 +204,8 @@ func (s *Server) Addr() *net.TCPAddr {
 }
 
 // Endpoint returns the base ONVIF URL for a camera (e.g.
-// "http://127.0.0.1:PORT/onvif/cam"), or "" if the camera is unknown or
-// before a successful Start.
+// "http://127.0.0.1:PORT/onvif/cam"), or "" if the camera is unknown, before
+// a successful Start, or after Close.
 func (s *Server) Endpoint(cameraID string) string {
 	addr := s.Addr()
 	if addr == nil {
