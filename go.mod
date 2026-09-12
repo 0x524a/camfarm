@@ -6,6 +6,7 @@ module github.com/0x524a/camfarm
 go 1.26.0
 
 require (
+	github.com/0x524a/onvif-go v0.0.0-00010101000000-000000000000
 	github.com/bluenviron/gortsplib/v5 v5.6.5
 	github.com/bluenviron/mediacommon/v2 v2.9.4
 	github.com/pion/rtp v1.10.5
