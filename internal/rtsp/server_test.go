@@ -2,6 +2,7 @@ package rtsp
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -415,6 +416,84 @@ func TestNewFormatH264Unchanged(t *testing.T) {
 func TestNewFormatRejectsUnknownCodec(t *testing.T) {
 	if _, err := newFormat(&media.Media{Codec: media.Codec("VP9")}); err == nil {
 		t.Fatal("expected an error for an unknown codec")
+	}
+}
+
+// TestAddCameraRunningServerServesNewCamera proves a camera added after Start
+// is immediately dialable, and that the camera present since Start is
+// unaffected by the addition.
+func TestAddCameraRunningServerServesNewCamera(t *testing.T) {
+	s := startServer(t, 1)
+	m := testMedia(t)
+
+	if err := s.AddCamera(CameraConfig{ID: "extra", Media: m, Seed: seed.Seed(99)}); err != nil {
+		t.Fatalf("AddCamera: %v", err)
+	}
+
+	for _, id := range []string{"cam-00", "extra"} {
+		u, err := base.ParseURL(s.URL(id))
+		if err != nil {
+			t.Fatalf("parse %s: %v", id, err)
+		}
+		c := &gortsplib.Client{Scheme: u.Scheme, Host: u.Host}
+		if err := c.Start(); err != nil {
+			t.Fatalf("client start %s: %v", id, err)
+		}
+		desc, _, err := c.Describe(u)
+		if err != nil {
+			c.Close()
+			t.Fatalf("DESCRIBE %s: %v", id, err)
+		}
+		if err := c.SetupAll(desc.BaseURL, desc.Medias); err != nil {
+			c.Close()
+			t.Fatalf("SETUP %s: %v", id, err)
+		}
+		got := make(chan struct{}, 1)
+		c.OnPacketRTPAny(func(*description.Media, format.Format, *rtp.Packet) {
+			select {
+			case got <- struct{}{}:
+			default:
+			}
+		})
+		if _, err := c.Play(nil); err != nil {
+			c.Close()
+			t.Fatalf("PLAY %s: %v", id, err)
+		}
+		select {
+		case <-got:
+		case <-time.After(10 * time.Second):
+			c.Close()
+			t.Fatalf("no RTP from %s within 10s", id)
+		}
+		c.Close()
+	}
+}
+
+func TestAddCameraBeforeStartRefused(t *testing.T) {
+	m := testMedia(t)
+	s, err := New(Config{Host: "127.0.0.1", Obs: obs.New(10), Cameras: []CameraConfig{
+		{ID: "a", Media: m, Seed: seed.Seed(1)},
+	}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.AddCamera(CameraConfig{ID: "b", Media: m, Seed: seed.Seed(2)}); !errors.Is(err, ErrNotStarted) {
+		t.Fatalf("AddCamera before Start: err = %v, want ErrNotStarted", err)
+	}
+}
+
+func TestAddCameraRejectsBadConfig(t *testing.T) {
+	s := startServer(t, 1)
+	m := testMedia(t)
+	cases := map[string]CameraConfig{
+		"empty id":     {ID: "", Media: m},
+		"nil media":    {ID: "new"},
+		"duplicate id": {ID: "cam-00", Media: m},
+	}
+	for name, cc := range cases {
+		if err := s.AddCamera(cc); err == nil {
+			t.Errorf("%s: AddCamera succeeded, want an error", name)
+		}
 	}
 }
 

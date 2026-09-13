@@ -66,6 +66,11 @@ type camera struct {
 	// forma is the interface rather than a concrete type: a fleet may mix codecs,
 	// so this is per camera.
 	forma format.Format
+	// cancel and done give this camera's pump its own lifecycle, independent of
+	// every other camera's. Populated for every camera, whether built during
+	// Start() or later by AddCamera, so RemoveCamera works uniformly on either.
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // Server serves a fleet of synthetic RTSP cameras.
@@ -79,6 +84,7 @@ type Server struct {
 	cams    map[string]*camera
 	order   []string
 	readers map[*gortsplib.ServerSession]string
+	rootCtx context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 }
@@ -137,30 +143,41 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	for _, cc := range cfg.Cameras {
-		if cc.ID == "" {
-			return nil, errors.New("rtsp: camera with an empty ID")
-		}
-		if strings.ContainsAny(cc.ID, "/?#") {
-			return nil, fmt.Errorf("rtsp: camera ID %q contains a character reserved in a URL path", cc.ID)
-		}
-		if cc.Media == nil {
-			return nil, fmt.Errorf("rtsp: camera %q has no media", cc.ID)
-		}
-		if len(cc.Media.SPS) == 0 || len(cc.Media.PPS) == 0 {
-			return nil, fmt.Errorf("rtsp: camera %q media carries no SPS/PPS", cc.ID)
-		}
-		// H.265 needs three parameter sets, not two. Refused here rather than
-		// serving a stream no client can decode.
-		if cc.Media.Codec == media.CodecH265 && len(cc.Media.VPS) == 0 {
-			return nil, fmt.Errorf("rtsp: camera %q H265 media carries no VPS", cc.ID)
-		}
-		if _, dup := s.cams[cc.ID]; dup {
-			return nil, fmt.Errorf("rtsp: duplicate camera ID %q", cc.ID)
+		if err := validateCameraConfig(cc, s.cams); err != nil {
+			return nil, err
 		}
 		s.cams[cc.ID] = &camera{id: cc.ID, cfg: cc}
 		s.order = append(s.order, cc.ID)
 	}
 	return s, nil
+}
+
+// validateCameraConfig checks one camera's config against the server's existing
+// cameras. Shared by New (which validates a whole batch against a map it is
+// still building) and AddCamera (which validates one camera against the
+// server's current, running set), so the two paths cannot drift.
+func validateCameraConfig(cc CameraConfig, existing map[string]*camera) error {
+	if cc.ID == "" {
+		return errors.New("rtsp: camera with an empty ID")
+	}
+	if strings.ContainsAny(cc.ID, "/?#") {
+		return fmt.Errorf("rtsp: camera ID %q contains a character reserved in a URL path", cc.ID)
+	}
+	if cc.Media == nil {
+		return fmt.Errorf("rtsp: camera %q has no media", cc.ID)
+	}
+	if len(cc.Media.SPS) == 0 || len(cc.Media.PPS) == 0 {
+		return fmt.Errorf("rtsp: camera %q media carries no SPS/PPS", cc.ID)
+	}
+	// H.265 needs three parameter sets, not two. Refused here rather than
+	// serving a stream no client can decode.
+	if cc.Media.Codec == media.CodecH265 && len(cc.Media.VPS) == 0 {
+		return fmt.Errorf("rtsp: camera %q H265 media carries no VPS", cc.ID)
+	}
+	if _, dup := existing[cc.ID]; dup {
+		return fmt.Errorf("rtsp: duplicate camera ID %q", cc.ID)
+	}
+	return nil
 }
 
 // buildPumps constructs one pump per camera, keyed by camera ID. Caller holds
@@ -261,6 +278,7 @@ func (s *Server) Start() error {
 	// unwinds the same way the stream-initialization failure above does: release
 	// the lock before calling into gortsplib.
 	ctx, cancel := context.WithCancel(context.Background())
+	s.rootCtx = ctx
 	pumps, failedPumpID, pumpErr := s.buildPumps()
 	if pumpErr != nil {
 		cancel()
@@ -284,10 +302,17 @@ func (s *Server) Start() error {
 	for _, id := range s.order {
 		pump := pumps[id]
 		camID := id
+		camCtx, camCancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		cam := s.cams[camID]
+		cam.cancel = camCancel
+		cam.done = done
+
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			pump.run(ctx, s.ck, func(err error) {
+			defer close(done)
+			pump.run(camCtx, s.ck, func(err error) {
 				s.log.Warn("pump write failed", "camera", camID, "err", err)
 			})
 		}()
@@ -343,6 +368,73 @@ func (s *Server) Close() {
 		stream.Close()
 	}
 	srv.Close()
+}
+
+// AddCamera registers and starts a new camera on an already-running server.
+// It runs the same validation New applies to a batch, so a spec that would be
+// refused at Start is refused here too.
+func (s *Server) AddCamera(cc CameraConfig) error {
+	s.mu.Lock()
+	if s.srv == nil {
+		s.mu.Unlock()
+		return ErrNotStarted
+	}
+	if err := validateCameraConfig(cc, s.cams); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+
+	forma, err := newFormat(cc.Media)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	medi := &description.Media{
+		Type:    description.MediaTypeVideo,
+		Formats: []format.Format{forma},
+	}
+	stream := &gortsplib.ServerStream{
+		Server: s.srv,
+		Desc:   &description.Session{Medias: []*description.Media{medi}},
+	}
+	if err := stream.Initialize(); err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("rtsp: initializing stream for %q: %w", cc.ID, err)
+	}
+
+	pump, err := NewPump(PumpConfig{
+		CameraID: cc.ID,
+		Media:    cc.Media,
+		Medi:     medi,
+		Writer:   stream,
+		Seed:     cc.Seed,
+		Faults:   cc.Faults,
+		Obs:      s.cfg.Obs,
+	})
+	if err != nil {
+		stream.Close()
+		s.mu.Unlock()
+		return fmt.Errorf("rtsp: building pump for %q: %w", cc.ID, err)
+	}
+
+	camCtx, camCancel := context.WithCancel(s.rootCtx)
+	done := make(chan struct{})
+	cam := &camera{id: cc.ID, cfg: cc, stream: stream, medi: medi, forma: forma, cancel: camCancel, done: done}
+	s.cams[cc.ID] = cam
+	s.order = append(s.order, cc.ID)
+
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer close(done)
+		pump.run(camCtx, s.ck, func(err error) {
+			s.log.Warn("pump write failed", "camera", cc.ID, "err", err)
+		})
+	}()
+	s.mu.Unlock()
+
+	s.log.Info("camera added", "camera", cc.ID)
+	return nil
 }
 
 // Addr returns the bound address, or nil before a successful Start.
