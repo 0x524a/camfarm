@@ -10,7 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/0x524a/camfarm/internal/media"
 	"github.com/0x524a/camfarm/internal/media/fixture"
+	"github.com/0x524a/camfarm/internal/onvif"
 )
 
 func minimalSpec() Spec {
@@ -432,5 +434,42 @@ func TestAddCameraH265Source(t *testing.T) {
 		if st.ID == "hevc" && st.Codec != "H265" {
 			t.Errorf("codec = %q, want H265", st.Codec)
 		}
+	}
+}
+
+// TestAddCameraRollsBackRTSPOnONVIFFailure exercises AddCamera's rollback path
+// for real, with no mocks: it desyncs the RTSP and ONVIF subsystems so that
+// f.srv.AddCamera succeeds but f.onvifSrv.AddCamera then fails, which is
+// exactly the branch the rollback exists to handle.
+func TestAddCameraRollsBackRTSPOnONVIFFailure(t *testing.T) {
+	f := StartT(t, minimalSpec())
+
+	// Register "collision" on the ONVIF side only, bypassing Fleet.AddCamera
+	// entirely. The RTSP side knows nothing about it, so f.srv.AddCamera below
+	// will succeed; the ONVIF side already has it, so f.onvifSrv.AddCamera will
+	// refuse it as a duplicate.
+	m := &media.Media{Codec: media.CodecH264, Width: 320, Height: 240, FPS: 30}
+	if err := f.onvifSrv.AddCamera(onvif.CameraConfig{ID: "collision", Media: m, RTSPURL: "http://127.0.0.1:9/collision"}); err != nil {
+		t.Fatalf("pre-registering collision on onvif: %v", err)
+	}
+
+	if _, err := f.AddCamera(CameraSpec{ID: "collision"}); err == nil {
+		t.Fatal("AddCamera succeeded despite the onvif-side ID collision, want an error")
+	}
+
+	for _, st := range f.List() {
+		if st.ID == "collision" {
+			t.Fatal("collision present in List() after a failed AddCamera; fleet bookkeeping corrupted")
+		}
+	}
+
+	// Clear the manually-registered onvif entry and retry for real: if the
+	// rollback had left a leftover entry in the RTSP dispatch table, this
+	// second, otherwise-clean attempt would spuriously fail as a duplicate.
+	if err := f.onvifSrv.RemoveCamera("collision"); err != nil {
+		t.Fatalf("removing manually-registered onvif entry: %v", err)
+	}
+	if _, err := f.AddCamera(CameraSpec{ID: "collision"}); err != nil {
+		t.Fatalf("AddCamera after rollback: %v", err)
 	}
 }

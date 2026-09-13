@@ -79,10 +79,10 @@ type Fleet struct {
 	srv      *rtsp.Server
 	onvifSrv *onvif.Server
 
-	mu        sync.Mutex
-	closed    bool
-	cameras   map[string]*Camera
-	order     []string
+	mu      sync.Mutex
+	closed  bool
+	cameras map[string]*Camera
+	order   []string
 	// sources caches each distinct SourceSpec's parsed media for the fleet's
 	// entire lifetime, so AddCamera can share a source the same way Start
 	// already shares one across cameras present from the beginning. Never
