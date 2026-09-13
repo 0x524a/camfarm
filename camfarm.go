@@ -314,6 +314,82 @@ func (f *Fleet) Addr() Addrs {
 	return Addrs{RTSP: f.srv.Addr()}
 }
 
+// AddCamera starts a new camera on a running fleet. It applies the same
+// validation Start does, so a spec that would be refused at Start is refused
+// here too.
+//
+// Its seed is derived from a monotonically increasing index that never
+// resets, even across RemoveCamera calls, so a dynamically added camera's
+// seed is a pure function of call order -- reproducible if that order is
+// logged, per CLAUDE.md's "Determinism is the product."
+func (f *Fleet) AddCamera(spec CameraSpec) (*Camera, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	seen := make(map[string]bool, len(f.cameras))
+	for id := range f.cameras {
+		seen[id] = true
+	}
+	cs, err := validateCameraSpec(spec, seen)
+	if err != nil {
+		return nil, err
+	}
+
+	m, ok := f.sources[cs.Source]
+	if !ok {
+		src, err := newSource(cs.Source)
+		if err != nil {
+			return nil, err
+		}
+		m, err = src.Load()
+		if err != nil {
+			return nil, fmt.Errorf("camfarm: camera %q: %w", cs.ID, err)
+		}
+		f.sources[cs.Source] = m
+	}
+	if err := checkAdvertised(cs, m); err != nil {
+		return nil, err
+	}
+
+	root := seed.Seed(f.spec.Seed)
+	camSeed := root.Camera(f.nextIndex)
+	f.nextIndex++
+
+	if err := f.srv.AddCamera(rtsp.CameraConfig{ID: cs.ID, Media: m, Seed: camSeed}); err != nil {
+		return nil, err
+	}
+
+	if f.onvifSrv != nil {
+		if err := f.onvifSrv.AddCamera(onvif.CameraConfig{
+			ID:       cs.ID,
+			Media:    m,
+			RTSPURL:  f.srv.URL(cs.ID),
+			Username: cs.Auth.Username,
+			Password: cs.Auth.Password,
+			Seed:     camSeed,
+		}); err != nil {
+			if rmErr := f.srv.RemoveCamera(cs.ID); rmErr != nil {
+				f.log.Warn("rollback: could not remove camera from rtsp after onvif AddCamera failed",
+					"camera", cs.ID, "err", rmErr)
+			}
+			return nil, err
+		}
+	}
+
+	cam := &Camera{
+		fleet:  f,
+		id:     cs.ID,
+		seed:   camSeed,
+		source: sourceDescription(cs.Source),
+		media:  m,
+	}
+	f.cameras[cs.ID] = cam
+	f.order = append(f.order, cs.ID)
+
+	f.log.Info("camera added", "camera", cs.ID, "seed", fmt.Sprintf("%#x", camSeed))
+	return cam, nil
+}
+
 // Camera returns one camera.
 func (f *Fleet) Camera(id string) (*Camera, error) {
 	f.mu.Lock()

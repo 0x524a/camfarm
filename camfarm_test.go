@@ -355,3 +355,82 @@ func TestMixedCodecFleet(t *testing.T) {
 		t.Errorf("hevc codec = %q, want H265", byID["hevc"])
 	}
 }
+
+func TestAddCameraAppearsInList(t *testing.T) {
+	f := StartT(t, minimalSpec())
+
+	cam, err := f.AddCamera(CameraSpec{ID: "new-cam"})
+	if err != nil {
+		t.Fatalf("AddCamera: %v", err)
+	}
+	if cam.ID() != "new-cam" {
+		t.Errorf("ID = %q", cam.ID())
+	}
+
+	list := f.List()
+	if len(list) != 3 {
+		t.Fatalf("List = %d cameras, want 3", len(list))
+	}
+	found := false
+	for _, st := range list {
+		if st.ID == "new-cam" {
+			found = true
+			if !strings.HasSuffix(st.RTSPURL, "/new-cam") {
+				t.Errorf("RTSPURL = %q", st.RTSPURL)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("new-cam not present in List()")
+	}
+
+	got, err := f.Camera("new-cam")
+	if err != nil {
+		t.Fatalf("Camera: %v", err)
+	}
+	if got.Stats().Seed == 0 || got.Stats().Seed == f.Seed() {
+		t.Error("added camera's seed is zero or equals the root seed; it must be derived")
+	}
+}
+
+func TestAddCameraDuplicateIDRefused(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	if _, err := f.AddCamera(CameraSpec{ID: "front-door"}); err == nil {
+		t.Fatal("AddCamera with a duplicate ID succeeded, want an error")
+	}
+}
+
+// Spec section 7.7's fault refusal must hold through AddCamera too, not only
+// through Start -- otherwise a dashboard could ask for a fault and silently
+// get a camera that never misbehaves.
+func TestAddCameraFaultRefused(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	_, err := f.AddCamera(CameraSpec{ID: "new-cam", Faults: []FaultSpec{{Kind: "frame_drop", Rate: 0.5}}})
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v, want ErrUnsupported", err)
+	}
+}
+
+// TestAddCameraH265Source proves AddCamera can add a camera whose source
+// kind differs from every camera present since Start, reusing the fleet's
+// media cache the same way Start shares a source across cameras.
+func TestAddCameraH265Source(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h265.ts")
+	if err := os.WriteFile(path, h265FixtureBytes(t), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f := StartT(t, minimalSpec())
+	cam, err := f.AddCamera(CameraSpec{ID: "hevc", Source: SourceSpec{Kind: SourceFile, Path: path}})
+	if err != nil {
+		t.Fatalf("AddCamera: %v", err)
+	}
+	_ = cam
+
+	for _, st := range f.List() {
+		if st.ID == "hevc" && st.Codec != "H265" {
+			t.Errorf("codec = %q, want H265", st.Codec)
+		}
+	}
+}
