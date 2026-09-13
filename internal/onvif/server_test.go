@@ -154,3 +154,59 @@ func TestServerTwoCamerasIndependentEndpoints(t *testing.T) {
 		}
 	}
 }
+
+func TestAddCameraRunningServerAnswersSOAP(t *testing.T) {
+	srv := startTestServer(t, CameraConfig{ID: "a", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/a", Seed: seed.Seed(1)})
+
+	if err := srv.AddCamera(CameraConfig{ID: "b", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/b", Seed: seed.Seed(2)}); err != nil {
+		t.Fatalf("AddCamera: %v", err)
+	}
+
+	for _, id := range []string{"a", "b"} {
+		resp := soapRequest(t, srv.Endpoint(id)+"/device", "GetDeviceInformation")
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Errorf("%s: status = %d, want 200", id, resp.StatusCode)
+		}
+	}
+}
+
+func TestAddCameraDuplicateIDRefused(t *testing.T) {
+	srv := startTestServer(t, CameraConfig{ID: "a", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/a", Seed: seed.Seed(1)})
+	if err := srv.AddCamera(CameraConfig{ID: "a", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/a2", Seed: seed.Seed(2)}); err == nil {
+		t.Fatal("AddCamera with a duplicate ID succeeded, want an error")
+	}
+}
+
+func TestRemoveCameraStops404OthersUnaffected(t *testing.T) {
+	srv := startTestServer(t,
+		CameraConfig{ID: "a", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/a", Seed: seed.Seed(1)},
+		CameraConfig{ID: "b", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/b", Seed: seed.Seed(2)},
+	)
+
+	if err := srv.RemoveCamera("a"); err != nil {
+		t.Fatalf("RemoveCamera: %v", err)
+	}
+
+	resp, err := http.Get("http://" + srv.Addr().String() + "/onvif/a/device")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("removed camera: status = %d, want 404", resp.StatusCode)
+	}
+
+	resp2 := soapRequest(t, srv.Endpoint("b")+"/device", "GetDeviceInformation")
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		t.Errorf("surviving camera: status = %d, want 200", resp2.StatusCode)
+	}
+}
+
+func TestRemoveUnknownCameraErrorsONVIF(t *testing.T) {
+	srv := startTestServer(t, CameraConfig{ID: "a", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/a", Seed: seed.Seed(1)})
+	if err := srv.RemoveCamera("nope"); err == nil {
+		t.Fatal("RemoveCamera of an unknown camera succeeded, want an error")
+	}
+}

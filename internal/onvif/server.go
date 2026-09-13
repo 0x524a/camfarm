@@ -85,58 +85,12 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{cfg: cfg, log: log, cams: make(map[string]*camera, len(cfg.Cameras))}
 
 	for _, cc := range cfg.Cameras {
-		if cc.ID == "" {
-			return nil, fmt.Errorf("onvif: camera with an empty ID")
+		if err := validateCameraConfig(cc, s.cams); err != nil {
+			return nil, err
 		}
-		if _, dup := s.cams[cc.ID]; dup {
-			return nil, fmt.Errorf("onvif: duplicate camera ID %q", cc.ID)
-		}
-		if cc.Media == nil {
-			return nil, fmt.Errorf("onvif: camera %q has no media", cc.ID)
-		}
-
-		srv, err := onvifserver.New(&onvifserver.Config{
-			DeviceInfo: onvifserver.DeviceInfo{
-				Manufacturer:    "camfarm",
-				Model:           "synthetic",
-				FirmwareVersion: "0.0.0",
-				SerialNumber:    cc.ID,
-				HardwareID:      cc.ID,
-			},
-			SupportPTZ:     false,
-			SupportImaging: false,
-			SupportEvents:  false,
-			Output:         io.Discard,
-			Profiles: []onvifserver.ProfileConfig{
-				{
-					Token: profileToken,
-					Name:  cc.ID,
-					VideoSource: onvifserver.VideoSourceConfig{
-						Token:      profileToken + "_source",
-						Name:       cc.ID,
-						Resolution: onvifserver.Resolution{Width: cc.Media.Width, Height: cc.Media.Height},
-						Framerate:  int(cc.Media.FPS),
-						Bounds:     onvifserver.Bounds{Width: cc.Media.Width, Height: cc.Media.Height},
-					},
-					VideoEncoder: onvifserver.VideoEncoderConfig{
-						Encoding:   string(cc.Media.Codec),
-						Resolution: onvifserver.Resolution{Width: cc.Media.Width, Height: cc.Media.Height},
-						Framerate:  int(cc.Media.FPS),
-					},
-					Snapshot: onvifserver.SnapshotConfig{Enabled: false},
-				},
-			},
-		})
+		cam, err := buildCamera(cc)
 		if err != nil {
-			return nil, fmt.Errorf("onvif: building server for %q: %w", cc.ID, err)
-		}
-		if err := srv.UpdateStreamURI(profileToken, cc.RTSPURL); err != nil {
-			return nil, fmt.Errorf("onvif: wiring stream URI for %q: %w", cc.ID, err)
-		}
-
-		cam := &camera{id: cc.ID, srv: srv}
-		if cc.Username != "" && cc.Password != "" {
-			cam.digest = newDigestAuth(cc.Username, cc.Password, cc.Seed.Stream("onvif-auth"))
+			return nil, err
 		}
 		s.cams[cc.ID] = cam
 	}
@@ -144,6 +98,106 @@ func New(cfg Config) (*Server, error) {
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/onvif/", s.handle)
 	return s, nil
+}
+
+// validateCameraConfig checks one camera's config against the server's
+// existing cameras. Shared by New and AddCamera so the two paths cannot
+// enforce different rules.
+func validateCameraConfig(cc CameraConfig, existing map[string]*camera) error {
+	if cc.ID == "" {
+		return fmt.Errorf("onvif: camera with an empty ID")
+	}
+	if cc.Media == nil {
+		return fmt.Errorf("onvif: camera %q has no media", cc.ID)
+	}
+	if _, dup := existing[cc.ID]; dup {
+		return fmt.Errorf("onvif: duplicate camera ID %q", cc.ID)
+	}
+	return nil
+}
+
+// buildCamera constructs the onvif-go server and digest state for one
+// camera. Shared by New and AddCamera.
+func buildCamera(cc CameraConfig) (*camera, error) {
+	srv, err := onvifserver.New(&onvifserver.Config{
+		DeviceInfo: onvifserver.DeviceInfo{
+			Manufacturer:    "camfarm",
+			Model:           "synthetic",
+			FirmwareVersion: "0.0.0",
+			SerialNumber:    cc.ID,
+			HardwareID:      cc.ID,
+		},
+		SupportPTZ:     false,
+		SupportImaging: false,
+		SupportEvents:  false,
+		Output:         io.Discard,
+		Profiles: []onvifserver.ProfileConfig{
+			{
+				Token: profileToken,
+				Name:  cc.ID,
+				VideoSource: onvifserver.VideoSourceConfig{
+					Token:      profileToken + "_source",
+					Name:       cc.ID,
+					Resolution: onvifserver.Resolution{Width: cc.Media.Width, Height: cc.Media.Height},
+					Framerate:  int(cc.Media.FPS),
+					Bounds:     onvifserver.Bounds{Width: cc.Media.Width, Height: cc.Media.Height},
+				},
+				VideoEncoder: onvifserver.VideoEncoderConfig{
+					Encoding:   string(cc.Media.Codec),
+					Resolution: onvifserver.Resolution{Width: cc.Media.Width, Height: cc.Media.Height},
+					Framerate:  int(cc.Media.FPS),
+				},
+				Snapshot: onvifserver.SnapshotConfig{Enabled: false},
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("onvif: building server for %q: %w", cc.ID, err)
+	}
+	if err := srv.UpdateStreamURI(profileToken, cc.RTSPURL); err != nil {
+		return nil, fmt.Errorf("onvif: wiring stream URI for %q: %w", cc.ID, err)
+	}
+
+	cam := &camera{id: cc.ID, srv: srv}
+	if cc.Username != "" && cc.Password != "" {
+		cam.digest = newDigestAuth(cc.Username, cc.Password, cc.Seed.Stream("onvif-auth"))
+	}
+	return cam, nil
+}
+
+// AddCamera registers a new camera's ONVIF endpoint. Safe to call whether or
+// not Start has been called yet: unlike internal/rtsp, nothing here depends
+// on a live listener, only on the in-memory dispatch map.
+func (s *Server) AddCamera(cc CameraConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := validateCameraConfig(cc, s.cams); err != nil {
+		return err
+	}
+	cam, err := buildCamera(cc)
+	if err != nil {
+		return err
+	}
+	s.cams[cc.ID] = cam
+
+	s.log.Info("camera added", "camera", cc.ID)
+	return nil
+}
+
+// RemoveCamera removes a camera's ONVIF endpoint. There is no goroutine or
+// stream to tear down on this side, so this is just the dispatch removal.
+func (s *Server) RemoveCamera(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.cams[id]; !ok {
+		return fmt.Errorf("onvif: unknown camera %q", id)
+	}
+	delete(s.cams, id)
+
+	s.log.Info("camera removed", "camera", id)
+	return nil
 }
 
 // Start binds the listener and begins serving.
