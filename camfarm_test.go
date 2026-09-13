@@ -473,3 +473,48 @@ func TestAddCameraRollsBackRTSPOnONVIFFailure(t *testing.T) {
 		t.Fatalf("AddCamera after rollback: %v", err)
 	}
 }
+
+func TestRemoveCameraRemovesFromList(t *testing.T) {
+	f := StartT(t, minimalSpec())
+
+	if err := f.RemoveCamera("front-door"); err != nil {
+		t.Fatalf("RemoveCamera: %v", err)
+	}
+
+	list := f.List()
+	if len(list) != 1 {
+		t.Fatalf("List = %d cameras, want 1", len(list))
+	}
+	if list[0].ID != "lobby" {
+		t.Errorf("surviving camera = %q, want lobby", list[0].ID)
+	}
+	if _, err := f.Camera("front-door"); !errors.Is(err, ErrUnknownCamera) {
+		t.Errorf("Camera(removed): err = %v, want ErrUnknownCamera", err)
+	}
+}
+
+func TestRemoveUnknownCameraErrorsFleet(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	if err := f.RemoveCamera("nope"); !errors.Is(err, ErrUnknownCamera) {
+		t.Errorf("err = %v, want ErrUnknownCamera", err)
+	}
+}
+
+// TestAddThenRemoveCamera proves the full lifecycle: a camera added at
+// runtime can also be removed at runtime.
+func TestAddThenRemoveCamera(t *testing.T) {
+	f := StartT(t, minimalSpec())
+
+	if _, err := f.AddCamera(CameraSpec{ID: "temp"}); err != nil {
+		t.Fatalf("AddCamera: %v", err)
+	}
+	if len(f.List()) != 3 {
+		t.Fatalf("List = %d cameras after add, want 3", len(f.List()))
+	}
+	if err := f.RemoveCamera("temp"); err != nil {
+		t.Fatalf("RemoveCamera: %v", err)
+	}
+	if len(f.List()) != 2 {
+		t.Fatalf("List = %d cameras after remove, want 2", len(f.List()))
+	}
+}

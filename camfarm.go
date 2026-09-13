@@ -2,6 +2,7 @@ package camfarm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -388,6 +389,43 @@ func (f *Fleet) AddCamera(spec CameraSpec) (*Camera, error) {
 
 	f.log.Info("camera added", "camera", cs.ID, "seed", fmt.Sprintf("%#x", camSeed))
 	return cam, nil
+}
+
+// RemoveCamera stops and removes a camera from a running fleet.
+//
+// It is best effort once id is known to exist: there is nothing a caller
+// could sensibly do to retry a partial removal, so both the RTSP and ONVIF
+// sides are always attempted regardless of whether the other failed.
+func (f *Fleet) RemoveCamera(id string) error {
+	f.mu.Lock()
+	if _, ok := f.cameras[id]; !ok {
+		f.mu.Unlock()
+		return fmt.Errorf("%w: %q", ErrUnknownCamera, id)
+	}
+	delete(f.cameras, id)
+	for i, camID := range f.order {
+		if camID == id {
+			f.order = append(f.order[:i], f.order[i+1:]...)
+			break
+		}
+	}
+	f.mu.Unlock()
+
+	var errs []error
+	if err := f.srv.RemoveCamera(id); err != nil {
+		errs = append(errs, err)
+	}
+	if f.onvifSrv != nil {
+		if err := f.onvifSrv.RemoveCamera(id); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+
+	f.log.Info("camera removed", "camera", id)
+	return nil
 }
 
 // Camera returns one camera.
