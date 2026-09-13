@@ -83,6 +83,16 @@ type Fleet struct {
 	closed    bool
 	cameras   map[string]*Camera
 	order     []string
+	// sources caches each distinct SourceSpec's parsed media for the fleet's
+	// entire lifetime, so AddCamera can share a source the same way Start
+	// already shares one across cameras present from the beginning. Never
+	// evicted, even after the last camera using an entry is removed: the
+	// bundled fixtures are small, and eviction has no proven need yet.
+	sources map[SourceSpec]*media.Media
+	// nextIndex is the next stable index handed to root.Camera for seed
+	// derivation. It only ever increases, even across RemoveCamera calls, so a
+	// dynamically added camera's seed is a pure function of call order.
+	nextIndex int
 	stopWatch func()
 }
 
@@ -115,11 +125,11 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 		log:      log,
 		rec:      obs.New(maxEvents),
 		cameras:  make(map[string]*Camera, len(valid.Cameras)),
+		sources:  make(map[SourceSpec]*media.Media),
 	}
 
 	// Parse each distinct source once and share it. This is the scale lever:
 	// M cameras on one source cost one copy of the media plus M encoder states.
-	loaded := make(map[SourceSpec]*media.Media)
 	root := seed.Seed(valid.Seed)
 
 	cfg := rtsp.Config{
@@ -130,7 +140,7 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 	}
 
 	for i, cs := range valid.Cameras {
-		m, ok := loaded[cs.Source]
+		m, ok := f.sources[cs.Source]
 		if !ok {
 			src, err := newSource(cs.Source)
 			if err != nil {
@@ -140,7 +150,7 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 			if err != nil {
 				return nil, fmt.Errorf("camfarm: camera %q: %w", cs.ID, err)
 			}
-			loaded[cs.Source] = m
+			f.sources[cs.Source] = m
 		}
 		if err := checkAdvertised(cs, m); err != nil {
 			return nil, err
@@ -214,6 +224,8 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 			_ = f.Close()
 		}()
 	}
+
+	f.nextIndex = len(valid.Cameras)
 
 	log.Info("fleet started",
 		"cameras", len(f.order),
