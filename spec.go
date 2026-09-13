@@ -138,65 +138,79 @@ func (s Spec) validate() (Spec, error) {
 	copy(cameras, s.Cameras)
 
 	for i := range cameras {
-		c := &cameras[i]
-		if c.ID == "" {
-			return s, fmt.Errorf("camfarm: camera %d has an empty ID", i)
+		c, err := validateCameraSpec(cameras[i], seen)
+		if err != nil {
+			return s, err
 		}
-		if strings.ContainsAny(c.ID, "/?# ") {
-			return s, fmt.Errorf("camfarm: camera ID %q contains a character reserved in a URL path", c.ID)
-		}
-		if seen[c.ID] {
-			return s, fmt.Errorf("camfarm: duplicate camera ID %q", c.ID)
-		}
-		seen[c.ID] = true
-
-		if c.Source.Kind == "" {
-			c.Source.Kind = SourceFixture
-		}
-		switch c.Source.Kind {
-		case SourceFixture:
-			if c.Source.Path != "" {
-				return s, fmt.Errorf("camfarm: camera %q uses the bundled fixture but also sets a path", c.ID)
-			}
-		case SourceFile:
-			if c.Source.Path == "" {
-				return s, fmt.Errorf("camfarm: camera %q has source kind %q but no path", c.ID, SourceFile)
-			}
-		default:
-			return s, fmt.Errorf("camfarm: camera %q has unknown source kind %q", c.ID, c.Source.Kind)
-		}
-
-		// Only the string is checked here; comparing it against the loaded
-		// source's actual codec needs the source, so checkAdvertised in
-		// camfarm.go does that.
-		if c.Video.Codec != "" {
-			switch media.Codec(c.Video.Codec) {
-			case media.CodecH264, media.CodecH265:
-			default:
-				return s, fmt.Errorf("%w: camera %q requests codec %q; this version implements %q and %q",
-					ErrUnsupported, c.ID, c.Video.Codec, media.CodecH264, media.CodecH265)
-			}
-		}
-
-		for _, f := range c.Faults {
-			if !fault.Known(fault.Kind(f.Kind)) {
-				return s, fmt.Errorf("camfarm: camera %q requests unknown fault kind %q", c.ID, f.Kind)
-			}
-			if f.Rate < 0 || f.Rate > 1 {
-				return s, fmt.Errorf("camfarm: camera %q fault %q has rate %v outside [0,1]", c.ID, f.Kind, f.Rate)
-			}
-			// Catalogued, validated, and refused. Accepting it silently would
-			// make a test that asked for a fault pass while nothing misbehaved,
-			// which is worse than refusing.
-			return s, fmt.Errorf("%w: fault %q is catalogued but its effect is not implemented in this version",
-				ErrUnsupported, f.Kind)
-		}
-
-		if (c.Auth.Username == "") != (c.Auth.Password == "") {
-			return s, fmt.Errorf("camfarm: camera %q sets one of auth username/password but not both", c.ID)
-		}
+		cameras[i] = c
 	}
 
 	s.Cameras = cameras
 	return s, nil
+}
+
+// validateCameraSpec checks one camera's spec and fills defaults on a copy,
+// marking its ID as seen. Shared by Spec.validate (which builds seen fresh
+// for a whole spec) and Fleet.AddCamera (which seeds it from the fleet's
+// current camera IDs), so the two paths cannot enforce different rules for
+// what a valid CameraSpec is.
+func validateCameraSpec(c CameraSpec, seen map[string]bool) (CameraSpec, error) {
+	if c.ID == "" {
+		return c, fmt.Errorf("camfarm: camera has an empty ID")
+	}
+	if strings.ContainsAny(c.ID, "/?# ") {
+		return c, fmt.Errorf("camfarm: camera ID %q contains a character reserved in a URL path", c.ID)
+	}
+	if seen[c.ID] {
+		return c, fmt.Errorf("camfarm: duplicate camera ID %q", c.ID)
+	}
+	seen[c.ID] = true
+
+	if c.Source.Kind == "" {
+		c.Source.Kind = SourceFixture
+	}
+	switch c.Source.Kind {
+	case SourceFixture:
+		if c.Source.Path != "" {
+			return c, fmt.Errorf("camfarm: camera %q uses the bundled fixture but also sets a path", c.ID)
+		}
+	case SourceFile:
+		if c.Source.Path == "" {
+			return c, fmt.Errorf("camfarm: camera %q has source kind %q but no path", c.ID, SourceFile)
+		}
+	default:
+		return c, fmt.Errorf("camfarm: camera %q has unknown source kind %q", c.ID, c.Source.Kind)
+	}
+
+	// Only the string is checked here; comparing it against the loaded
+	// source's actual codec needs the source, so checkAdvertised in
+	// camfarm.go does that.
+	if c.Video.Codec != "" {
+		switch media.Codec(c.Video.Codec) {
+		case media.CodecH264, media.CodecH265:
+		default:
+			return c, fmt.Errorf("%w: camera %q requests codec %q; this version implements %q and %q",
+				ErrUnsupported, c.ID, c.Video.Codec, media.CodecH264, media.CodecH265)
+		}
+	}
+
+	for _, f := range c.Faults {
+		if !fault.Known(fault.Kind(f.Kind)) {
+			return c, fmt.Errorf("camfarm: camera %q requests unknown fault kind %q", c.ID, f.Kind)
+		}
+		if f.Rate < 0 || f.Rate > 1 {
+			return c, fmt.Errorf("camfarm: camera %q fault %q has rate %v outside [0,1]", c.ID, f.Kind, f.Rate)
+		}
+		// Catalogued, validated, and refused. Accepting it silently would make a
+		// test that asked for a fault pass while nothing misbehaved, which is
+		// worse than refusing.
+		return c, fmt.Errorf("%w: fault %q is catalogued but its effect is not implemented in this version",
+			ErrUnsupported, f.Kind)
+	}
+
+	if (c.Auth.Username == "") != (c.Auth.Password == "") {
+		return c, fmt.Errorf("camfarm: camera %q sets one of auth username/password but not both", c.ID)
+	}
+
+	return c, nil
 }
