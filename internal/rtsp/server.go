@@ -437,6 +437,47 @@ func (s *Server) AddCamera(cc CameraConfig) error {
 	return nil
 }
 
+// RemoveCamera stops and removes a camera from an already-running server. It
+// removes the camera from the dispatch table first, so a DESCRIBE/SETUP
+// arriving after this call 404s immediately, then stops its pump and closes
+// its stream. A client already mid-session on the camera is not forcibly
+// disconnected: it simply stops receiving new packets.
+//
+// Guarded the same way AddCamera is: Close() nils s.srv but does not clear
+// s.cams or s.order, so without this check a call after Close would find the
+// camera, then dereference the nil *gortsplib.ServerStream Close already
+// cleared, panicking in stream.Close() below.
+func (s *Server) RemoveCamera(id string) error {
+	s.mu.Lock()
+	if s.srv == nil {
+		s.mu.Unlock()
+		return ErrNotStarted
+	}
+	cam, ok := s.cams[id]
+	if !ok {
+		s.mu.Unlock()
+		return fmt.Errorf("rtsp: unknown camera %q", id)
+	}
+	delete(s.cams, id)
+	for i, camID := range s.order {
+		if camID == id {
+			s.order = append(s.order[:i], s.order[i+1:]...)
+			break
+		}
+	}
+	stream := cam.stream
+	cancel := cam.cancel
+	done := cam.done
+	s.mu.Unlock()
+
+	cancel()
+	<-done
+	stream.Close()
+
+	s.log.Info("camera removed", "camera", id)
+	return nil
+}
+
 // Addr returns the bound address, or nil before a successful Start.
 func (s *Server) Addr() *net.TCPAddr {
 	s.mu.RLock()

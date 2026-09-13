@@ -519,3 +519,105 @@ func TestH265CameraMissingVPSRefused(t *testing.T) {
 		t.Errorf("err = %q, want it to mention VPS", err.Error())
 	}
 }
+
+// TestRemoveCameraStopsServingOthersUnaffected proves removal takes effect
+// immediately (new DESCRIBE 404s) and leaves every other camera untouched.
+func TestRemoveCameraStopsServingOthersUnaffected(t *testing.T) {
+	s := startServer(t, 2)
+
+	if err := s.RemoveCamera("cam-00"); err != nil {
+		t.Fatalf("RemoveCamera: %v", err)
+	}
+
+	u, err := base.ParseURL(s.URL("cam-00"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	c, _ := newTestClient(u)
+	if err := c.Start(); err != nil {
+		t.Fatalf("client start: %v", err)
+	}
+	defer c.Close()
+	if _, _, err := c.Describe(u); err == nil {
+		t.Fatal("DESCRIBE of a removed camera succeeded")
+	} else if !strings.Contains(err.Error(), "404") {
+		t.Errorf("err = %v, want a 404", err)
+	}
+
+	// cam-01 must still work.
+	u2, err := base.ParseURL(s.URL("cam-01"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	c2, _ := newTestClient(u2)
+	if err := c2.Start(); err != nil {
+		t.Fatalf("client start: %v", err)
+	}
+	defer c2.Close()
+	if _, _, err := c2.Describe(u2); err != nil {
+		t.Fatalf("DESCRIBE cam-01 after removing cam-00: %v", err)
+	}
+}
+
+// TestRemoveCameraPresentSinceStart proves removal is symmetric: a camera
+// configured at Start, not only one added later via AddCamera, can be
+// removed. This is the fix that makes "off-load a stream" work for any
+// camera the dashboard shows, not only ones it added itself.
+func TestRemoveCameraPresentSinceStart(t *testing.T) {
+	s := startServer(t, 1)
+	if err := s.RemoveCamera("cam-00"); err != nil {
+		t.Fatalf("RemoveCamera(camera present since Start): %v", err)
+	}
+	if s.Has("cam-00") {
+		t.Fatal("cam-00 still present after RemoveCamera")
+	}
+}
+
+// TestRemoveCameraWithActiveSessionDoesNotPanic proves removing a camera a
+// client is actively playing does not panic or race; the session simply stops
+// receiving new packets.
+func TestRemoveCameraWithActiveSessionDoesNotPanic(t *testing.T) {
+	s := startServer(t, 1)
+	u, err := base.ParseURL(s.URL("cam-00"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	c := &gortsplib.Client{Scheme: u.Scheme, Host: u.Host}
+	if err := c.Start(); err != nil {
+		t.Fatalf("client start: %v", err)
+	}
+	defer c.Close()
+	desc, _, err := c.Describe(u)
+	if err != nil {
+		t.Fatalf("DESCRIBE: %v", err)
+	}
+	if err := c.SetupAll(desc.BaseURL, desc.Medias); err != nil {
+		t.Fatalf("SETUP: %v", err)
+	}
+	if _, err := c.Play(nil); err != nil {
+		t.Fatalf("PLAY: %v", err)
+	}
+
+	if err := s.RemoveCamera("cam-00"); err != nil {
+		t.Fatalf("RemoveCamera with an active session: %v", err)
+	}
+}
+
+func TestRemoveUnknownCameraErrors(t *testing.T) {
+	s := startServer(t, 1)
+	if err := s.RemoveCamera("nope"); err == nil {
+		t.Fatal("RemoveCamera of an unknown camera succeeded, want an error")
+	}
+}
+
+// TestRemoveCameraAfterCloseRefused proves RemoveCamera does not panic on a
+// closed server. Close() nils out s.srv and every cam.stream but does not
+// clear s.cams/s.order, so without this guard the lookup below would succeed
+// and then dereference a nil *gortsplib.ServerStream in stream.Close().
+func TestRemoveCameraAfterCloseRefused(t *testing.T) {
+	s := startServer(t, 1)
+	s.Close()
+	if err := s.RemoveCamera("cam-00"); !errors.Is(err, ErrNotStarted) {
+		t.Fatalf("RemoveCamera after Close: err = %v, want ErrNotStarted", err)
+	}
+}
