@@ -73,13 +73,16 @@ This is the real work. `internal/rtsp.Server.Start()` today builds *every* pump 
 way to stop a single pump without stopping all of them.
 
 **Refactor:** `Server` keeps the root context it derives `cancel` from (not just the `cancel` func).
-A pump built during `Start()` still runs directly off that root context, as today — `Close()`
-cancelling the root still stops it. A pump built by `AddCamera` instead runs on its own
-`context.WithCancel(rootCtx)` child, so cancelling the root (via `Close()`) still cancels it by
-ordinary context propagation, but it can *also* be cancelled individually. Alongside its own
-`cancel`, it gets its own `done chan struct{}`, closed when its goroutine returns — a
-`sync.WaitGroup` can't wait for one specific member, so `RemoveCamera` needs this to know when it's
-safe to close the camera's stream.
+Every camera's pump — whether built during `Start()` or later by `AddCamera` — runs on its own
+`context.WithCancel(rootCtx)` child, not on the root context directly. Cancelling the root (via
+`Close()`) still cancels every child by ordinary context propagation, so `Close()`'s behavior is
+unchanged. But because each camera has its *own* cancel, `RemoveCamera` can stop exactly one
+camera's pump without touching any other — and this applies uniformly to a camera present since
+`Start()` and one added afterward alike. "Off-load a stream" in the dashboard needs to work on any
+camera the operator sees, not only ones added after the fact, so there is deliberately no
+special-casing between the two origins. Alongside its own `cancel`, every camera gets its own `done
+chan struct{}`, closed when its pump goroutine returns — a `sync.WaitGroup` can't wait for one
+specific member, so `RemoveCamera` needs this to know when it's safe to close the camera's stream.
 
 **`AddCamera(cc CameraConfig) error`:** under the write lock, run the same validation `New()`
 already runs per camera (empty ID, reserved path characters, `cc.Media` non-nil, SPS/PPS present,
