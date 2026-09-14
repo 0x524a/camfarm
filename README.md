@@ -21,6 +21,10 @@ Early:
 > specifications. This project is **not ONVIF conformant**, is not tested
 > against the ONVIF conformance suite, and makes no claim to any ONVIF
 > profile or add-on.
+- **Works:** a Go API for mutating a running fleet — `Fleet.AddCamera` starts a new camera (RTSP,
+  and its ONVIF endpoint when the camera's spec sets credentials) without restarting the process,
+  and `Fleet.RemoveCamera` stops and removes one. Both apply the same validation `Start` does, so a
+  spec that would be refused at startup is refused here too.
 - **Not built yet:** device discovery (WS-Discovery), PTZ, Imaging, and every
   fault's *effect*. The fault catalogue is defined and validated, and the seams
   it will act through are in place, but no fault changes a byte on the wire. A

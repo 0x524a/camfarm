@@ -89,6 +89,13 @@ their APIs, since they may still be in flux:
    not decided against, simply not built yet. Treat any future slice's own design doc as the place
    that widens this, not an assumption made here.
 
+3. **Configuration surface: resolved as both, with a runtime API alongside the declarative spec.**
+   `Fleet.AddCamera`/`Fleet.RemoveCamera` (`docs/superpowers/specs/2026-09-13-dynamic-camera-lifecycle-design.md`)
+   are the runtime half; the declarative `Spec` remains the source of truth for a fleet's initial
+   construction, and both paths share the same per-camera validation so they cannot enforce
+   different rules for what a valid camera is. This does not resolve the dashboard or the binary
+   that will drive this API interactively — those are later slices built on top of it.
+
 ## Open architectural decisions
 
 None of the following has been decided. Frame each honestly with evidence before committing to an
@@ -127,13 +134,7 @@ answer; do not invent a decision that has not been made.
    "works on a laptop, fails in CI," so the design needs to account for it rather than discover it
    later.
 
-6. **Configuration surface.** A declarative fleet spec (for example YAML) describing the fleet up
-   front, versus a runtime API for adding, removing, and mutating cameras while a test is running,
-   versus offering both. Note that both `framelag` and `onvif-mcp` will want to drive this farm
-   programmatically in the middle of a test run, which bears on how much a static declarative spec
-   alone can cover.
-
-7. **Library or binary.** This needs to be usable as a Go library from another project's tests,
+6. **Library or binary.** This needs to be usable as a Go library from another project's tests,
    something like `camfarm.Start(spec)` inside a `TestMain`, and not only as a standalone binary,
    because making other repositories testable without hardware is the whole point of building it. Frame
    what that implies for the public API surface: what must be stable, what can change, and what a
