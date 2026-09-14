@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bluenviron/gortsplib/v5"
+	"github.com/bluenviron/gortsplib/v5/pkg/base"
 )
 
 // ffprobeCodecName maps a fleet-advertised codec to the name ffprobe reports for
@@ -225,5 +228,75 @@ func TestFramesAccumulate(t *testing.T) {
 	// No faults were configured, so none may have fired.
 	if got := cam.Stats().FaultsFired; got != 0 {
 		t.Errorf("FaultsFired = %d, want 0", got)
+	}
+}
+
+// TestAddCameraDialableThenRemovedRefuses drives the whole stack: a camera
+// added at runtime is immediately dialable with a real RTSP client, and once
+// removed, the same URL is refused.
+func TestAddCameraDialableThenRemovedRefuses(t *testing.T) {
+	f := StartT(t, minimalSpec())
+
+	cam, err := f.AddCamera(CameraSpec{ID: "runtime-cam"})
+	if err != nil {
+		t.Fatalf("AddCamera: %v", err)
+	}
+
+	u, err := base.ParseURL(cam.RTSPURL())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	c := &gortsplib.Client{Scheme: u.Scheme, Host: u.Host}
+	if err := c.Start(); err != nil {
+		t.Fatalf("client start: %v", err)
+	}
+	if _, _, err := c.Describe(u); err != nil {
+		c.Close()
+		t.Fatalf("DESCRIBE runtime-cam: %v", err)
+	}
+	c.Close()
+
+	if err := f.RemoveCamera("runtime-cam"); err != nil {
+		t.Fatalf("RemoveCamera: %v", err)
+	}
+
+	c2 := &gortsplib.Client{Scheme: u.Scheme, Host: u.Host}
+	if err := c2.Start(); err != nil {
+		t.Fatalf("client start: %v", err)
+	}
+	defer c2.Close()
+	if _, _, err := c2.Describe(u); err == nil {
+		t.Fatal("DESCRIBE of a removed camera succeeded")
+	} else if !strings.Contains(err.Error(), "404") {
+		t.Errorf("err = %v, want a 404", err)
+	}
+}
+
+// TestAddCameraSeedDerivationIsDeterministic mirrors
+// TestSameSeedReproducesCameraSeeds for the dynamic path: the same root seed,
+// driven through the same sequence of AddCamera calls, must derive the same
+// seeds for the added cameras.
+func TestAddCameraSeedDerivationIsDeterministic(t *testing.T) {
+	spec := Spec{Seed: 0xdeadbeefcafe, Cameras: []CameraSpec{{ID: "a"}, {ID: "b"}}}
+
+	collect := func() map[string]uint64 {
+		f := StartT(t, spec)
+		out := map[string]uint64{}
+		for _, id := range []string{"c", "d", "e"} {
+			cam, err := f.AddCamera(CameraSpec{ID: id})
+			if err != nil {
+				t.Fatalf("AddCamera(%s): %v", id, err)
+			}
+			out[id] = cam.Stats().Seed
+		}
+		return out
+	}
+
+	first := collect()
+	second := collect()
+	for id, want := range first {
+		if got := second[id]; got != want {
+			t.Errorf("%s: seed %#x then %#x", id, want, got)
+		}
 	}
 }
