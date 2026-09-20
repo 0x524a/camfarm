@@ -1,5 +1,7 @@
 # camfarm
 
+[![ci](https://github.com/0x524a/camfarm/actions/workflows/ci.yml/badge.svg)](https://github.com/0x524a/camfarm/actions/workflows/ci.yml)
+
 A synthetic RTSP camera farm for testing video-analytics pipelines without
 physical hardware. It serves N fake cameras from one process, and it is built so
 that misbehaviour can be injected deterministically: a fault fires because a
