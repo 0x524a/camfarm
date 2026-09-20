@@ -100,23 +100,30 @@ jobs:
         run: go test -race ./...
 
   # Gated on SONAR_TOKEN being set, not on a fixed "is sonar configured" flag:
-  # until the SonarCloud project is imported and the secret is added, this job
-  # is skipped rather than failing, so it cannot turn CI red over an
-  # integration nobody has finished wiring up yet. sonar-project.properties at
-  # the repo root holds the project/organization keys.
+  # until the SonarCloud project is imported and the secret is added, every
+  # step below no-ops rather than failing, so this job cannot turn CI red over
+  # an integration nobody has finished wiring up yet.
+  # sonar-project.properties at the repo root holds the project/organization
+  # keys. The gate lives in each step's `if`, not the job's: the secrets
+  # context is only valid inside a step's if/with/env, never a job-level if
+  # -- putting it there fails workflow validation before any job runs at all.
   sonar:
     runs-on: ubuntu-latest
     needs: build
-    if: ${{ github.repository == '0x524a/camfarm' && secrets.SONAR_TOKEN != '' }}
+    if: ${{ github.repository == '0x524a/camfarm' }}
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
     steps:
       # SonarCloud's issue tracking (new code vs. pre-existing) and blame
       # attribution need real commit history, not the single-commit shallow
       # clone actions/checkout gives by default.
       - uses: actions/checkout@v4
+        if: ${{ env.SONAR_TOKEN != '' }}
         with:
           fetch-depth: 0
 
       - uses: actions/setup-go@v5
+        if: ${{ env.SONAR_TOKEN != '' }}
         with:
           go-version-file: go.mod
           check-latest: true
@@ -125,10 +132,11 @@ jobs:
       # Sonar's Go coverage importer via sonar.go.coverage.reportPaths in
       # sonar-project.properties.
       - name: test with coverage
+        if: ${{ env.SONAR_TOKEN != '' }}
         run: go test -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: SonarCloud scan
+        if: ${{ env.SONAR_TOKEN != '' }}
         uses: SonarSource/sonarqube-scan-action@v4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
