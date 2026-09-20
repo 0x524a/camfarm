@@ -53,7 +53,19 @@ jobs:
         run: go build ./...
 
       - name: test
-        run: go test ./...
+        run: go test -coverprofile=coverage.out -covermode=atomic ./...
+
+      # fail_ci_if_error is false on purpose: Codecov needs the repo activated
+      # at codecov.io (a one-time manual step, not something this workflow can
+      # do) before an upload succeeds. Until that happens, this step reports
+      # its own failure without turning the whole job -- and the CLAUDE.md
+      # "CI green" claim -- red over a reporting integration, not a build or
+      # test failure.
+      - name: upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
 
   # The race detector requires cgo, which is why this is a separate job. That
   # requirement is a property of the detector as a build-time tool, not of the
@@ -86,3 +98,37 @@ jobs:
 
       - name: test -race
         run: go test -race ./...
+
+  # Gated on SONAR_TOKEN being set, not on a fixed "is sonar configured" flag:
+  # until the SonarCloud project is imported and the secret is added, this job
+  # is skipped rather than failing, so it cannot turn CI red over an
+  # integration nobody has finished wiring up yet. sonar-project.properties at
+  # the repo root holds the project/organization keys.
+  sonar:
+    runs-on: ubuntu-latest
+    needs: build
+    if: ${{ github.repository == '0x524a/camfarm' && secrets.SONAR_TOKEN != '' }}
+    steps:
+      # SonarCloud's issue tracking (new code vs. pre-existing) and blame
+      # attribution need real commit history, not the single-commit shallow
+      # clone actions/checkout gives by default.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # Same coverage report format as the build job's Codecov upload, fed to
+      # Sonar's Go coverage importer via sonar.go.coverage.reportPaths in
+      # sonar-project.properties.
+      - name: test with coverage
+        run: go test -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: SonarCloud scan
+        uses: SonarSource/sonarqube-scan-action@v4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
