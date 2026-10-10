@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0x524a/onvif-go/discovery"
 	onvifserver "github.com/0x524a/onvif-go/server"
 
 	"github.com/0x524a/camfarm/internal/media"
@@ -102,6 +103,13 @@ type Server struct {
 
 	// startWindowHook, when set by a test, runs inside the starting window.
 	startWindowHook func()
+
+	// newResp builds the WS-Discovery responder; nil means onvif-go's. Tests
+	// substitute one to inject failures.
+	newResp func(*discovery.ResponderConfig) responder
+	// readyTimeout bounds the wait for the responder socket; 0 means
+	// responderReadyTimeout. Tests shorten it.
+	readyTimeout time.Duration
 
 	// snapshotTimeout bounds each snapshot capture; tests shorten it.
 	snapshotTimeout time.Duration

@@ -73,6 +73,13 @@ type registrar interface {
 	Addr() net.Addr
 }
 
+// responder is a registrar that can also be run. *discovery.Responder is the
+// only production implementation; tests substitute one to inject failures.
+type responder interface {
+	registrar
+	Start(ctx context.Context) error
+}
+
 // responderState is the running WS-Discovery responder and what Close needs to
 // stop it.
 type responderState struct {
@@ -87,9 +94,13 @@ type responderState struct {
 // caller must hold s.mu for writing and have set s.ln. Registration happens
 // before the responder runs, so its own initial Hello covers the whole fleet
 // and Register itself sends nothing. It returns how many cameras it registered.
-func (s *Server) newResponder() (*discovery.Responder, <-chan struct{}, int, error) {
+func (s *Server) newResponder() (responder, <-chan struct{}, int, error) {
 	ready := make(chan struct{})
-	resp := discovery.NewResponder(&discovery.ResponderConfig{
+	build := s.newResp
+	if build == nil {
+		build = func(c *discovery.ResponderConfig) responder { return discovery.NewResponder(c) }
+	}
+	resp := build(&discovery.ResponderConfig{
 		NetworkInterface: multicastInterface(s.cfg.Discovery, s.cfg.Host),
 		ListenAddr:       s.cfg.Discovery.ListenAddr,
 		AnnounceAddr:     s.cfg.Discovery.AnnounceAddr,
@@ -107,7 +118,7 @@ func (s *Server) newResponder() (*discovery.Responder, <-chan struct{}, int, err
 // startup Hellos. It must be called without s.mu held. AddCamera and
 // RemoveCamera wait out this window (Server.starting), so no Register can
 // overlap the responder's own startup announcements.
-func (s *Server) runResponder(resp *discovery.Responder, ready <-chan struct{}, cams int) (*responderState, error) {
+func (s *Server) runResponder(resp responder, ready <-chan struct{}, cams int) (*responderState, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	st := &responderState{resp: resp, cancel: cancel, done: make(chan struct{}), errCh: make(chan error, 1)}
 	go func() {
@@ -124,7 +135,11 @@ func (s *Server) runResponder(resp *discovery.Responder, ready <-chan struct{}, 
 		st.errCh <- err
 	}()
 
-	timer := time.NewTimer(responderReadyTimeout)
+	readyTimeout := s.readyTimeout
+	if readyTimeout == 0 {
+		readyTimeout = responderReadyTimeout
+	}
+	timer := time.NewTimer(readyTimeout)
 	defer timer.Stop()
 	select {
 	case <-ready:
@@ -136,7 +151,7 @@ func (s *Server) runResponder(resp *discovery.Responder, ready <-chan struct{}, 
 	case <-timer.C:
 		cancel()
 		<-st.done
-		return nil, fmt.Errorf("onvif: discovery responder: socket not bound within %s", responderReadyTimeout)
+		return nil, fmt.Errorf("onvif: discovery responder: socket not bound within %s", readyTimeout)
 	}
 
 	if cams > 0 {
