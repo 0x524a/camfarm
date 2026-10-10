@@ -1,8 +1,6 @@
 package onvif
 
 import (
-	"encoding/xml"
-
 	onvifserver "github.com/0x524a/onvif-go/server"
 )
 
@@ -23,6 +21,7 @@ var handlers = map[string]handlerFunc{
 	"GetProfiles":          func(s *onvifserver.Server, _ []byte) (any, error) { return s.HandleGetProfiles(nil) },
 	"GetVideoSources":      func(s *onvifserver.Server, _ []byte) (any, error) { return s.HandleGetVideoSources(nil) },
 	"GetStreamUri":         func(s *onvifserver.Server, body []byte) (any, error) { return s.HandleGetStreamURI(body) },
+	"GetEndpointReference": func(s *onvifserver.Server, _ []byte) (any, error) { return s.HandleGetEndpointReference(nil) },
 	"GetSnapshotUri":       func(s *onvifserver.Server, body []byte) (any, error) { return s.HandleGetSnapshotURI(body) },
 }
 
@@ -58,15 +57,4 @@ func rewriteSnapshotURI(resp any, snapshotURL string) {
 	if r, ok := resp.(*onvifserver.GetSnapshotURIResponse); ok {
 		r.MediaURI.URI = snapshotURL
 	}
-}
-
-// getEndpointReferenceResponse is the Device service's answer to
-// GetEndpointReference. Only GUID is populated, which is all onvif-go's own
-// client reads.
-//
-// The GUID is returned bare, not urn:uuid:-prefixed. That choice has not been
-// verified against a capture from a real device.
-type getEndpointReferenceResponse struct {
-	XMLName xml.Name `xml:"http://www.onvif.org/ver10/device/wsdl GetEndpointReferenceResponse"`
-	GUID    string   `xml:"GUID"`
 }

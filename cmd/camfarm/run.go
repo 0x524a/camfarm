@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/0x524a/camfarm"
@@ -61,6 +63,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	listenHost := fs.String("listen-host", "", "host the RTSP and ONVIF listeners bind (default 127.0.0.1)")
 	rtspPort := fs.Int("rtsp-port", 0, "RTSP port (0 picks a free one)")
 	onvifPort := fs.Int("onvif-port", 0, "ONVIF port (0 picks a free one)")
+	discoveryFlag := fs.String("discovery", "", "answer WS-Discovery probes: \"multicast\" or \"unicast:HOST:PORT\" (empty leaves the spec as is).\n"+
+		"multicast needs a non-loopback --listen-host and often fails in Docker and CI; use unicast there.\n"+
+		"replaces the spec file's whole discovery block; unicast takes no interface")
+	discoveryIface := fs.String("discovery-interface", "", "interface (name or IP) that joins the multicast group; only with multicast discovery")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -120,6 +126,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if set["onvif-port"] {
 		spec.Listen.ONVIFPort = *onvifPort
 	}
+	if err := applyDiscovery(&spec, *discoveryFlag, *discoveryIface); err != nil {
+		return usageErr("%v", err)
+	}
 
 	ln, err := net.Listen("tcp", *httpAddr)
 	if err != nil {
@@ -135,6 +144,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	defer fleet.Close()
 
 	_, _ = fmt.Fprintln(stderr, fleet.ReplayLine())
+	if a := fleet.DiscoveryAddr(); a != "" {
+		d := spec.Listen.Discovery
+		_, _ = fmt.Fprintln(stdout, discoveryLine(d != nil && d.Mode == camfarm.DiscoveryMulticast, a))
+	}
 	if host, _, err := net.SplitHostPort(ln.Addr().String()); err == nil {
 		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
 			_, _ = fmt.Fprintln(stderr, "warning: the dashboard is not bound to loopback and has no authentication")
@@ -172,5 +185,53 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err := srv.Shutdown(shutCtx); err != nil {
 		_ = srv.Close()
 	}
+	return nil
+}
+
+// applyDiscovery folds the --discovery and --discovery-interface flag values
+// into spec.Listen.Discovery. Empty values leave the spec alone, so a flag
+// overrides a spec file only when given. The wildcard and loopback host rules
+// are camfarm's own validation, applied at Start.
+// wsDiscoveryGroup is the WS-Discovery multicast group and port. onvif-go keeps
+// the same value in an unexported constant, so it cannot be imported.
+const wsDiscoveryGroup = "239.255.255.250:3702"
+
+// discoveryLine is the startup line naming where discovery listens. In
+// multicast mode the bound socket is 0.0.0.0:3702, but the group is what a
+// reader needs; in unicast mode it is the bound address.
+func discoveryLine(multicast bool, boundAddr string) string {
+	if multicast {
+		return "discovery: udp://" + wsDiscoveryGroup + " (multicast)"
+	}
+	return "discovery: udp://" + boundAddr
+}
+
+func applyDiscovery(spec *camfarm.Spec, mode, iface string) error {
+	const forms = `--discovery must be "multicast" or "unicast:HOST:PORT"`
+	switch {
+	case mode == "":
+	case mode == camfarm.DiscoveryMulticast:
+		spec.Listen.Discovery = &camfarm.DiscoverySpec{Mode: camfarm.DiscoveryMulticast}
+	case strings.HasPrefix(mode, camfarm.DiscoveryUnicast+":"):
+		addr := strings.TrimPrefix(mode, camfarm.DiscoveryUnicast+":")
+		// An empty host binds all interfaces, as in the spec's addr field.
+		_, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return fmt.Errorf("invalid --discovery %q: %w; %s", mode, err, forms)
+		}
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			return fmt.Errorf("invalid --discovery %q: port %q is not a number from 0 to 65535; %s", mode, port, forms)
+		}
+		spec.Listen.Discovery = &camfarm.DiscoverySpec{Mode: camfarm.DiscoveryUnicast, Addr: addr}
+	default:
+		return fmt.Errorf("invalid --discovery %q; %s", mode, forms)
+	}
+	if iface == "" {
+		return nil
+	}
+	if spec.Listen.Discovery == nil || spec.Listen.Discovery.Mode != camfarm.DiscoveryMulticast {
+		return errors.New("--discovery-interface only applies to multicast discovery (use --discovery multicast)")
+	}
+	spec.Listen.Discovery.Interface = iface
 	return nil
 }

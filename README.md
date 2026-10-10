@@ -49,7 +49,7 @@ Early:
   `/api/v1/` (`fleet`, `cameras`, `cameras/{id}`, `cameras/{id}/snapshot.jpg`,
   `cameras/{id}/faults`, and the `events` stream). Seeds are decimal strings in the API. Flags:
   `--spec`, `--seed`, `--cameras` (mutually exclusive with `--spec`), `--http-addr`,
-  `--listen-host`, `--rtsp-port`, `--onvif-port`; run with `-h` for details. **Security:** the
+  `--listen-host`, `--rtsp-port`, `--onvif-port`, `--discovery`, `--discovery-interface`; run with `-h` for details. **Security:** the
   dashboard can start servers and, with file sources, make the process read local paths, and the
   page shows cameras' Digest credentials. It listens on loopback by default and has *no*
   authentication, token, Host-header check or CSRF protection, so a malicious web page can reach a
@@ -159,10 +159,22 @@ Early:
     of two embedded SPS constants (`mediacommon` has no SPS writer); `contentBase` replaces the
     host with `wrong.invalid` and keeps the path. `a=control` lines are never altered. A lie is
     counted in the fault tally and the obs event log (the fleet journal holds only inject, clear, add and remove) only when the rewrite actually changed the response.
+- **Works:** an opt-in WS-Discovery responder, so an ONVIF client can find the fleet by
+  probing instead of being handed an endpoint. Set `listen.discovery` in the spec (`mode`
+  `multicast` or `unicast`; unicast takes `addr` and optionally `announceAddr`, multicast takes an
+  optional `interface`) or pass `--discovery multicast` / `--discovery unicast:HOST:PORT` and
+  `--discovery-interface` to `cmd/camfarm`. One socket answers for every camera. Hello (when a
+  camera is added or the fleet starts) and Bye (when a camera is removed or the fleet is closed)
+  go to the multicast group in multicast mode, or to `announceAddr` in unicast mode; a unicast
+  run without `announceAddr`, which is every CLI unicast run, announces nothing. Each camera's endpoint reference is its seed-derived `urn:uuid:` that
+  `GetEndpointReference` also returns, and its advertised XAddr is that camera's real ONVIF
+  endpoint. `Fleet.DiscoveryAddr()` returns the bound UDP address (the binary prints
+  `discovery: udp://ADDR`; in multicast mode it prints the group, `udp://239.255.255.250:3702
+  (multicast)`).
 - **Works:** Playwright end-to-end tests of the dashboard, behind the `e2e` build tag and run in
   the `e2e` CI job. Locally, `go test -tags e2e ./internal/dashboard/` needs Chromium installed
   for Playwright.
-- **Not built yet:** device discovery (WS-Discovery), PTZ, Imaging, and the *effect* of the
+- **Not built yet:** PTZ, Imaging, and the *effect* of the
   one remaining catalogued fault, `accept_then_silence`. A spec that names an unimplemented fault is **refused**
   (`ErrUnsupported`), not silently ignored.
 
@@ -228,13 +240,41 @@ closes itself when the test ends.
 - **The ONVIF control plane covers two services only.** Device and Media —
   enough for a client to discover a camera and get back its real RTSP URL.
   PTZ and Imaging are not implemented: `GetCapabilities`/`GetServices` never
-  advertise them, so a conformant client should not expect them. WS-Discovery
-  (multicast device discovery) is not implemented; a client must be given the
-  ONVIF endpoint directly (`Camera.ONVIFEndpoint()`). Each camera does have a
-  seed-derived endpoint UUID, returned by `GetEndpointReference` and shown in
-  the dashboard, but nothing announces it. The UUID is version 4 shaped and
-  returned bare (no `urn:uuid:` prefix); that format is unverified against a
-  real device capture.
+  advertise them, so a conformant client should not expect them. A WS-Discovery responder
+  is available but opt-in (see below); with it off, a client must be given the ONVIF endpoint
+  directly (`Camera.ONVIFEndpoint()`). Each camera has a seed-derived endpoint UUID, returned by
+  `GetEndpointReference` as `urn:uuid:<uuid>` (served by `onvif-go`'s own handler) and shown bare
+  in the dashboard; the responder announces and answers with that same reference. The UUID is
+  version 4 shaped.
+- **WS-Discovery is a simulation, not a conformance-tested responder.** It is `onvif-go`'s
+  responder, which supports Probe/ProbeMatches with Types and Scopes filtering (rfc3986, strcmp0
+  and none match rules) plus Hello and Bye. It does not support Resolve/ResolveMatches, the ldap
+  and uuid scope rules (such a probe matches nothing), the 2009/01 (WS-Discovery 1.1) namespace,
+  or managed mode with a discovery proxy. A wildcard `listen.host` (`0.0.0.0`, `::`) is refused,
+  because the host is advertised in each camera's XAddr and a wildcard is not an address a client
+  can dial. Multicast mode also refuses a loopback `listen.host`, since it would advertise an
+  address no other machine can reach; use unicast mode for loopback. Multicast depends on the
+  network: it commonly does not work across Docker bridge networks, on CI runners, between network
+  namespaces, or through firewalls and IGMP-snooping switches, and nothing here detects that. CI
+  exercises **unicast mode only** for probe and announce behaviour. A test that starts the
+  responder in multicast mode (join, add and remove a camera, close) runs only where the host has
+  a non-loopback multicast-capable IPv4 interface and skips otherwise, and it does not check that
+  any packet is delivered. Multicast joins the
+  interface named by `--discovery-interface` (`interface` in the spec); when that is empty
+  and `listen.host` is a literal IP it defaults to the interface holding that IP, and with a
+  hostname it falls back to the system default-route interface. Containers on a bridge should need the
+  bridge's interface (reasoned from how multicast joins work, not tested). **On the same host as the fleet, multicast discovery with `onvif-go`'s
+  client (and other clients built on Go's `net.ListenMulticastUDP`) finds nothing and never sees
+  Hello or Bye**, because both sides disable `IP_MULTICAST_LOOP`. This was observed by hand on one Linux
+  machine (`onvif-go`'s client on the LAN interface found none of the fleet's cameras, while probing
+  via `lo` and a Python prober found them); no test covers it. On one host, use the loopback interface (`lo`), a client that leaves multicast loopback
+  on, or unicast mode. **Give each fleet on a shared network a distinct seed:** endpoint
+  references derive only from the seed (a spec file with no seed, and a zero-value library
+  `Spec`, use 0), so two fleets with the same seed advertise identical `urn:uuid:` references
+  with different XAddrs, and clients keep one entry per reference. Only the endpoint references
+  are seeded: WS-Discovery MessageIDs are random and the AppSequence InstanceId is wall-clock,
+  so discovery traffic is not byte-replayable, and reply timing is wall-clock. Enabling
+  discovery changes the spec's hash, and so the replay line.
 - **The bundled video is a fixture, not a sample.** Two of them: a two-second
   synthetic test pattern at 320×240 in H.264, and its H.265 counterpart, both
   generated by `scripts/gen-fixture.sh`. They exist so that tests need no media

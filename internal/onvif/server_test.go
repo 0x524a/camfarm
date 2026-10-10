@@ -228,8 +228,8 @@ func TestGetEndpointReferenceReturnsTheCameraUUID(t *testing.T) {
 		if !bytes.Contains(out, []byte("http://www.onvif.org/ver10/device/wsdl")) {
 			t.Fatalf("%s: body = %q, want the device namespace URI", id, out)
 		}
-		if !bytes.Contains(out, []byte("GetEndpointReferenceResponse")) || !bytes.Contains(out, []byte(">"+want+"<")) {
-			t.Fatalf("%s: body = %q, want a GetEndpointReferenceResponse carrying GUID %s", id, out, want)
+		if !bytes.Contains(out, []byte("GetEndpointReferenceResponse")) || !bytes.Contains(out, []byte(">urn:uuid:"+want+"<")) {
+			t.Fatalf("%s: body = %q, want a GetEndpointReferenceResponse carrying GUID urn:uuid:%s", id, out, want)
 		}
 		return want
 	}

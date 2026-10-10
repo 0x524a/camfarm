@@ -6,7 +6,7 @@ module github.com/0x524a/camfarm
 go 1.26.0
 
 require (
-	github.com/0x524a/onvif-go v1.1.6-0.20260912192404-86280cbb6b0d
+	github.com/0x524a/onvif-go v1.2.0
 	github.com/Eyevinn/hi264 v0.10.0
 	github.com/bluenviron/gortsplib/v5 v5.6.5
 	github.com/bluenviron/mediacommon/v2 v2.9.4

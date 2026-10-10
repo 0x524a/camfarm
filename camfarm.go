@@ -222,6 +222,13 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 		Port: valid.Listen.ONVIFPort,
 		Log:  log,
 	}
+	if d := valid.Listen.Discovery; d != nil {
+		if d.Mode == DiscoveryMulticast {
+			onvifCfg.Discovery = &onvif.DiscoveryConfig{Multicast: true, Interface: d.Interface}
+		} else {
+			onvifCfg.Discovery = &onvif.DiscoveryConfig{ListenAddr: d.Addr, AnnounceAddr: d.AnnounceAddr}
+		}
+	}
 	for _, cs := range valid.Cameras {
 		cam := f.cameras[cs.ID]
 		onvifCfg.Cameras = append(onvifCfg.Cameras, onvif.CameraConfig{
@@ -336,6 +343,15 @@ func (f *Fleet) SpecHash() string { return f.specHash }
 // failure reproducible.
 func (f *Fleet) ReplayLine() string {
 	return fmt.Sprintf("camfarm: seed=%#x spec=sha256:%s", f.spec.Seed, f.specHash[:12]) + f.journalSuffix()
+}
+
+// DiscoveryAddr returns the bound WS-Discovery UDP address, or "" when
+// discovery is disabled.
+func (f *Fleet) DiscoveryAddr() string {
+	if a := f.onvifSrv.DiscoveryAddr(); a != nil {
+		return a.String()
+	}
+	return ""
 }
 
 // Addr returns the fleet's bound addresses.
@@ -668,6 +684,7 @@ func (c *Camera) noteFaultsApplied(action string, f FaultSpec, index int, clock 
 }
 
 // ONVIFUUID is the camera's ONVIF endpoint UUID. It is deterministic from the
-// camera seed and is the same value the camera's ONVIF Device service returns
-// from GetEndpointReference.
+// camera seed. The camera's ONVIF Device service returns it from
+// GetEndpointReference with a "urn:uuid:" prefix; this accessor, the API and the
+// dashboard show it bare.
 func (c *Camera) ONVIFUUID() string { return onvif.EndpointUUID(c.seed) }

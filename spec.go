@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/0x524a/camfarm/internal/fault"
 	"github.com/0x524a/camfarm/internal/media"
@@ -109,6 +112,98 @@ type ListenSpec struct {
 	// ONVIFPort of zero requests an ephemeral port for the ONVIF HTTP
 	// listener, readable back via Camera.ONVIFEndpoint.
 	ONVIFPort int `json:"onvifPort,omitempty"`
+	// Discovery, when set, makes the fleet answer WS-Discovery probes. Nil
+	// (the default) leaves discovery off and the spec's hash unchanged.
+	// Enabling it changes Spec.Hash() and therefore the replay line, so a run
+	// with discovery on does not share a replay line with the same fleet
+	// without it.
+	Discovery *DiscoverySpec `json:"discovery,omitempty"`
+}
+
+// Discovery modes.
+const (
+	// DiscoveryMulticast joins the WS-Discovery multicast group.
+	DiscoveryMulticast = "multicast"
+	// DiscoveryUnicast binds a unicast UDP socket, for tests and CI where
+	// multicast is unavailable.
+	DiscoveryUnicast = "unicast"
+)
+
+// DiscoverySpec configures the WS-Discovery responder.
+type DiscoverySpec struct {
+	// Mode is "multicast" or "unicast".
+	Mode string `json:"mode"`
+	// Interface selects the interface (name or IP) that joins the multicast
+	// group. Multicast mode only.
+	Interface string `json:"interface,omitempty"`
+	// Addr is the UDP address to bind in unicast mode, e.g. 127.0.0.1:0.
+	// Required for unicast; forbidden for multicast.
+	Addr string `json:"addr,omitempty"`
+	// AnnounceAddr is where Hello and Bye go. Unicast mode only; empty
+	// disables announcements.
+	AnnounceAddr string `json:"announceAddr,omitempty"`
+}
+
+// validateDiscovery checks the discovery block against the (defaulted) host.
+func validateDiscovery(d *DiscoverySpec, host string) error {
+	if d == nil {
+		return nil
+	}
+	switch d.Mode {
+	case DiscoveryMulticast:
+		if d.Addr != "" {
+			return fmt.Errorf("%w: listen.discovery.addr is for unicast mode; multicast joins the WS-Discovery group", ErrInvalidSpec)
+		}
+		if d.AnnounceAddr != "" {
+			return fmt.Errorf("%w: listen.discovery.announceAddr applies to unicast mode only", ErrInvalidSpec)
+		}
+	case DiscoveryUnicast:
+		if d.Addr == "" {
+			return fmt.Errorf("%w: listen.discovery.addr is required for unicast mode", ErrInvalidSpec)
+		}
+		if d.Interface != "" {
+			return fmt.Errorf("%w: listen.discovery.interface applies to multicast mode only", ErrInvalidSpec)
+		}
+		if err := validateUDPAddr("listen.discovery.addr", d.Addr, false); err != nil {
+			return err
+		}
+		if d.AnnounceAddr != "" {
+			if err := validateUDPAddr("listen.discovery.announceAddr", d.AnnounceAddr, true); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("%w: listen.discovery.mode %q must be %q or %q", ErrInvalidSpec, d.Mode, DiscoveryMulticast, DiscoveryUnicast)
+	}
+
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return fmt.Errorf("%w: listen.host %q must be a bare host without a port; ports are set by listen.rtspPort and listen.onvifPort", ErrInvalidSpec, host)
+	}
+	h := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	ip := net.ParseIP(h)
+	if h == "" || (ip != nil && ip.IsUnspecified()) {
+		return fmt.Errorf("%w: listen.host %q is a wildcard address; discovery advertises it in the device XAddr, so clients need a reachable address", ErrInvalidSpec, host)
+	}
+	if d.Mode == DiscoveryMulticast && (strings.EqualFold(h, "localhost") || (ip != nil && ip.IsLoopback())) {
+		return fmt.Errorf("%w: listen.host %q is loopback; multicast discovery would advertise an address no other host can reach, set listen.host to a reachable address", ErrInvalidSpec, host)
+	}
+	return nil
+}
+
+// validateUDPAddr checks a "host:port" field. The port must be numeric and in
+// 0-65535; the host may be empty (bind all interfaces) unless needHost is set.
+func validateUDPAddr(field, addr string, needHost bool) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%w: %s %q must be host:port: %v", ErrInvalidSpec, field, addr, err)
+	}
+	if needHost && host == "" {
+		return fmt.Errorf("%w: %s %q needs a host", ErrInvalidSpec, field, addr)
+	}
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return fmt.Errorf("%w: %s %q has a non-numeric or out-of-range port %q (want 0-65535)", ErrInvalidSpec, field, addr, port)
+	}
+	return nil
 }
 
 // CameraSpec describes one camera.
@@ -160,6 +255,9 @@ func (s Spec) validate() (Spec, error) {
 	if s.Listen.Host == "" {
 		s.Listen.Host = "127.0.0.1"
 	}
+	if err := validateDiscovery(s.Listen.Discovery, s.Listen.Host); err != nil {
+		return s, err
+	}
 
 	seen := make(map[string]bool, len(s.Cameras))
 	cameras := make([]CameraSpec, len(s.Cameras))
@@ -186,8 +284,13 @@ func validateCameraSpec(c CameraSpec, seen map[string]bool) (CameraSpec, error) 
 	if c.ID == "" {
 		return c, fmt.Errorf("%w: camera has an empty ID", ErrInvalidSpec)
 	}
-	if strings.ContainsAny(c.ID, "/?# ") {
-		return c, fmt.Errorf("%w: camera ID %q contains a character reserved in a URL path", ErrInvalidSpec, c.ID)
+	// The ID is embedded unescaped in RTSP paths and ONVIF URLs. '%' would
+	// read as an escape, and tabs or other control characters corrupt both
+	// the URL and the space-separated XAddrs list in WS-Discovery messages.
+	// "." and ".." are path elements, so a camera with either ID would be
+	// cleaned away by the HTTP mux and unreachable.
+	if c.ID == "." || c.ID == ".." || strings.ContainsAny(c.ID, "/\\?#% ") || strings.IndexFunc(c.ID, unicode.IsControl) >= 0 {
+		return c, fmt.Errorf("%w: camera ID %q contains a character that is unsafe in a URL path", ErrInvalidSpec, c.ID)
 	}
 	if seen[c.ID] {
 		return c, fmt.Errorf("%w: %q", ErrDuplicateCamera, c.ID)
