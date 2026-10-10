@@ -115,6 +115,63 @@ func TestSnapshotRejectsNonGET(t *testing.T) {
 	}
 }
 
+func TestSnapshotDigestHandshakeServesJPEGAndConsumesNonce(t *testing.T) {
+	m, url := startRealRTSP(t)
+	srv := startTestServer(t, CameraConfig{
+		ID: "cam", Media: m, RTSPURL: url,
+		Username: "admin", Password: "secret", Seed: seed.Seed(1),
+	})
+	target := srv.Endpoint("cam") + "/snapshot"
+	path := "/onvif/cam/snapshot"
+
+	// First request: no credentials, expect a challenge.
+	resp, err := http.Get(target)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Fatalf("first status = %d, want 401", resp.StatusCode)
+	}
+	nonce := extractNonce(t, resp.Header.Get("WWW-Authenticate"))
+	authz := digestAuthorization("admin", "secret", http.MethodGet, path, authRealm, nonce)
+
+	get := func() *http.Response {
+		req, err := http.NewRequest(http.MethodGet, target, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Header.Set("Authorization", authz)
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		return r
+	}
+
+	ok := get()
+	defer ok.Body.Close()
+	if ok.StatusCode != 200 {
+		t.Fatalf("authorized status = %d, want 200", ok.StatusCode)
+	}
+	if ct := ok.Header.Get("Content-Type"); ct != "image/jpeg" {
+		t.Errorf("Content-Type = %q, want image/jpeg", ct)
+	}
+	img, err := jpeg.Decode(ok.Body)
+	if err != nil {
+		t.Fatalf("body is not a JPEG: %v", err)
+	}
+	if b := img.Bounds(); b.Dx() != 320 || b.Dy() != 240 {
+		t.Errorf("bounds = %v, want 320x240", b)
+	}
+
+	replay := get()
+	defer replay.Body.Close()
+	if replay.StatusCode != 401 {
+		t.Errorf("replayed Authorization status = %d, want 401 (nonce consumed)", replay.StatusCode)
+	}
+}
+
 func TestGetSnapshotUriAdvertisesTheRealEndpoint(t *testing.T) {
 	srv := startTestServer(t, CameraConfig{ID: "cam", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/cam", Seed: seed.Seed(1)})
 
