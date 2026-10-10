@@ -30,11 +30,14 @@ Early:
 - **Works:** screenshots — `Camera.Screenshot(ctx)` returns one decoded frame
   from a camera's live RTSP stream, and each camera serves it as a JPEG at
   `/onvif/{id}/snapshot` (behind Digest auth when credentialed), which
-  `GetSnapshotUri` advertises. It dials the real RTSP wire, so it waits for the
-  stream's next keyframe (at most one loop of the source). The pure-Go decoders
-  cover intra pictures (H.264 IDR and P_Skip) only, and H.264 is the only codec supported so far; the bundled fixtures
-  and similarly encoded files decode, and a source using features outside that
-  subset fails with an error rather than a wrong picture.
+  `GetSnapshotUri` advertises. The capture dials the real RTSP wire and waits
+  for the next keyframe: for the bundled fixture that is at most one keyframe
+  interval (a keyframe every 15 frames). A source with no keyframe blocks until
+  the caller's context ends. The pure-Go H.264 decoder handles only IDR pictures
+  and P_Skip-only slices, 8-bit 4:2:0; H.264 is the only codec supported so far,
+  and H.265 is not yet. Sources outside that subset may fail with an error or
+  decode incorrectly. Only the bundled fixture and similarly encoded files are
+  tested.
 - **Not built yet:** device discovery (WS-Discovery), PTZ, Imaging, and every
   fault's *effect*. The fault catalogue is defined and validated, and the seams
   it will act through are in place, but no fault changes a byte on the wire. A
