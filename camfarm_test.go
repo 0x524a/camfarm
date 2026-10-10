@@ -686,6 +686,8 @@ func TestSentinelErrors(t *testing.T) {
 		"slash":      {ID: "a/b"},
 		"percent":    {ID: "a%20b"},
 		"tab":        {ID: "a\tb"},
+		"dot":        {ID: "."},
+		"dot dot":    {ID: ".."},
 		"newline":    {ID: "a\nb"},
 		"backslash":  {ID: `a\b`},
 		"half auth":  {ID: "x", Auth: AuthSpec{Username: "u"}},

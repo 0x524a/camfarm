@@ -287,7 +287,9 @@ func validateCameraSpec(c CameraSpec, seen map[string]bool) (CameraSpec, error) 
 	// The ID is embedded unescaped in RTSP paths and ONVIF URLs. '%' would
 	// read as an escape, and tabs or other control characters corrupt both
 	// the URL and the space-separated XAddrs list in WS-Discovery messages.
-	if strings.ContainsAny(c.ID, "/\\?#% ") || strings.IndexFunc(c.ID, unicode.IsControl) >= 0 {
+	// "." and ".." are path elements, so a camera with either ID would be
+	// cleaned away by the HTTP mux and unreachable.
+	if c.ID == "." || c.ID == ".." || strings.ContainsAny(c.ID, "/\\?#% ") || strings.IndexFunc(c.ID, unicode.IsControl) >= 0 {
 		return c, fmt.Errorf("%w: camera ID %q contains a character that is unsafe in a URL path", ErrInvalidSpec, c.ID)
 	}
 	if seen[c.ID] {
