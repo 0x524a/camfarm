@@ -254,7 +254,10 @@ closes itself when the test ends.
   address no other machine can reach; use unicast mode for loopback. Multicast depends on the
   network: it commonly does not work across Docker bridge networks, on CI runners, between network
   namespaces, or through firewalls and IGMP-snooping switches, and nothing here detects that. CI
-  exercises **unicast mode only**, so multicast is untested in CI. Multicast joins the
+  exercises **unicast mode only** for probe and announce behaviour. A test that starts the
+  responder in multicast mode (join, add and remove a camera, close) runs only where the host has
+  a non-loopback multicast-capable IPv4 interface and skips otherwise, and it does not check that
+  any packet is delivered. Multicast joins the
   interface named by `--discovery-interface` (`interface` in the spec); when that is empty
   and `listen.host` is a literal IP it defaults to the interface holding that IP, and with a
   hostname it falls back to the system default-route interface. Containers on a bridge should need the
