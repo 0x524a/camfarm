@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,18 @@ func TestDiscoverySpecValidation(t *testing.T) {
 		{"wildcard v4", "0.0.0.0", DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:0"}, "listen.host"},
 		{"wildcard v6", "::", DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:0"}, "listen.host"},
 		{"wildcard bracketed", "[::]", DiscoverySpec{Mode: "multicast"}, "listen.host"},
+		{"multicast wildcard v4", "0.0.0.0", DiscoverySpec{Mode: "multicast"}, "listen.host"},
+		{"multicast bracketed ::1", "[::1]", DiscoverySpec{Mode: "multicast"}, "loopback"},
+		{"multicast 127.0.0.2", "127.0.0.2", DiscoverySpec{Mode: "multicast"}, "loopback"},
+		{"host with port", "192.0.2.1:8554", DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:0"}, "listen.host"},
+		{"bracketed host with port", "[::1]:8554", DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:0"}, "listen.host"},
+		{"addr without port", "", DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1"}, "listen.discovery.addr"},
+		{"addr non-numeric port", "", DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:abc"}, "listen.discovery.addr"},
+		{"addr port out of range", "", DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:70000"}, "listen.discovery.addr"},
+		{"announce without port", "", DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:0", AnnounceAddr: "127.0.0.1"}, "announceAddr"},
+		{"announce empty host", "", DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:0", AnnounceAddr: ":3702"}, "announceAddr"},
+		{"announce non-numeric port", "", DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:0", AnnounceAddr: "127.0.0.1:x"}, "announceAddr"},
+		{"announce port out of range", "", DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:0", AnnounceAddr: "127.0.0.1:65536"}, "announceAddr"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,5 +207,77 @@ func TestDiscoveryRoundTripsAndChangesHash(t *testing.T) {
 	}
 	if in.Hash() == minimalSpec().Hash() {
 		t.Fatal("enabling discovery did not change the spec hash")
+	}
+}
+
+func freeTCPPort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+func TestDiscoveryAnnounceAddrThroughSpec(t *testing.T) {
+	sink, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+
+	s := minimalSpec()
+	s.Listen.Discovery = &DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:0", AnnounceAddr: sink.LocalAddr().String()}
+	f, err := Start(context.Background(), s)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+
+	cam, err := f.Camera("front-door")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "<a:Address>urn:uuid:" + cam.ONVIFUUID() + "</a:Address>"
+	buf := make([]byte, 65535)
+	_ = sink.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		n, _, err := sink.ReadFromUDP(buf)
+		if err != nil {
+			t.Fatalf("no Hello for %s reached the announce socket: %v", cam.ONVIFUUID(), err)
+		}
+		msg := string(buf[:n])
+		if strings.Contains(msg, "/Hello</a:Action>") && strings.Contains(msg, want) {
+			return
+		}
+	}
+}
+
+func TestStartDiscoveryBindFailureLeaksNothing(t *testing.T) {
+	taken, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = taken.Close() }()
+
+	rtspPort, onvifPort := freeTCPPort(t), freeTCPPort(t)
+	s := minimalSpec()
+	s.Listen.RTSPPort, s.Listen.ONVIFPort = rtspPort, onvifPort
+	s.Listen.Discovery = &DiscoverySpec{Mode: "unicast", Addr: taken.LocalAddr().String()}
+	if f, err := Start(context.Background(), s); err == nil {
+		_ = f.Close()
+		t.Fatal("Start with an occupied discovery address: want an error")
+	}
+
+	// The failed Start must have released both TCP listeners: the same ports
+	// are usable again.
+	s.Listen.Discovery = &DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:0"}
+	f, err := Start(context.Background(), s)
+	if err != nil {
+		t.Fatalf("Start on the same ports after a failed Start: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }

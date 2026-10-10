@@ -40,6 +40,10 @@ func TestApplyDiscovery(t *testing.T) {
 		{"interface alone, spec unicast", unicast("127.0.0.1:0"), "", "eth0", nil, "only applies to multicast"},
 		{"unknown form", nil, "broadcast", "", nil, `"multicast" or "unicast:HOST:PORT"`},
 		{"unicast missing port", nil, "unicast:127.0.0.1", "", nil, `"multicast" or "unicast:HOST:PORT"`},
+		{"unicast non-numeric port", nil, "unicast:h:abc", "", nil, "port"},
+		{"unicast port out of range", nil, "unicast:h:70000", "", nil, "port"},
+		{"unicast empty host", nil, "unicast::80", "", nil, "missing host"},
+		{"flag replaces whole block", &camfarm.DiscoverySpec{Mode: "unicast", Addr: "1.2.3.4:5", AnnounceAddr: "1.2.3.4:6"}, "unicast:127.0.0.1:9", "", unicast("127.0.0.1:9"), ""},
 		{"unicast empty", nil, "unicast:", "", nil, `"multicast" or "unicast:HOST:PORT"`},
 		{"multicast with suffix", nil, "multicast:eth0", "", nil, `"multicast" or "unicast:HOST:PORT"`},
 	}
@@ -103,6 +107,8 @@ func TestRunDiscoveryFlagErrors(t *testing.T) {
 		{"unicast on wildcard host", []string{"--discovery", "unicast:127.0.0.1:0", "--listen-host", "0.0.0.0"}, "listen.host"},
 		{"interface without multicast", []string{"--discovery-interface", "eth0"}, "only applies to multicast"},
 		{"interface with unicast", []string{"--discovery", "unicast:127.0.0.1:0", "--discovery-interface", "eth0"}, "only applies to multicast"},
+		{"non-numeric port", []string{"--discovery", "unicast:h:abc"}, "port"},
+		{"empty host", []string{"--discovery", "unicast::80"}, "missing host"},
 		{"bad form", []string{"--discovery", "bogus"}, `"multicast" or "unicast:HOST:PORT"`},
 	} {
 		var out, errb bytes.Buffer

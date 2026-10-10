@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,7 +64,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	rtspPort := fs.Int("rtsp-port", 0, "RTSP port (0 picks a free one)")
 	onvifPort := fs.Int("onvif-port", 0, "ONVIF port (0 picks a free one)")
 	discoveryFlag := fs.String("discovery", "", "answer WS-Discovery probes: \"multicast\" or \"unicast:HOST:PORT\" (empty leaves the spec as is).\n"+
-		"multicast needs a non-loopback --listen-host and often fails in Docker and CI; use unicast there")
+		"multicast needs a non-loopback --listen-host and often fails in Docker and CI; use unicast there.\n"+
+		"replaces the spec file's whole discovery block; unicast takes no interface")
 	discoveryIface := fs.String("discovery-interface", "", "interface (name or IP) that joins the multicast group; only with multicast discovery")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -197,8 +199,15 @@ func applyDiscovery(spec *camfarm.Spec, mode, iface string) error {
 		spec.Listen.Discovery = &camfarm.DiscoverySpec{Mode: camfarm.DiscoveryMulticast}
 	case strings.HasPrefix(mode, camfarm.DiscoveryUnicast+":"):
 		addr := strings.TrimPrefix(mode, camfarm.DiscoveryUnicast+":")
-		if _, _, err := net.SplitHostPort(addr); err != nil {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
 			return fmt.Errorf("invalid --discovery %q: %w; %s", mode, err, forms)
+		}
+		if host == "" {
+			return fmt.Errorf("invalid --discovery %q: missing host; %s", mode, forms)
+		}
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			return fmt.Errorf("invalid --discovery %q: port %q is not a number from 0 to 65535; %s", mode, port, forms)
 		}
 		spec.Listen.Discovery = &camfarm.DiscoverySpec{Mode: camfarm.DiscoveryUnicast, Addr: addr}
 	default:

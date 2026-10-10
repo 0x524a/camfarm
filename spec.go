@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/0x524a/camfarm/internal/fault"
@@ -112,6 +113,9 @@ type ListenSpec struct {
 	ONVIFPort int `json:"onvifPort,omitempty"`
 	// Discovery, when set, makes the fleet answer WS-Discovery probes. Nil
 	// (the default) leaves discovery off and the spec's hash unchanged.
+	// Enabling it changes Spec.Hash() and therefore the replay line, so a run
+	// with discovery on does not share a replay line with the same fleet
+	// without it.
 	Discovery *DiscoverySpec `json:"discovery,omitempty"`
 }
 
@@ -159,10 +163,21 @@ func validateDiscovery(d *DiscoverySpec, host string) error {
 		if d.Interface != "" {
 			return fmt.Errorf("%w: listen.discovery.interface applies to multicast mode only", ErrInvalidSpec)
 		}
+		if err := validateUDPAddr("listen.discovery.addr", d.Addr, false); err != nil {
+			return err
+		}
+		if d.AnnounceAddr != "" {
+			if err := validateUDPAddr("listen.discovery.announceAddr", d.AnnounceAddr, true); err != nil {
+				return err
+			}
+		}
 	default:
 		return fmt.Errorf("%w: listen.discovery.mode %q must be %q or %q", ErrInvalidSpec, d.Mode, DiscoveryMulticast, DiscoveryUnicast)
 	}
 
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return fmt.Errorf("%w: listen.host %q must be a bare host without a port; ports are set by listen.rtspPort and listen.onvifPort", ErrInvalidSpec, host)
+	}
 	h := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 	ip := net.ParseIP(h)
 	if h == "" || (ip != nil && ip.IsUnspecified()) {
@@ -170,6 +185,22 @@ func validateDiscovery(d *DiscoverySpec, host string) error {
 	}
 	if d.Mode == DiscoveryMulticast && (strings.EqualFold(h, "localhost") || (ip != nil && ip.IsLoopback())) {
 		return fmt.Errorf("%w: listen.host %q is loopback; multicast discovery would advertise an address no other host can reach, set listen.host to a reachable address", ErrInvalidSpec, host)
+	}
+	return nil
+}
+
+// validateUDPAddr checks a "host:port" field. The port must be numeric and in
+// 0-65535; the host may be empty (bind all interfaces) unless needHost is set.
+func validateUDPAddr(field, addr string, needHost bool) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%w: %s %q must be host:port: %v", ErrInvalidSpec, field, addr, err)
+	}
+	if needHost && host == "" {
+		return fmt.Errorf("%w: %s %q needs a host", ErrInvalidSpec, field, addr)
+	}
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return fmt.Errorf("%w: %s %q has a non-numeric or out-of-range port %q (want 0-65535)", ErrInvalidSpec, field, addr, port)
 	}
 	return nil
 }
