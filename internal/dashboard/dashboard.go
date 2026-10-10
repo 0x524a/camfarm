@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"io"
 	"io/fs"
 	"mime"
 	"net/http"
@@ -79,14 +80,15 @@ type cameraDTO struct {
 func (s *server) dto(cam *camfarm.Camera, st camfarm.Status) cameraDTO {
 	u, p, _ := cam.Auth()
 	faults := cam.Faults()
+	stats := cam.Stats()
 	if faults == nil {
 		faults = []camfarm.FaultSpec{}
 	}
 	return cameraDTO{
 		ID: st.ID, RTSPURL: st.RTSPURL, ONVIFEndpoint: cam.ONVIFEndpoint(),
 		Source: st.Source, Codec: st.Codec, Width: st.Width, Height: st.Height, FPS: st.FPS,
-		Readers: st.Readers, Seed: cam.Stats().Seed, Username: u, Password: p,
-		Faults: faults, Stats: cam.Stats(),
+		Readers: st.Readers, Seed: stats.Seed, Username: u, Password: p,
+		Faults: faults, Stats: stats,
 	}
 }
 
@@ -208,10 +210,26 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		writeError(w, http.StatusBadRequest, "malformed JSON body: "+err.Error())
-		return false
+		return bodyFailed(w, err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("unexpected data after the JSON value")
+		}
+		return bodyFailed(w, err)
 	}
 	return true
+}
+
+// bodyFailed replies to a body that could not be read as one JSON value.
+func bodyFailed(w http.ResponseWriter, err error) bool {
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return false
+	}
+	writeError(w, http.StatusBadRequest, "malformed JSON body: "+err.Error())
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

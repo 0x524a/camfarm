@@ -3,6 +3,7 @@ package dashboard
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image"
 	"image/jpeg"
 	"sync"
@@ -32,14 +33,14 @@ type snapshotter struct {
 	capture func(context.Context, *camfarm.Camera) (image.Image, error)
 
 	mu      sync.Mutex
-	flights map[string]*flight
+	flights map[*camfarm.Camera]*flight
 }
 
 func newSnapshotter(opt Options) *snapshotter {
 	s := &snapshotter{
 		timeout: opt.SnapshotTimeout,
 		capture: opt.capture,
-		flights: make(map[string]*flight),
+		flights: make(map[*camfarm.Camera]*flight),
 	}
 	if s.timeout <= 0 {
 		s.timeout = defaultSnapshotTimeout
@@ -58,10 +59,10 @@ func newSnapshotter(opt Options) *snapshotter {
 // get returns a JPEG of the camera, sharing an in-flight capture if one exists.
 func (s *snapshotter) get(ctx context.Context, cam *camfarm.Camera) ([]byte, error) {
 	s.mu.Lock()
-	fl, joined := s.flights[cam.ID()]
+	fl, joined := s.flights[cam]
 	if !joined {
 		fl = &flight{done: make(chan struct{})}
-		s.flights[cam.ID()] = fl
+		s.flights[cam] = fl
 		go s.run(cam, fl)
 	}
 	s.mu.Unlock()
@@ -77,9 +78,17 @@ func (s *snapshotter) get(ctx context.Context, cam *camfarm.Camera) ([]byte, err
 func (s *snapshotter) run(cam *camfarm.Camera, fl *flight) {
 	defer func() {
 		s.mu.Lock()
-		delete(s.flights, cam.ID())
+		delete(s.flights, cam)
 		s.mu.Unlock()
 		close(fl.done)
+	}()
+	// Declared after the cleanup so it runs first: a panic in the capture or the
+	// encode becomes an error and the cleanup above still runs.
+	defer func() {
+		if r := recover(); r != nil {
+			fl.jpeg = nil
+			fl.err = fmt.Errorf("snapshot panicked: %v", r)
+		}
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)

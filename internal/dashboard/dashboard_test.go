@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/jpeg"
 	"net/http"
@@ -168,6 +169,7 @@ func TestConcurrentSnapshotsOfOneCameraAreCoalesced(t *testing.T) {
 			defer wg.Done()
 			resp, err := http.Get(ts.URL + "/api/v1/cameras/front-door/snapshot.jpg")
 			if err != nil {
+				t.Errorf("client %d: %v", i, err)
 				return
 			}
 			defer resp.Body.Close()
@@ -276,4 +278,169 @@ func TestRootServesTheEmbeddedPage(t *testing.T) {
 	if !strings.Contains(strings.ToLower(buf.String()), "<!doctype html>") {
 		t.Errorf("root is not an HTML page: %.80q", buf.String())
 	}
+}
+
+func TestCancelledWaiterDoesNotCancelSharedCapture(t *testing.T) {
+	release := make(chan struct{})
+	capture, calls := capturing(release)
+	ts, _ := newServer(t, Options{capture: capture})
+	url := ts.URL + "/api/v1/cameras/front-door/snapshot.jpg"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelledDone := make(chan error, 1)
+	go func() {
+		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		cancelledDone <- err
+	}()
+	okStatus := make(chan int, 1)
+	go func() {
+		resp, err := http.Get(url)
+		if err != nil {
+			t.Errorf("second waiter: %v", err)
+			okStatus <- 0
+			return
+		}
+		resp.Body.Close()
+		okStatus <- resp.StatusCode
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-cancelledDone:
+		if err == nil {
+			t.Error("cancelled request unexpectedly succeeded")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancelled waiter did not return promptly")
+	}
+	close(release)
+	if s := <-okStatus; s != 200 {
+		t.Errorf("other waiter status = %d, want 200", s)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("captures = %d, want 1", got)
+	}
+}
+
+func TestInFlightMapIsEmptyAfterSuccessAndTimeout(t *testing.T) {
+	f := camfarm.StartT(t, camfarm.Spec{Seed: 1, Cameras: []camfarm.CameraSpec{{ID: "c"}}})
+	cam, err := f.Camera("c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n atomic.Int32
+	var hang atomic.Bool
+	s := newSnapshotter(Options{SnapshotTimeout: 100 * time.Millisecond, capture: func(ctx context.Context, _ *camfarm.Camera) (image.Image, error) {
+		n.Add(1)
+		if hang.Load() {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
+	}})
+	empty := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return len(s.flights) == 0
+	}
+	if _, err := s.get(context.Background(), cam); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !empty() {
+		t.Error("flight left behind after success")
+	}
+	hang.Store(true)
+	if _, err := s.get(context.Background(), cam); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want deadline exceeded", err)
+	}
+	if !empty() {
+		t.Error("flight left behind after timeout")
+	}
+	hang.Store(false)
+	if _, err := s.get(context.Background(), cam); err != nil {
+		t.Fatalf("get after timeout: %v", err)
+	}
+	if got := n.Load(); got != 3 {
+		t.Errorf("captures = %d, want 3 (each request started a fresh one)", got)
+	}
+}
+
+func TestPanickingCaptureIs500AndRecovers(t *testing.T) {
+	var panicNext atomic.Bool
+	panicNext.Store(true)
+	ts, _ := newServer(t, Options{capture: func(context.Context, *camfarm.Camera) (image.Image, error) {
+		if panicNext.Swap(false) {
+			panic("boom")
+		}
+		return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
+	}})
+	url := ts.URL + "/api/v1/cameras/front-door/snapshot.jpg"
+	if resp := do(t, "GET", url, ""); resp.StatusCode != 500 {
+		t.Fatalf("panic status = %d, want 500", resp.StatusCode)
+	}
+	if resp := do(t, "GET", url, ""); resp.StatusCode != 200 {
+		t.Fatalf("next request status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestBodyLimitsAndStrictness(t *testing.T) {
+	ts, _ := newServer(t, Options{})
+	big := `{"id":"` + strings.Repeat("x", 2<<20) + `"}`
+	if resp := do(t, "POST", ts.URL+"/api/v1/cameras", big); resp.StatusCode != 413 {
+		t.Errorf("oversize status = %d, want 413", resp.StatusCode)
+	}
+	if resp := do(t, "POST", ts.URL+"/api/v1/cameras", `{"id":"x","bogus":1}`); resp.StatusCode != 400 {
+		t.Errorf("unknown field status = %d, want 400", resp.StatusCode)
+	}
+	if resp := do(t, "POST", ts.URL+"/api/v1/cameras", `{"id":"x"} {"id":"y"}`); resp.StatusCode != 400 {
+		t.Errorf("trailing data status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestReaddedCameraDoesNotJoinOldFlight(t *testing.T) {
+	release := make(chan struct{})
+	capture, calls := capturing(release)
+	ts, f := newServer(t, Options{capture: capture})
+	url := ts.URL + "/api/v1/cameras/front-door/snapshot.jpg"
+
+	var wg sync.WaitGroup
+	get := func() {
+		defer wg.Done()
+		resp, err := http.Get(url)
+		if err != nil {
+			t.Errorf("GET: %v", err)
+			return
+		}
+		resp.Body.Close()
+	}
+	wg.Add(1)
+	go get()
+	deadline := time.Now().Add(5 * time.Second)
+	for calls.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := f.RemoveCamera("front-door"); err != nil {
+		t.Fatalf("RemoveCamera: %v", err)
+	}
+	if _, err := f.AddCamera(camfarm.CameraSpec{ID: "front-door"}); err != nil {
+		t.Fatalf("AddCamera: %v", err)
+	}
+	wg.Add(1)
+	go get()
+	for calls.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("captures = %d, want 2: the re-added camera joined the old flight", got)
+	}
+	close(release)
+	wg.Wait()
 }
