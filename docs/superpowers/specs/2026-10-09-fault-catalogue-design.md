@@ -155,12 +155,20 @@ plan escalates rather than falling back to a spec-time-only lie silently.
 
 ### 2.6 `jitter` (slice C)
 
-Frame `k` normally leaves at its nominal deadline. With `jitter` its deadline is moved later by
+Frame `k` normally leaves at its nominal slot, `start + k · interval` on an absolute schedule (the
+pump paces on deadlines, not a ticker). With `jitter` its deadline is moved later by
 `d_k = u_k · maxMs`, where `u_k` is the `k`-th draw of the `jitter` stream (one draw per frame,
-unconditional). Frames are always sent in order, so a frame delayed past the next frame's slot makes
-the next one leave immediately after it: bunching falls out of the model rather than being a second
-mechanism. RTP timestamps and sequence numbers stay honest, so the receiver sees genuine
-inter-arrival jitter. `maxMs` is 1 to 5000. The planned delay is recorded in the observation stream
+unconditional); the delay is relative to the slot, not to when the previous frame left. Frames are
+always sent in order, so frame `k` leaves at `max(slot_k + d_k, departure of frame k-1)`: a frame
+delayed past later slots makes those frames leave immediately after it, back-to-back. Bunching falls
+out of the model rather than being a second mechanism, and because slots are absolute the long-run
+frame rate stays nominal for any `maxMs`; every frame leaves before `slot_k + maxMs`. RTP timestamps
+and sequence numbers stay honest, so the receiver sees genuine inter-arrival jitter. `maxMs` is 1 to
+5000. A resync guard bounds catch-up: if the pump wakes more than `max(1 s, 10 intervals)` after the
+time it meant to plan a frame (a suspended process or a stalled host, never lateness jitter itself
+caused), it plans that frame at once and restarts the schedule from now instead of emitting the
+missed slots as one burst. Below the guard a late pump catches up back-to-back, with or without
+jitter. The planned delay is recorded in the observation stream
 only for frames actually written with a delay above zero; a frame that is dropped or held discards
 its own draw, and the flush frame that releases a burst carries its own delay. Tests therefore assert
 the seeded schedule without sleeping; one wire test checks a

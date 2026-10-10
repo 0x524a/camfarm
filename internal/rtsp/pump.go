@@ -263,7 +263,7 @@ type plannedFrame struct {
 	// normally, and a whole burst (held frames, then this one) on a flush.
 	frames [][]*rtp.Packet
 	// delay is jitter's delay for this frame; zero when none is configured or
-	// there is nothing to write. It is relative to the tick being processed.
+	// there is nothing to write. It is relative to the frame's nominal slot.
 	delay time.Duration
 	// idx is the frame counter the frame was planned at, which events are
 	// attributed to.
@@ -474,51 +474,102 @@ func (p *Pump) interval() time.Duration {
 	return time.Duration(p.frameDur) * time.Second / clockRate
 }
 
+// resyncAfter is how far behind its schedule run may fall before it abandons
+// the schedule instead of catching up: max(1s, 10 frame intervals).
+func resyncAfter(interval time.Duration) time.Duration {
+	return max(time.Second, 10*interval)
+}
+
+// waitUntil blocks until the clock reaches t, returning at once if it already
+// has. It reports false if ctx is cancelled first or is already cancelled, so
+// a caller never emits after cancel.
+func waitUntil(ctx context.Context, ck clock.Clock, t time.Time) bool {
+	if d := t.Sub(ck.Now()); d > 0 {
+		select {
+		case <-ck.After(d):
+		case <-ctx.Done():
+			return false
+		}
+	}
+	return ctx.Err() == nil
+}
+
 // run drives the pump until ctx is cancelled.
 //
 // A write error is logged by the caller and does not stop the pump: a reader
 // disconnecting mid-write must not take the camera down.
 //
-// Each tick plans a frame and, if jitter delayed it, waits until tickTime+delay
-// before emitting; tickTime is the time of the tick being processed, not the
-// moment the wait began. The loop is sequential, so a frame is never emitted
-// earlier than the previous one: order is kept, and a late frame makes the ones
-// behind it bunch up (the ticker holds one pending tick). AfterFrame fires
-// after the delayed emit.
+// Pacing is on absolute deadlines, not a ticker. Frame k's nominal slot is
+// start + k*interval (the first frame leaves one interval after run starts).
+// The loop waits for the slot, plans the frame and, if jitter delayed it, waits
+// until slot+delay before emitting. The loop is sequential, so a frame is never
+// emitted earlier than the previous one: order is kept, and when one frame's
+// emission runs past later slots those frames are planned and sent
+// back-to-back behind it (bunching). Because slots are absolute, a delay never
+// pushes the schedule: the long-run frame rate stays nominal however large
+// maxMs is. With no jitter, each frame is planned at its slot exactly, as the
+// ticker this replaced did; a loop that falls behind (a slow write) catches up
+// back-to-back rather than dropping slots.
 //
-// A frame whose wait is cancelled by ctx is planned and its jitter is tallied,
-// but it is never emitted: no obs.Frame and no AfterFrame for it.
+// Resync guard: if the loop wakes more than max(1s, 10 intervals) after the
+// time it meant to plan a frame (the process was suspended, or the host
+// stalled), it does not emit an unbounded catch-up burst. It plans that frame
+// now and restarts the schedule from now, so the missed slots are skipped, as
+// a real camera's encoder does after a stall. Lateness that jitter itself
+// caused never trips the guard: it is measured against the time the loop meant
+// to plan the frame, which already includes the previous frame's delay.
+//
+// AfterFrame fires after the (possibly delayed) emit. A frame whose wait is
+// cancelled by ctx is planned and its jitter is tallied, but it is never
+// emitted: no obs.Frame and no AfterFrame for it. On cancel, at most one clock
+// waiter is left behind (the abandoned After).
 func (p *Pump) run(ctx context.Context, ck clock.Clock, onErr func(error)) {
-	tk := ck.NewTicker(p.interval())
-	defer tk.Stop()
+	interval := p.interval()
+	guard := resyncAfter(interval)
+	start := ck.Now()
+	var k int64           // slot number, counted from start
+	var prevDue time.Time // when the previous frame was due to leave
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case tickTime := <-tk.C():
-			pf, err := p.plan()
-			if err != nil {
-				if onErr != nil {
-					onErr(err)
-				}
-				continue
-			}
-			if pf.delay > 0 {
-				p.obs.Fault(p.id, pf.idx, string(fault.KindJitter), fmt.Sprintf(detailDelayedFmt, pf.delay.Seconds()*1000))
-				p.obs.FaultTally(p.id, string(fault.KindJitter), 1, 0)
-				select {
-				case <-ck.After(max(0, tickTime.Add(pf.delay).Sub(ck.Now()))):
-				case <-ctx.Done():
-					return
-				}
-			}
-			if err := p.emit(pf); err != nil {
-				if onErr != nil {
-					onErr(err)
-				}
-				continue
-			}
-			p.done()
+		k++
+		slot := start.Add(time.Duration(k) * interval)
+		at := slot // when this frame is planned: its slot, or behind the previous frame
+		if prevDue.After(at) {
+			at = prevDue
 		}
+		if !waitUntil(ctx, ck, at) {
+			return
+		}
+		if now := ck.Now(); now.Sub(at) > guard {
+			start, k, prevDue = now, 0, time.Time{}
+			slot, at = now, now
+		}
+		pf, err := p.plan()
+		if err != nil {
+			if onErr != nil {
+				onErr(err)
+			}
+			continue
+		}
+		due := at
+		if pf.delay > 0 {
+			p.obs.Fault(p.id, pf.idx, string(fault.KindJitter), fmt.Sprintf(detailDelayedFmt, pf.delay.Seconds()*1000))
+			p.obs.FaultTally(p.id, string(fault.KindJitter), 1, 0)
+			// The delay is relative to the nominal slot, and the frame never leaves
+			// before the previous one.
+			if d := slot.Add(pf.delay); d.After(due) {
+				due = d
+			}
+			if !waitUntil(ctx, ck, due) {
+				return
+			}
+		}
+		prevDue = due
+		if err := p.emit(pf); err != nil {
+			if onErr != nil {
+				onErr(err)
+			}
+			continue
+		}
+		p.done()
 	}
 }

@@ -91,11 +91,14 @@ Early:
   - The `burst_delivery` tally counts held frames, not the flush frame that releases them.
   - RTP sequence numbers stay contiguous for all four timing kinds; only timing and timestamps
     change.
-  - `jitter` delays are relative to the nominal tick of each frame and order is preserved. When
-    a delay exceeds the frame interval, later frames bunch up behind it rather than being
-    reordered. The pacing ticker keeps a single pending tick, so a delay beyond about two frame
-    intervals drops ticks: the stream then runs below its nominal frame rate instead of fully
-    bunching.
+  - `jitter` delays are relative to each frame's nominal slot (`start + k × interval`, an
+    absolute schedule) and order is preserved: a frame never leaves before the one ahead of it,
+    so when a delay runs past later slots those frames go out back-to-back behind it rather than
+    being reordered. Every frame leaves within `maxMs` of its slot, so the long-run frame rate
+    stays nominal for any `maxMs`. A pump that wakes more than max(1 s, 10 frame intervals) behind
+    its schedule (a suspended process, a stalled host; never lateness jitter caused) skips the
+    missed slots and restarts its schedule from now instead of sending them as one burst; below
+    that it catches up back-to-back.
   - `pts_dts_mismatch` reaches clients as out-of-order RTP timestamps (sequence numbers stay in
     order).
   - `pts_delayed` is visible mainly in the RTCP sender report's own RTP timestamp. Measured on the
