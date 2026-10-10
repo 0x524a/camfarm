@@ -246,3 +246,18 @@ func TestGetEndpointReferenceWithoutCredentialsIs401(t *testing.T) {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
 }
+
+// A handler that rejects its payload must surface as a SOAP fault, not a 500
+// or an empty body.
+func TestServerHandlerErrorBecomesAFault(t *testing.T) {
+	srv := startTestServer(t, CameraConfig{ID: "cam", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/cam", Seed: seed.Seed(1)})
+
+	// GetStreamUri without a ProfileToken is refused by onvif-go.
+	resp := soapRequest(t, srv.Endpoint("cam")+"/media", "GetStreamUri")
+	defer resp.Body.Close()
+
+	out, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(out, []byte("Fault")) {
+		t.Fatalf("body = %q, want a SOAP fault", out)
+	}
+}
