@@ -12,6 +12,8 @@ It combines three things that the user chose to keep in one spec and one plan:
 2. **Library additions** the dashboard needs: a change feed, sentinel errors, accessors.
 3. **The dashboard**: HTTP API, embedded UI, and the `cmd/camfarm` binary.
 
+Naming: the display name is CamFarm (page title and heading, README prose, `--help`); module path, package and binary stay lowercase `camfarm`.
+
 Constraints inherited from `CLAUDE.md`: `CGO_ENABLED=0` keeps building; determinism is the product;
 real sockets in tests; no coverage figure or badge not produced by CI; the README keeps its
 "simulates, not ONVIF conformant" Scope section; no employer or client names anywhere.
