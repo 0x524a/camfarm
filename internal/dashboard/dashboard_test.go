@@ -1,0 +1,279 @@
+package dashboard
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"image"
+	"image/jpeg"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/0x524a/camfarm"
+)
+
+func newServer(t *testing.T, opt Options) (*httptest.Server, *camfarm.Fleet) {
+	t.Helper()
+	f := camfarm.StartT(t, camfarm.Spec{Seed: 1, Cameras: []camfarm.CameraSpec{{ID: "front-door"}}})
+	ts := httptest.NewServer(Handler(f, opt))
+	t.Cleanup(ts.Close)
+	return ts, f
+}
+
+func do(t *testing.T, method, url, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+func TestListAndGetCameras(t *testing.T) {
+	ts, _ := newServer(t, Options{})
+
+	resp := do(t, "GET", ts.URL+"/api/v1/cameras", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var list []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(list) != 1 || list[0]["id"] != "front-door" {
+		t.Fatalf("list = %v", list)
+	}
+	for _, k := range []string{"rtspUrl", "onvifEndpoint", "seed", "codec", "width", "height"} {
+		if _, ok := list[0][k]; !ok {
+			t.Errorf("camera JSON has no %q: %v", k, list[0])
+		}
+	}
+
+	resp = do(t, "GET", ts.URL+"/api/v1/cameras/front-door", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("get status = %d", resp.StatusCode)
+	}
+	resp = do(t, "GET", ts.URL+"/api/v1/cameras/nope", "")
+	if resp.StatusCode != 404 {
+		t.Fatalf("unknown camera status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestAddAndRemoveCamera(t *testing.T) {
+	ts, f := newServer(t, Options{})
+
+	resp := do(t, "POST", ts.URL+"/api/v1/cameras", `{"id":"lobby","auth":{"username":"a","password":"b"}}`)
+	if resp.StatusCode != 201 {
+		t.Fatalf("add status = %d, want 201", resp.StatusCode)
+	}
+	cam, err := f.Camera("lobby")
+	if err != nil {
+		t.Fatalf("camera not added: %v", err)
+	}
+	if _, _, ok := cam.Auth(); !ok {
+		t.Error("credentials not applied")
+	}
+
+	if resp = do(t, "POST", ts.URL+"/api/v1/cameras", `{"id":"lobby"}`); resp.StatusCode != 409 {
+		t.Errorf("duplicate status = %d, want 409", resp.StatusCode)
+	}
+	if resp = do(t, "POST", ts.URL+"/api/v1/cameras", `{"id":"a/b"}`); resp.StatusCode != 422 {
+		t.Errorf("invalid id status = %d, want 422", resp.StatusCode)
+	}
+	if resp = do(t, "POST", ts.URL+"/api/v1/cameras", `{not json`); resp.StatusCode != 400 {
+		t.Errorf("malformed body status = %d, want 400", resp.StatusCode)
+	}
+
+	if resp = do(t, "DELETE", ts.URL+"/api/v1/cameras/lobby", ""); resp.StatusCode != 204 {
+		t.Errorf("delete status = %d, want 204", resp.StatusCode)
+	}
+	if resp = do(t, "DELETE", ts.URL+"/api/v1/cameras/lobby", ""); resp.StatusCode != 404 {
+		t.Errorf("second delete status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestMutationsRequireJSONContentType(t *testing.T) {
+	ts, _ := newServer(t, Options{})
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/cameras", strings.NewReader(`{"id":"x"}`))
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 415 {
+		t.Fatalf("status = %d, want 415", resp.StatusCode)
+	}
+}
+
+func TestSnapshotIsAJPEGOfTheRealStream(t *testing.T) {
+	ts, _ := newServer(t, Options{})
+	resp := do(t, "GET", ts.URL+"/api/v1/cameras/front-door/snapshot.jpg", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "image/jpeg" {
+		t.Errorf("Content-Type = %q", ct)
+	}
+	img, err := jpeg.Decode(resp.Body)
+	if err != nil {
+		t.Fatalf("not a JPEG: %v", err)
+	}
+	if b := img.Bounds(); b.Dx() != 320 || b.Dy() != 240 {
+		t.Errorf("bounds = %v, want 320x240", b)
+	}
+	if resp = do(t, "GET", ts.URL+"/api/v1/cameras/nope/snapshot.jpg", ""); resp.StatusCode != 404 {
+		t.Errorf("unknown camera snapshot status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// capturing returns a capture seam that counts calls and blocks until released.
+func capturing(release <-chan struct{}) (func(context.Context, *camfarm.Camera) (image.Image, error), *atomic.Int32) {
+	var n atomic.Int32
+	return func(ctx context.Context, _ *camfarm.Camera) (image.Image, error) {
+		n.Add(1)
+		select {
+		case <-release:
+			return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}, &n
+}
+
+func TestConcurrentSnapshotsOfOneCameraAreCoalesced(t *testing.T) {
+	release := make(chan struct{})
+	capture, calls := capturing(release)
+	ts, _ := newServer(t, Options{capture: capture})
+
+	const clients = 5
+	var wg sync.WaitGroup
+	statuses := make([]int, clients)
+	for i := 0; i < clients; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := http.Get(ts.URL + "/api/v1/cameras/front-door/snapshot.jpg")
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			statuses[i] = resp.StatusCode
+		}()
+	}
+	// Let every request join the one in-flight capture before releasing it.
+	deadline := time.Now().Add(5 * time.Second)
+	for calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("captures = %d, want 1 shared by %d requests", got, clients)
+	}
+	for i, s := range statuses {
+		if s != 200 {
+			t.Errorf("client %d status = %d", i, s)
+		}
+	}
+}
+
+func TestSnapshotTimeoutIs504(t *testing.T) {
+	capture, _ := capturing(make(chan struct{})) // never released
+	ts, _ := newServer(t, Options{capture: capture, SnapshotTimeout: 200 * time.Millisecond})
+	start := time.Now()
+	resp := do(t, "GET", ts.URL+"/api/v1/cameras/front-door/snapshot.jpg", "")
+	if resp.StatusCode != 504 {
+		t.Fatalf("status = %d, want 504", resp.StatusCode)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("the timeout did not bound the request")
+	}
+}
+
+func TestSnapshotConcurrencyCap(t *testing.T) {
+	release := make(chan struct{})
+	capture, calls := capturing(release)
+	ts, f := newServer(t, Options{capture: capture, MaxConcurrentSnapshots: 1, SnapshotTimeout: 5 * time.Second})
+	if _, err := f.AddCamera(camfarm.CameraSpec{ID: "second"}); err != nil {
+		t.Fatalf("AddCamera: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for _, id := range []string{"front-door", "second"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := http.Get(ts.URL + "/api/v1/cameras/" + id + "/snapshot.jpg")
+			if err == nil {
+				resp.Body.Close()
+			}
+		}()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("captures in flight = %d, want 1 under a cap of 1", got)
+	}
+	close(release)
+	wg.Wait()
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("total captures = %d, want 2", got)
+	}
+}
+
+func TestInjectAndClearFaultOverHTTP(t *testing.T) {
+	ts, f := newServer(t, Options{})
+	cam, _ := f.Camera("front-door")
+
+	resp := do(t, "POST", ts.URL+"/api/v1/cameras/front-door/faults", `{"kind":"frame_drop","rate":0.5,"protectKeyframes":true}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("inject status = %d", resp.StatusCode)
+	}
+	if got := cam.Faults(); len(got) != 1 || !got[0].ProtectKeyframes {
+		t.Fatalf("Faults() = %+v", got)
+	}
+	if resp = do(t, "POST", ts.URL+"/api/v1/cameras/front-door/faults", `{"kind":"keyframe_starvation","rate":1}`); resp.StatusCode != 422 {
+		t.Errorf("unsupported kind status = %d, want 422", resp.StatusCode)
+	}
+	if resp = do(t, "POST", ts.URL+"/api/v1/cameras/nope/faults", `{"kind":"frame_drop","rate":1}`); resp.StatusCode != 404 {
+		t.Errorf("unknown camera status = %d, want 404", resp.StatusCode)
+	}
+	if resp = do(t, "DELETE", ts.URL+"/api/v1/cameras/front-door/faults", ""); resp.StatusCode != 204 {
+		t.Errorf("clear status = %d, want 204", resp.StatusCode)
+	}
+	if len(cam.Faults()) != 0 {
+		t.Error("faults not cleared")
+	}
+}
+
+func TestRootServesTheEmbeddedPage(t *testing.T) {
+	ts, _ := newServer(t, Options{})
+	resp := do(t, "GET", ts.URL+"/", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(resp.Body)
+	if !strings.Contains(strings.ToLower(buf.String()), "<!doctype html>") {
+		t.Errorf("root is not an HTML page: %.80q", buf.String())
+	}
+}
