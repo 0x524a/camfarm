@@ -93,7 +93,9 @@ Early:
     change.
   - `jitter` delays are relative to the nominal tick of each frame and order is preserved. When
     a delay exceeds the frame interval, later frames bunch up behind it rather than being
-    reordered.
+    reordered. The pacing ticker keeps a single pending tick, so a delay beyond about two frame
+    intervals drops ticks: the stream then runs below its nominal frame rate instead of fully
+    bunching.
   - `pts_dts_mismatch` reaches clients as out-of-order RTP timestamps (sequence numbers stay in
     order).
   - `pts_delayed` is visible mainly in the RTCP sender report's own RTP timestamp. Measured on the

@@ -38,9 +38,6 @@ type wirePacket struct {
 	seq uint16
 }
 
-// wireFrame is the first packet of an access unit as the client saw it.
-type wireFrame = wirePacket
-
 // wireCollector accumulates the packets a real client reads.
 type wireCollector struct {
 	mu   sync.Mutex
@@ -59,10 +56,11 @@ func (w *wireCollector) snapshot() []wirePacket {
 	return append([]wirePacket(nil), w.pkts...)
 }
 
-// frames collapses packets to one entry per access unit, in arrival order. An
-// access unit is a run of packets sharing an RTP timestamp.
-func framesOf(pkts []wirePacket) []wireFrame {
-	var out []wireFrame
+// framesOf collapses packets to one entry per access unit, in arrival order: the
+// access unit's first packet. An access unit is a run of packets sharing an RTP
+// timestamp.
+func framesOf(pkts []wirePacket) []wirePacket {
+	var out []wirePacket
 	for _, p := range pkts {
 		if len(out) == 0 || out[len(out)-1].ts != p.ts {
 			out = append(out, p)
@@ -112,7 +110,7 @@ func collectFrames(t *testing.T, s *Server, id string, n int) []wirePacket {
 	return w.snapshot()
 }
 
-func gapsMs(frames []wireFrame) []float64 {
+func gapsMs(frames []wirePacket) []float64 {
 	var g []float64
 	for i := 1; i < len(frames); i++ {
 		g = append(g, float64(frames[i].at.Sub(frames[i-1].at))/float64(time.Millisecond))
@@ -266,10 +264,10 @@ func TestTimingBurstDeliveryArrivesTogether(t *testing.T) {
 	}
 	assertContiguousSeq(t, pkts)
 
-	// Before the burst, frames arrive at the nominal interval. The first frame
-	// after the burst waits one tick (its own), so skip 3 frames and then average
-	// the following ones: the cadence must be back at the nominal spacing. The
-	// 20 ms band on a 66.7 ms interval absorbs timer and scheduler noise.
+	// Only the cadence after the burst is asserted. The first frame after the
+	// burst waits one tick (its own), so skip 3 frames and then average the
+	// following ones: the cadence must be back at the nominal spacing. The 20 ms
+	// band on a 66.7 ms interval absorbs timer and scheduler noise.
 	from := burstAt + holdFrames + 3
 	if from+8 > len(frames) {
 		t.Fatalf("only %d frames; need %d to check the cadence after the burst", len(frames), from+8)
@@ -368,8 +366,7 @@ func (p srPoint) rtpMinusWall() uint32 {
 // emits one SR as soon as its first packet is written.
 func TestTimingPTSDelayedShowsInTheSenderReport(t *testing.T) {
 	const delayMs = 500
-	rec := obs.New(1000)
-	s, err := New(Config{Host: "127.0.0.1", Obs: rec, Cameras: []CameraConfig{
+	s, err := New(Config{Host: "127.0.0.1", Obs: obs.New(1000), Cameras: []CameraConfig{
 		{ID: "cam-00", Media: testMedia(t), Seed: seed.Seed(21)},
 		{ID: "cam-01", Media: testMedia(t), Seed: seed.Seed(21),
 			Faults: []fault.Spec{{Kind: fault.KindPTSDelayed, DelayMs: delayMs}}},

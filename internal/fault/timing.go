@@ -61,16 +61,9 @@ func (e *Engine) DecideHold(_ int) HoldDecision {
 }
 
 // TimestampKinds returns the configured timestamp faults, in configured order,
-// so a caller can attribute a non-zero TimestampShift.
-func (e *Engine) TimestampKinds() []Kind {
-	var out []Kind
-	for i := range e.entries {
-		if k := e.entries[i].spec.Kind; k == KindPTSDTSMismatch || k == KindPTSDelayed {
-			out = append(out, k)
-		}
-	}
-	return out
-}
+// so a caller can attribute a non-zero TimestampShift. The slice is shared and
+// must not be modified.
+func (e *Engine) TimestampKinds() []Kind { return e.tsKinds }
 
 // TimestampShift returns the RTP-tick offset to add to the frame's nominal
 // timestamp, summed over every configured timestamp fault. frameDur is the

@@ -28,7 +28,7 @@ const (
 	detailTimestampFmt     = "timestamp shifted by %d ticks"
 	detailHeldFmt          = "held (%d of %d)"
 	detailReleasedFmt      = "released %d frames"
-	detailDelayedFmt       = "delayed %d ms"
+	detailDelayedFmt       = "delayed %.3f ms"
 )
 
 // faultSwap is a pending replacement of a pump's fault engine.
@@ -298,7 +298,8 @@ func (p *Pump) takeHeld() [][]*rtp.Packet {
 // Step writes exactly one access unit, or holds it for burst_delivery. It plans
 // the frame and emits it at once: jitter's delay is a pacing concern of run, so
 // a caller driving Step directly never waits. AfterFrame is called once the
-// frame is handled, held and dropped frames included, and not on error.
+// frame is handled, held and dropped frames included, and not on error. Step
+// never waits, so it records no jitter event and no jitter tally.
 func (p *Pump) Step() error {
 	pf, err := p.plan()
 	if err != nil {
@@ -397,6 +398,9 @@ func (p *Pump) plan() (plannedFrame, error) {
 		// uint32 of a negative int64 wraps, which is what a camera whose clock
 		// is behind zero would send.
 		ts := uint32(p.tsOffset + au.DTS + shift)
+		// Attribution keys on the summed shift. Two timestamp faults whose shifts
+		// cancel to zero on a frame leave nothing to attribute, so neither is
+		// credited with it: no event and no tally for either.
 		if shift != 0 {
 			detail := fmt.Sprintf(detailTimestampFmt, shift)
 			for _, k := range p.faults.TimestampKinds() {
@@ -481,6 +485,9 @@ func (p *Pump) interval() time.Duration {
 // earlier than the previous one: order is kept, and a late frame makes the ones
 // behind it bunch up (the ticker holds one pending tick). AfterFrame fires
 // after the delayed emit.
+//
+// A frame whose wait is cancelled by ctx is planned and its jitter is tallied,
+// but it is never emitted: no obs.Frame and no AfterFrame for it.
 func (p *Pump) run(ctx context.Context, ck clock.Clock, onErr func(error)) {
 	tk := ck.NewTicker(p.interval())
 	defer tk.Stop()
@@ -497,7 +504,7 @@ func (p *Pump) run(ctx context.Context, ck clock.Clock, onErr func(error)) {
 				continue
 			}
 			if pf.delay > 0 {
-				p.obs.Fault(p.id, pf.idx, string(fault.KindJitter), fmt.Sprintf(detailDelayedFmt, pf.delay.Milliseconds()))
+				p.obs.Fault(p.id, pf.idx, string(fault.KindJitter), fmt.Sprintf(detailDelayedFmt, pf.delay.Seconds()*1000))
 				p.obs.FaultTally(p.id, string(fault.KindJitter), 1, 0)
 				select {
 				case <-ck.After(max(0, tickTime.Add(pf.delay).Sub(ck.Now()))):

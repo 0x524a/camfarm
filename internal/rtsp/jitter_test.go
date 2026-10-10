@@ -4,6 +4,7 @@ import (
 	"context"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +22,8 @@ import (
 type signalClock struct {
 	*clock.Virtual
 	ticker chan struct{}
+	tick   <-chan time.Time // the run loop's ticker channel, set once ticker is closed
+	afters atomic.Int64     // After calls made so far
 }
 
 func newSignalClock() *signalClock {
@@ -29,8 +32,44 @@ func newSignalClock() *signalClock {
 
 func (c *signalClock) NewTicker(d time.Duration) clock.Ticker {
 	tk := c.Virtual.NewTicker(d)
+	c.tick = tk.C()
 	close(c.ticker)
 	return tk
+}
+
+func (c *signalClock) After(d time.Duration) <-chan time.Time {
+	c.afters.Add(1)
+	return c.Virtual.After(d)
+}
+
+// advanceSettled advances the clock by d and returns once run has absorbed the
+// advance: run is parked on a clock waiter, or is idle on the ticker with no
+// tick pending and every delayed frame it began already emitted (frames counts
+// AfterFrame calls). It polls, bounded and without sleeping. One window stays
+// open: between consuming a tick and registering its wait, run is not
+// observable from here.
+func advanceSettled(t *testing.T, ck *signalClock, frames *atomic.Int64, d time.Duration) {
+	t.Helper()
+	ck.Advance(d)
+	deadline := time.Now().Add(5 * time.Second)
+	for ck.Waiters() == 0 && (len(ck.tick) > 0 || frames.Load() < ck.afters.Load()) {
+		if time.Now().After(deadline) {
+			t.Fatal("run did not settle after the clock advanced")
+		}
+		runtime.Gosched()
+	}
+}
+
+// waitParked polls until run is parked on at least one clock waiter.
+func waitParked(t *testing.T, ck *signalClock) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for ck.Waiters() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("run never parked on a clock waiter")
+		}
+		runtime.Gosched()
+	}
 }
 
 type stampedWrite struct {
@@ -75,7 +114,8 @@ func jitterRunPump(t *testing.T, s seed.Seed, rec *obs.Recorder, w packetWriter,
 func TestRunPacesJitteredFramesInOrderAndBunches(t *testing.T) {
 	ck := newSignalClock()
 	w := &clockRecorder{ck: ck}
-	p := jitterRunPump(t, seed.Seed(3), obs.New(1000), w, nil)
+	var frames atomic.Int64
+	p := jitterRunPump(t, seed.Seed(3), obs.New(1000), w, func() { frames.Add(1) })
 	interval := p.interval()
 	start := ck.Now()
 
@@ -85,8 +125,7 @@ func TestRunPacesJitteredFramesInOrderAndBunches(t *testing.T) {
 	<-ck.ticker
 
 	for i := 0; i < 3000; i++ {
-		ck.Advance(time.Millisecond)
-		runtime.Gosched()
+		advanceSettled(t, ck, &frames, time.Millisecond)
 	}
 	cancel()
 	select {
@@ -143,7 +182,6 @@ func TestRunReturnsPromptlyWhileWaitingOnADeadline(t *testing.T) {
 	rec := obs.New(100)
 	w := &clockRecorder{ck: ck}
 	p := jitterRunPump(t, s, rec, w, nil)
-	base := runtime.NumGoroutine()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -151,12 +189,12 @@ func TestRunReturnsPromptlyWhileWaitingOnADeadline(t *testing.T) {
 	<-ck.ticker
 	ck.Advance(p.interval()) // delivers the first tick; the clock never moves again
 
-	deadline := time.Now().Add(5 * time.Second)
-	for len(rec.Events()) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("run never planned a delay")
-		}
-		runtime.Gosched()
+	waitParked(t, ck)
+	if n := ck.Waiters(); n != 1 {
+		t.Fatalf("%d clock waiters while parked on one delay, want 1", n)
+	}
+	if len(rec.Events()) == 0 {
+		t.Fatal("run parked without recording the planned delay")
 	}
 	cancel()
 	select {
@@ -167,11 +205,11 @@ func TestRunReturnsPromptlyWhileWaitingOnADeadline(t *testing.T) {
 	if n := len(w.snapshot()); n != 0 {
 		t.Fatalf("%d packets written despite the cancelled wait", n)
 	}
-	for runtime.NumGoroutine() > base && time.Now().Before(deadline) {
-		runtime.Gosched()
-	}
-	if got := runtime.NumGoroutine(); got > base {
-		t.Fatalf("goroutines = %d, baseline %d", got, base)
+	// The cancelled wait leaves nothing for the clock to wake: advancing past
+	// the abandoned deadline must neither block nor reach a writer.
+	ck.Advance(time.Hour)
+	if n := len(w.snapshot()); n != 0 {
+		t.Fatalf("%d packets written after cancel and advance", n)
 	}
 }
 
@@ -186,14 +224,14 @@ func TestAfterFrameFiresAfterTheDelayedEmit(t *testing.T) {
 		written = append(written, n)
 		mu.Unlock()
 	}
-	p := jitterRunPump(t, seed.Seed(3), obs.New(1000), w, after)
+	var frames atomic.Int64
+	p := jitterRunPump(t, seed.Seed(3), obs.New(1000), w, func() { after(); frames.Add(1) })
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { p.run(ctx, ck, nil); close(done) }()
 	<-ck.ticker
 	for i := 0; i < 3000; i++ {
-		ck.Advance(time.Millisecond)
-		runtime.Gosched()
+		advanceSettled(t, ck, &frames, time.Millisecond)
 	}
 	cancel()
 	<-done

@@ -148,6 +148,9 @@ type Decision struct {
 // camera's pump, so nothing is shared and no lock is needed.
 type Engine struct {
 	entries []entry
+	// tsKinds are the configured timestamp faults, built once in New so that
+	// TimestampKinds does not allocate per frame.
+	tsKinds []Kind
 }
 
 type entry struct {
@@ -198,6 +201,9 @@ func New(s seed.Seed, specs []Spec) (*Engine, error) {
 			en.p = sp.Rate * (1 - en.q) / (1 - sp.Rate)
 		}
 		e.entries = append(e.entries, en)
+		if sp.Kind == KindPTSDTSMismatch || sp.Kind == KindPTSDelayed {
+			e.tsKinds = append(e.tsKinds, sp.Kind)
+		}
 	}
 	return e, nil
 }

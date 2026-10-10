@@ -22,7 +22,9 @@ type Clock interface {
 	Now() time.Time
 	NewTicker(d time.Duration) Ticker
 	// After returns a channel, buffered to one, that receives the time once d
-	// has elapsed on this clock. A d of zero or less fires immediately.
+	// has elapsed on this clock. A d of zero or less fires immediately. Waiters
+	// that fall due in one Virtual.Advance fire in registration order, not
+	// deadline order.
 	After(d time.Duration) <-chan time.Time
 }
 
@@ -86,7 +88,8 @@ func (v *Virtual) NewTicker(d time.Duration) Ticker {
 }
 
 // After returns a channel that receives once Advance carries the clock to or
-// past now+d. A d of zero or less fires immediately.
+// past now+d. A d of zero or less fires immediately. When one Advance makes
+// several waiters due they fire in registration order, not deadline order.
 func (v *Virtual) After(d time.Duration) <-chan time.Time {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -129,7 +132,16 @@ func (v *Virtual) Advance(d time.Duration) {
 		}
 		w.ch <- target
 	}
+	clear(v.waiters[len(kept):]) // do not retain fired channels in the dropped tail
 	v.waiters = kept
+}
+
+// Waiters returns how many After calls are pending: registered and not yet
+// due. It lets a test wait until a goroutine is parked on the clock.
+func (v *Virtual) Waiters() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return len(v.waiters)
 }
 
 // stop marks tk stopped, holding the clock's lock so that a concurrent

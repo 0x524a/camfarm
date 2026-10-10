@@ -160,8 +160,10 @@ Frame `k` normally leaves at its nominal deadline. With `jitter` its deadline is
 unconditional). Frames are always sent in order, so a frame delayed past the next frame's slot makes
 the next one leave immediately after it: bunching falls out of the model rather than being a second
 mechanism. RTP timestamps and sequence numbers stay honest, so the receiver sees genuine
-inter-arrival jitter. `maxMs` is 1 to 5000. The planned delay of every frame is recorded in the
-observation stream, so tests assert the seeded schedule without sleeping; one wire test checks a
+inter-arrival jitter. `maxMs` is 1 to 5000. The planned delay is recorded in the observation stream
+only for frames actually written with a delay above zero; a frame that is dropped or held discards
+its own draw, and the flush frame that releases a burst carries its own delay. Tests therefore assert
+the seeded schedule without sleeping; one wire test checks a
 loose lower bound on measured spread. The decision (the delay values) is reproducible; the arrival
 times a client measures are wall-clock and are not, which is the same limit the rest of this spec
 states.

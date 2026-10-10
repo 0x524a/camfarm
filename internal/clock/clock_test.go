@@ -163,6 +163,10 @@ func TestVirtualConcurrentStopAndAdvance(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	close(done)
 	wg.Wait()
+	// Stop once more here: if the stopper goroutine never got scheduled (-cpu 1)
+	// the ticker is still live and the Advance(time.Hour) below would spin
+	// billions of one-nanosecond steps.
+	tk.Stop()
 
 	// Behavioural assertions, independent of the race detector. First:
 	// Advance's own bookkeeping must be exactly consistent with how many
@@ -282,13 +286,25 @@ func TestRealAfterFires(t *testing.T) {
 
 func TestVirtualAfterConcurrentWithAdvance(t *testing.T) {
 	v := NewVirtual(time.Unix(0, 0))
-	var wg sync.WaitGroup
+	type reg struct {
+		floor time.Time // the earliest the deadline can be: clock reading before After, plus d
+		ch    <-chan time.Time
+	}
+	var (
+		mu   sync.Mutex
+		regs []reg
+		wg   sync.WaitGroup
+	)
 	for i := 0; i < 8; i++ {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				_ = v.After(time.Millisecond)
+				floor := v.Now().Add(time.Millisecond)
+				ch := v.After(time.Millisecond)
+				mu.Lock()
+				regs = append(regs, reg{floor: floor, ch: ch})
+				mu.Unlock()
 			}
 		}()
 		go func() {
@@ -300,9 +316,40 @@ func TestVirtualAfterConcurrentWithAdvance(t *testing.T) {
 	}
 	wg.Wait()
 	v.Advance(time.Second)
+	if n := v.Waiters(); n != 0 {
+		t.Fatalf("%d waiters still pending after advancing past every deadline", n)
+	}
+	for i, r := range regs {
+		select {
+		case at := <-r.ch:
+			if at.Before(r.floor) {
+				t.Fatalf("waiter %d fired at %v, before its deadline %v", i, at, r.floor)
+			}
+		default:
+			t.Fatalf("waiter %d never fired", i)
+		}
+	}
 	select {
 	case <-v.After(0):
 	default:
 		t.Fatal("zero duration must fire immediately")
+	}
+}
+
+func TestVirtualWaitersCountsPendingAfters(t *testing.T) {
+	v := NewVirtual(time.Unix(0, 0))
+	_ = v.After(10 * time.Millisecond)
+	_ = v.After(20 * time.Millisecond)
+	_ = v.After(0) // fires immediately, never pending
+	if n := v.Waiters(); n != 2 {
+		t.Fatalf("Waiters = %d, want 2", n)
+	}
+	v.Advance(10 * time.Millisecond)
+	if n := v.Waiters(); n != 1 {
+		t.Fatalf("Waiters = %d after first deadline, want 1", n)
+	}
+	v.Advance(10 * time.Millisecond)
+	if n := v.Waiters(); n != 0 {
+		t.Fatalf("Waiters = %d after both deadlines, want 0", n)
 	}
 }
