@@ -7,12 +7,14 @@ go 1.26.0
 
 require (
 	github.com/0x524a/onvif-go v1.1.6-0.20260912192404-86280cbb6b0d
+	github.com/Eyevinn/hi264 v0.10.0
 	github.com/bluenviron/gortsplib/v5 v5.6.5
 	github.com/bluenviron/mediacommon/v2 v2.9.4
 	github.com/pion/rtp v1.10.5
 )
 
 require (
+	github.com/Eyevinn/mp4ff v0.50.0 // indirect
 	github.com/abema/go-mp4 v1.7.1 // indirect
 	github.com/asticode/go-astikit v0.30.0 // indirect
 	github.com/asticode/go-astits v1.16.0 // indirect

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
 	"io"
 	"log/slog"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"github.com/0x524a/camfarm/internal/obs"
 	"github.com/0x524a/camfarm/internal/onvif"
 	"github.com/0x524a/camfarm/internal/rtsp"
+	"github.com/0x524a/camfarm/internal/screenshot"
 	"github.com/0x524a/camfarm/internal/seed"
 )
 
@@ -523,6 +525,20 @@ func (c *Camera) Stats() Stats {
 func (c *Camera) Inject(f FaultSpec) error {
 	return fmt.Errorf("%w: injecting fault %q into a running camera is not implemented in this version",
 		ErrUnsupported, f.Kind)
+}
+
+// Screenshot returns one decoded frame from this camera's live RTSP stream.
+//
+// It dials the camera's own RTSP URL, so it exercises the real wire path, and
+// blocks until the stream's next random access point (bounded by one loop of
+// the source). It returns ErrNotReady if the fleet's RTSP server is not
+// serving, and ctx's own error if ctx ends first.
+func (c *Camera) Screenshot(ctx context.Context) (image.Image, error) {
+	url := c.RTSPURL()
+	if url == "" {
+		return nil, ErrNotReady
+	}
+	return screenshot.Capture(ctx, url)
 }
 
 // Clear removes every fault from a camera. With no faults configured this

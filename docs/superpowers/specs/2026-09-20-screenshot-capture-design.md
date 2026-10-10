@@ -1,6 +1,11 @@
 # Screenshot capture: `Camera.Screenshot` and ONVIF `GetSnapshotURI`
 
 Status: approved design, not yet implemented.
+
+> **Status note (implementation):** snapshots shipped as JPEG (`image/jpeg`, quality 90), not PNG;
+> references to PNG below are superseded. H.265 support is deferred to a later change, so only H.264
+> is implemented and the "both codecs" test requirements below are intentionally unmet for now; an
+> H.265 stream yields `screenshot.ErrNoSupportedVideo`.
 Extends `2026-09-05-camfarm-architecture-design.md` and follows
 `2026-09-13-dynamic-camera-lifecycle-design.md` (slice 1 of the 3-slice dashboard decomposition:
 dynamic camera lifecycle, then screenshot capture — this doc — then the dashboard HTTP API/UI and
@@ -29,7 +34,7 @@ is a real ONVIF client expectation this project's control plane currently faults
 - **No dashboard HTTP API, UI, or `cmd/camfarm` binary.** Slice 3, unstarted. This slice's only HTTP
   surface is the one ONVIF snapshot route, justified purely by `GetSnapshotURI` needing something real
   to point at.
-- **No resolution/format negotiation.** Always native resolution, always PNG.
+- **No resolution/format negotiation.** Always native resolution, always JPEG (image/jpeg, quality 90).
 - **No decode retry, no caching, no rate limiting.** One dial, one wait, one decode attempt per call.
 
 ## 1. Motivation
@@ -121,7 +126,7 @@ Refusals, reusing the existing taxonomy (`errors.go`):
   mux.HandleFunc("/onvif/{id}/snapshot", s.handleSnapshot)
   ```
   Handler: look up the camera by ID under the same lock discipline as SOAP dispatch, call
-  `screenshot.Capture(ctx, cam.rtspURL)`, encode as PNG, write with `image/png` content type. Same
+  `screenshot.Capture(ctx, cam.rtspURL)`, encode as JPEG (quality 90), write with `image/jpeg` content type. Same
   Digest auth requirement as every other ONVIF route — an unauthenticated frame grab would be a new
   fault this slice must not open.
 - Extend `rewriteXAddr` (or a sibling function beside it in `dispatch.go`) to correct
@@ -160,7 +165,7 @@ project convention.
   but not started, or via the `Camera`-after-`RemoveCamera` TOCTOU path from §3.
 - **`internal/onvif/server_test.go`:** `GetSnapshotURI` returns a URL under camfarm's real listener
   (regression test for the §4 URI fix); a real HTTP GET against `/onvif/{id}/snapshot` with Digest
-  auth returns a decodable PNG.
+  auth returns a decodable JPEG.
 - **`go test -race ./...`:** mandatory per existing CI job. Screenshot capture opens a fresh RTSP
   client connection per call — explicitly race this against concurrent `Fleet.RemoveCamera`/normal
   streaming reads on the same camera, since slice 1 just made `internal/rtsp.Server` dynamically
@@ -176,7 +181,7 @@ project convention.
   exists anywhere in `camfarm` today.
 - **The dashboard HTTP API, UI, and `cmd/camfarm` binary.** Slice 3, built on this slice and slice 1
   together.
-- **Snapshot resolution/format options.** Always native resolution, always PNG.
+- **Snapshot resolution/format options.** Always native resolution, always JPEG (image/jpeg, quality 90).
 - **Decode failure recovery/retry.** One dial, one wait, one decode attempt; surfaces as an ordinary
   error per §5.
 - **Screenshot caching or rate limiting.** Every call is a fresh dial and fresh decode; no shared
