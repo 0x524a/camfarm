@@ -261,13 +261,3 @@ func writeErr(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}
 }
-
-// getFleet is replaced by Task 7.
-func (s *server) getFleet(w http.ResponseWriter, _ *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
-}
-
-// events is replaced by Task 7.
-func (s *server) events(w http.ResponseWriter, _ *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
-}

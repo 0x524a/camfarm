@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -443,4 +444,135 @@ func TestReaddedCameraDoesNotJoinOldFlight(t *testing.T) {
 	}
 	close(release)
 	wg.Wait()
+}
+
+func TestFleetEndpoint(t *testing.T) {
+	ts, _ := newServer(t, Options{})
+	var body struct {
+		Seed       uint64 `json:"seed"`
+		SpecHash   string `json:"specHash"`
+		ReplayLine string `json:"replayLine"`
+		Journal    []any  `json:"journal"`
+	}
+	resp := do(t, "GET", ts.URL+"/api/v1/fleet", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Seed != 1 || body.SpecHash == "" || !strings.Contains(body.ReplayLine, "seed=0x1") {
+		t.Errorf("fleet = %+v", body)
+	}
+	if body.Journal == nil {
+		t.Error("journal should be an empty array, not null")
+	}
+}
+
+// openStream connects to the event stream and returns a line reader that fails
+// the test after a generous timeout, plus a function that cancels the request.
+func openStream(t *testing.T, url string) (next func() string, cancel context.CancelFunc) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	req, _ := http.NewRequestWithContext(ctx, "GET", url+"/api/v1/events", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET events: %v", err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	lines := make(chan string, 64)
+	go func() {
+		sc := bufio.NewScanner(resp.Body)
+		for sc.Scan() {
+			lines <- sc.Text()
+		}
+		close(lines)
+	}()
+	next = func() string {
+		t.Helper()
+		select {
+		case l, ok := <-lines:
+			if !ok {
+				t.Fatal("stream closed")
+			}
+			return l
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out reading the event stream")
+			return ""
+		}
+	}
+	if l := next(); l != ": connected" {
+		t.Fatalf("first line = %q, want the connected comment", l)
+	}
+	return next, cancel
+}
+
+func awaitEvent(t *testing.T, next func() string, typ, camera string) {
+	t.Helper()
+	var sawEvent, sawData bool
+	for !(sawEvent && sawData) {
+		l := next()
+		switch {
+		case l == "event: "+typ:
+			sawEvent = true
+		case strings.HasPrefix(l, "data: ") && strings.Contains(l, `"camera":"`+camera+`"`):
+			sawData = true
+		}
+	}
+}
+
+func TestEventStreamDeliversChanges(t *testing.T) {
+	ts, _ := newServer(t, Options{})
+	next, _ := openStream(t, ts.URL)
+
+	if r := do(t, "POST", ts.URL+"/api/v1/cameras", `{"id":"lobby"}`); r.StatusCode != 201 {
+		t.Fatalf("add status = %d", r.StatusCode)
+	}
+	awaitEvent(t, next, "camera_added", "lobby")
+}
+
+func TestEventStreamSurvivesFaultThenRemoval(t *testing.T) {
+	ts, _ := newServer(t, Options{})
+	next, _ := openStream(t, ts.URL)
+
+	if r := do(t, "POST", ts.URL+"/api/v1/cameras", `{"id":"gone"}`); r.StatusCode != 201 {
+		t.Fatalf("add status = %d", r.StatusCode)
+	}
+	if r := do(t, "POST", ts.URL+"/api/v1/cameras/gone/faults", `{"kind":"frame_drop","rate":1}`); r.StatusCode != 200 {
+		t.Fatalf("inject status = %d", r.StatusCode)
+	}
+	if r := do(t, "DELETE", ts.URL+"/api/v1/cameras/gone", ""); r.StatusCode != 204 {
+		t.Fatalf("remove status = %d", r.StatusCode)
+	}
+	awaitEvent(t, next, "camera_removed", "gone")
+	// The stream must still be alive for later changes.
+	if r := do(t, "POST", ts.URL+"/api/v1/cameras", `{"id":"after"}`); r.StatusCode != 201 {
+		t.Fatalf("add status = %d", r.StatusCode)
+	}
+	awaitEvent(t, next, "camera_added", "after")
+}
+
+func TestEventStreamHandlerEndsOnDisconnect(t *testing.T) {
+	f := camfarm.StartT(t, camfarm.Spec{Seed: 1, Cameras: []camfarm.CameraSpec{{ID: "front-door"}}})
+	h := Handler(f, Options{})
+	returned := make(chan struct{}, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r)
+		if r.URL.Path == "/api/v1/events" {
+			returned <- struct{}{}
+		}
+	}))
+	t.Cleanup(ts.Close)
+
+	_, cancel := openStream(t, ts.URL)
+	cancel()
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("events handler did not return after the client disconnected")
+	}
 }
