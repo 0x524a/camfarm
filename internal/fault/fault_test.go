@@ -229,12 +229,12 @@ func TestProtectKeyframesDoesNotChangeTheDrawSequence(t *testing.T) {
 }
 
 func TestImplemented(t *testing.T) {
-	for _, k := range []Kind{KindFrameDrop, KindPacketLoss, KindKeyframeStarvation, KindRTSPError, KindTeardown, KindSDPLie} {
+	for _, k := range []Kind{KindFrameDrop, KindPacketLoss, KindKeyframeStarvation, KindRTSPError, KindTeardown, KindSDPLie, KindPTSDTSMismatch, KindPTSDelayed} {
 		if !Implemented(k) {
 			t.Errorf("%s should be implemented", k)
 		}
 	}
-	for _, k := range []Kind{KindJitter, KindBurstDelivery, KindPTSDTSMismatch, KindPTSDelayed, KindAcceptThenSilence} {
+	for _, k := range []Kind{KindJitter, KindBurstDelivery, KindAcceptThenSilence} {
 		if Implemented(k) {
 			t.Errorf("%s should not be implemented yet", k)
 		}

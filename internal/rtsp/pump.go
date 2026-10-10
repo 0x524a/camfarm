@@ -25,6 +25,7 @@ const (
 	detailKeyframeWithheld = "keyframe withheld (not encoded)"
 	detailPacketLossFmt    = "withheld %d of %d packets"
 	detailPacketSparedFmt  = "withheld %d of %d packets; spared %d keyframe packets"
+	detailTimestampFmt     = "timestamp shifted by %d ticks"
 )
 
 // faultSwap is a pending replacement of a pump's fault engine.
@@ -234,6 +235,10 @@ func (p *Pump) Step() error {
 	p.applyPendingFaults()
 	au := p.aus[p.idx]
 
+	// Timestamp faults are consulted once per Step, before the drop check, so a
+	// frame that is removed still advances their counters.
+	shift := p.faults.TimestampShift(p.frameCounter, p.frameDur)
+
 	// The fault seam. frame_drop and keyframe_starvation remove the frame before
 	// it is encoded, so they consume no packet_loss draws.
 	drop := false
@@ -282,7 +287,16 @@ func (p *Pump) Step() error {
 			p.obs.FaultTally(p.id, string(fault.KindPacketLoss), uint64(withheld), uint64(spared))
 		}
 
-		ts := uint32(p.tsOffset + au.DTS)
+		// uint32 of a negative int64 wraps, which is what a camera whose clock
+		// is behind zero would send.
+		ts := uint32(p.tsOffset + au.DTS + shift)
+		if shift != 0 {
+			detail := fmt.Sprintf(detailTimestampFmt, shift)
+			for _, k := range p.faults.TimestampKinds() {
+				p.obs.Fault(p.id, p.frameCounter, string(k), detail)
+				p.obs.FaultTally(p.id, string(k), 1, 0)
+			}
+		}
 		for i, pkt := range pkts {
 			if skip[i] {
 				continue

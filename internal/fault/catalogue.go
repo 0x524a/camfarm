@@ -160,7 +160,7 @@ func Catalogue() []KindInfo {
 			},
 		},
 		{
-			Kind:   KindPTSDTSMismatch,
+			Kind: KindPTSDTSMismatch, Implemented: true,
 			Models: "B-frame camera that stamps presentation time into RTP: timestamps run out of order, so decoders report non-monotonic dts.",
 			Clock:  "frame counter; no randomness",
 			Params: []Param{
@@ -169,7 +169,7 @@ func Catalogue() []KindInfo {
 			},
 		},
 		{
-			Kind:   KindPTSDelayed,
+			Kind: KindPTSDelayed, Implemented: true,
 			Models: "Camera whose timestamps lag capture, constantly or by drift: what a latency profiler such as framelag meets.",
 			Clock:  "frame counter; no randomness",
 			Params: []Param{

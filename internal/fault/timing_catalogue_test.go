@@ -37,15 +37,18 @@ func TestPTSDelayedParamsAreNotIndividuallyRequired(t *testing.T) {
 	}
 }
 
-// validateTimingTable exercises the timing kinds' parameter rules. It calls
-// checkParams directly, so it holds whether or not a kind is implemented yet;
-// once a kind is flipped, the public Validate runs the same checks.
+// validateTimingTable exercises the timing kinds' parameter rules. A kind the
+// catalogue marks Implemented goes through the public Validate; one that is not
+// yet still has its rules checked, directly through checkParams.
 func validateTimingTable(t *testing.T) {
 	t.Helper()
 	check := func(s Spec) error {
 		info, ok := Info(s.Kind)
 		if !ok {
 			t.Fatalf("kind %q not catalogued", s.Kind)
+		}
+		if info.Implemented {
+			return Validate(s)
 		}
 		return checkParams(info, s)
 	}
@@ -82,6 +85,10 @@ func validateTimingTable(t *testing.T) {
 		if !c.ok && !errors.Is(err, ErrBadParam) && !errors.Is(err, ErrBadRate) {
 			t.Errorf("%s: err = %v, want ErrBadParam or ErrBadRate", c.name, err)
 		}
+	}
+	// A rate above 1 is a rate error specifically, not a generic parameter one.
+	if err := check(Spec{Kind: KindBurstDelivery, Rate: 2, HoldFrames: 5}); !errors.Is(err, ErrBadRate) {
+		t.Errorf("burst rate 2: err = %v, want ErrBadRate", err)
 	}
 }
 

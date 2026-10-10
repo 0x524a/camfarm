@@ -160,6 +160,9 @@ type entry struct {
 	// probabilities (good->bad and bad->bad).
 	bad  bool
 	p, q float64
+	// calls counts TimestampShift calls since this entry was installed; it is
+	// pts_delayed's drift clock.
+	calls int
 }
 
 // New returns an Engine for one camera. Each kind draws from its own generator,
