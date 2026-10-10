@@ -257,11 +257,12 @@ closes itself when the test ends.
   exercises **unicast mode only**, so multicast is untested in CI. Multicast joins the
   interface named by `--discovery-interface` (`interface` in the spec); when that is empty
   and `listen.host` is a literal IP it defaults to the interface holding that IP, and with a
-  hostname it falls back to the system default-route interface. Containers on a bridge need the
-  bridge's interface. **On the same host as the fleet, multicast discovery with `onvif-go`'s
+  hostname it falls back to the system default-route interface. Containers on a bridge should need the
+  bridge's interface (reasoned from how multicast joins work, not tested). **On the same host as the fleet, multicast discovery with `onvif-go`'s
   client (and other clients built on Go's `net.ListenMulticastUDP`) finds nothing and never sees
-  Hello or Bye**, because both sides disable `IP_MULTICAST_LOOP`; a Python prober did find the
-  cameras. On one host, use the loopback interface (`lo`), a client that leaves multicast loopback
+  Hello or Bye**, because both sides disable `IP_MULTICAST_LOOP`. This was observed by hand on one Linux
+  machine (`onvif-go`'s client on the LAN interface found none of the fleet's cameras, while probing
+  via `lo` and a Python prober found them); no test covers it. On one host, use the loopback interface (`lo`), a client that leaves multicast loopback
   on, or unicast mode. **Give each fleet on a shared network a distinct seed:** endpoint
   references derive only from the seed (a spec file with no seed, and a zero-value library
   `Spec`, use 0), so two fleets with the same seed advertise identical `urn:uuid:` references
