@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 
 	"github.com/0x524a/camfarm/internal/fault"
@@ -109,6 +110,68 @@ type ListenSpec struct {
 	// ONVIFPort of zero requests an ephemeral port for the ONVIF HTTP
 	// listener, readable back via Camera.ONVIFEndpoint.
 	ONVIFPort int `json:"onvifPort,omitempty"`
+	// Discovery, when set, makes the fleet answer WS-Discovery probes. Nil
+	// (the default) leaves discovery off and the spec's hash unchanged.
+	Discovery *DiscoverySpec `json:"discovery,omitempty"`
+}
+
+// Discovery modes.
+const (
+	// DiscoveryMulticast joins the WS-Discovery multicast group.
+	DiscoveryMulticast = "multicast"
+	// DiscoveryUnicast binds a unicast UDP socket, for tests and CI where
+	// multicast is unavailable.
+	DiscoveryUnicast = "unicast"
+)
+
+// DiscoverySpec configures the WS-Discovery responder.
+type DiscoverySpec struct {
+	// Mode is "multicast" or "unicast".
+	Mode string `json:"mode"`
+	// Interface selects the interface (name or IP) that joins the multicast
+	// group. Multicast mode only.
+	Interface string `json:"interface,omitempty"`
+	// Addr is the UDP address to bind in unicast mode, e.g. 127.0.0.1:0.
+	// Required for unicast; forbidden for multicast.
+	Addr string `json:"addr,omitempty"`
+	// AnnounceAddr is where Hello and Bye go. Unicast mode only; empty
+	// disables announcements.
+	AnnounceAddr string `json:"announceAddr,omitempty"`
+}
+
+// validateDiscovery checks the discovery block against the (defaulted) host.
+func validateDiscovery(d *DiscoverySpec, host string) error {
+	if d == nil {
+		return nil
+	}
+	switch d.Mode {
+	case DiscoveryMulticast:
+		if d.Addr != "" {
+			return fmt.Errorf("%w: listen.discovery.addr is for unicast mode; multicast joins the WS-Discovery group", ErrInvalidSpec)
+		}
+		if d.AnnounceAddr != "" {
+			return fmt.Errorf("%w: listen.discovery.announceAddr applies to unicast mode only", ErrInvalidSpec)
+		}
+	case DiscoveryUnicast:
+		if d.Addr == "" {
+			return fmt.Errorf("%w: listen.discovery.addr is required for unicast mode", ErrInvalidSpec)
+		}
+		if d.Interface != "" {
+			return fmt.Errorf("%w: listen.discovery.interface applies to multicast mode only", ErrInvalidSpec)
+		}
+	default:
+		return fmt.Errorf("%w: listen.discovery.mode %q must be %q or %q", ErrInvalidSpec, d.Mode, DiscoveryMulticast, DiscoveryUnicast)
+	}
+
+	h := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	ip := net.ParseIP(h)
+	if h == "" || (ip != nil && ip.IsUnspecified()) {
+		return fmt.Errorf("%w: listen.host %q is a wildcard address; discovery advertises it in the device XAddr, so clients need a reachable address", ErrInvalidSpec, host)
+	}
+	if d.Mode == DiscoveryMulticast && (strings.EqualFold(h, "localhost") || (ip != nil && ip.IsLoopback())) {
+		return fmt.Errorf("%w: listen.host %q is loopback; multicast discovery would advertise an address no other host can reach, set listen.host to a reachable address", ErrInvalidSpec, host)
+	}
+	return nil
 }
 
 // CameraSpec describes one camera.
@@ -159,6 +222,9 @@ func (s Spec) validate() (Spec, error) {
 	}
 	if s.Listen.Host == "" {
 		s.Listen.Host = "127.0.0.1"
+	}
+	if err := validateDiscovery(s.Listen.Discovery, s.Listen.Host); err != nil {
+		return s, err
 	}
 
 	seen := make(map[string]bool, len(s.Cameras))
