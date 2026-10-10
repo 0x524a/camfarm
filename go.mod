@@ -11,6 +11,7 @@ require (
 	github.com/bluenviron/gortsplib/v5 v5.6.5
 	github.com/bluenviron/mediacommon/v2 v2.9.4
 	github.com/pion/rtp v1.10.5
+	// Used only by the e2e-tagged dashboard tests; not part of the shipped binary.
 	github.com/playwright-community/playwright-go v0.6000.0
 )
 

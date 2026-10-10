@@ -35,8 +35,9 @@ var (
 )
 
 // launch starts Chromium once per test binary. The driver is run with
-// SkipInstallBrowsers so a missing browser surfaces as a failure instead of a
-// silent multi-hundred-megabyte download.
+// SkipInstallBrowsers: that does not skip the driver download, it only stops
+// Run from also downloading browsers, so a missing browser fails at Launch
+// (never skips) instead of triggering a silent multi-hundred-megabyte download.
 func launch(t *testing.T) playwright.Browser {
 	t.Helper()
 	envOnce.Do(func() {
@@ -295,6 +296,7 @@ func TestE2EUnimplementedFaultKindsAreDisabled(t *testing.T) {
 			t.Fatalf("unimplemented fault kind %s is selectable: %v", kind, err)
 		}
 	}
+	s.requireClean(t)
 }
 
 func TestE2ECopyButtonCopiesTheRTSPURL(t *testing.T) {
@@ -369,14 +371,17 @@ func TestE2EBothColourSchemesRender(t *testing.T) {
 	}
 }
 
-// The page polls every 2s, so a change that shows up faster than that came
-// over the SSE stream. The test waits for the stream to open before changing
-// the fleet, then allows well under one poll interval.
+// The page also polls every 2000ms as a fallback. This test neutralises that
+// poll in an init script, waits for the event stream to be open, and only then
+// changes the fleet from the library side. With no poll and no reload, the new
+// row can appear only through the SSE-triggered refresh.
 func TestE2EFleetChangeAppearsWithoutReloadOrPoll(t *testing.T) {
 	url, f := e2eServer(t)
 	s := newSession(t)
 	if err := s.page.AddInitScript(playwright.Script{Content: playwright.String(`
 		window.__sseOpen = false;
+		const si = window.setInterval;
+		window.setInterval = (f, ms, ...a) => ms === 2000 ? 0 : si(f, ms, ...a);
 		const ES = window.EventSource;
 		window.EventSource = function (u, o) {
 			const e = new ES(u, o);
@@ -401,8 +406,7 @@ func TestE2EFleetChangeAppearsWithoutReloadOrPoll(t *testing.T) {
 	if _, err := f.AddCamera(camfarm.CameraSpec{ID: "from-library"}); err != nil {
 		t.Fatal(err)
 	}
-	fast := playwright.NewPlaywrightAssertions(1500)
-	if err := fast.Locator(s.row("from-library")).ToBeVisible(); err != nil {
+	if err := expect().Locator(s.row("from-library")).ToBeVisible(); err != nil {
 		t.Fatalf("library-side AddCamera was not pushed to the page: %v", err)
 	}
 	s.requireClean(t)
