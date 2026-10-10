@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -85,5 +86,90 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 			t.Fatalf("timed out waiting for %s", what)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// failingWriter accepts failAfter writes, then errors like a connection whose
+// peer went away or whose write deadline expired.
+type failingWriter struct {
+	*httptest.ResponseRecorder
+	mu        sync.Mutex
+	failAfter int
+	writes    int
+}
+
+func (w *failingWriter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.writes++
+	if w.writes > w.failAfter {
+		return 0, errors.New("write: connection reset by peer")
+	}
+	return w.ResponseRecorder.Write(b)
+}
+
+func (w *failingWriter) writeCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writes
+}
+
+// A failed write must end the handler promptly instead of leaving the
+// goroutine (and its fleet subscription) parked until the request context ends.
+func TestSSEHandlerReturnsWhenAWriteFails(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		failAfter int
+	}{
+		{"initial comment fails", 0},
+		{"first event fails", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := camfarm.StartT(t, camfarm.Spec{Seed: 1, Cameras: []camfarm.CameraSpec{{ID: "front-door"}}})
+			h := Handler(f, Options{})
+			// The context is only cancelled by the deferred cleanup: the handler
+			// has to exit on its own because of the failed write.
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil).WithContext(ctx)
+			w := &failingWriter{ResponseRecorder: httptest.NewRecorder(), failAfter: tc.failAfter}
+			done := make(chan struct{})
+			go func() { h.ServeHTTP(w, req); close(done) }()
+
+			if tc.failAfter > 0 {
+				waitFor(t, "stream to open", func() bool { return w.writeCount() >= 1 })
+				if _, err := f.AddCamera(camfarm.CameraSpec{ID: "lobby"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("handler still running after a failed write")
+			}
+		})
+	}
+}
+
+// Closing the fleet ends every subscriber's channel; the handler must notice
+// and return rather than wait for the client to disconnect.
+func TestSSEHandlerReturnsWhenTheFleetCloses(t *testing.T) {
+	f := camfarm.StartT(t, camfarm.Spec{Seed: 1, Cameras: []camfarm.CameraSpec{{ID: "front-door"}}})
+	h := Handler(f, Options{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil).WithContext(ctx)
+	w := &deadlineWriter{ResponseRecorder: httptest.NewRecorder()}
+	done := make(chan struct{})
+	go func() { h.ServeHTTP(w, req); close(done) }()
+	waitFor(t, "stream to open", func() bool { return strings.Contains(w.body(), ": connected") })
+
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler still running after the fleet closed")
 	}
 }
