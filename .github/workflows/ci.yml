@@ -140,3 +140,23 @@ jobs:
         uses: SonarSource/sonarqube-scan-action@v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Real-browser tests of the dashboard. A missing browser fails the job; the
+  # tests are never skipped. They sit behind the e2e build tag so the default
+  # `go test ./...` (including the cgo-free build job) needs no browser.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: install Chromium
+        run: go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps chromium
+
+      - name: e2e tests
+        run: go test -tags e2e -count=1 ./internal/dashboard/...
