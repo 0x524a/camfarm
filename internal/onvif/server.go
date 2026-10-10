@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,6 +58,10 @@ type Config struct {
 	Log *slog.Logger
 
 	Cameras []CameraConfig
+
+	// Discovery, when non-nil, answers WS-Discovery probes for every camera.
+	// Nil leaves discovery off.
+	Discovery *DiscoveryConfig
 }
 
 type camera struct {
@@ -65,6 +70,8 @@ type camera struct {
 	rtspURL string
 	uuid    string      // seed-derived endpoint UUID, see EndpointUUID
 	digest  *digestAuth // nil means open
+
+	discoRef string // endpoint ref registered with the responder, "" if none
 }
 
 // Server serves the ONVIF control plane for a fleet, behind one HTTP
@@ -79,6 +86,23 @@ type Server struct {
 	http *http.Server
 	cams map[string]*camera
 
+	// responder is the running WS-Discovery responder; nil when discovery is
+	// disabled or the server is not started.
+	responder *responderState
+
+	// starting is non-nil (and closed when it ends) while Start brings the
+	// responder up with s.mu released. AddCamera and RemoveCamera wait for it,
+	// so no Register overlaps the responder's startup Hellos. Close sets
+	// startAborted and waits, and Start then tears itself down.
+	starting     chan struct{}
+	startAborted bool
+	// closing is non-nil while a Close is stopping the server; concurrent
+	// Close calls wait on it so none returns before the stop finished.
+	closing chan struct{}
+
+	// startWindowHook, when set by a test, runs inside the starting window.
+	startWindowHook func()
+
 	// snapshotTimeout bounds each snapshot capture; tests shorten it.
 	snapshotTimeout time.Duration
 }
@@ -90,6 +114,11 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.Host == "" {
 		cfg.Host = "127.0.0.1"
+	}
+	if cfg.Discovery != nil {
+		if err := cfg.Discovery.validate(); err != nil {
+			return nil, err
+		}
 	}
 	log := cfg.Log
 	if log == nil {
@@ -188,7 +217,7 @@ func buildCamera(cc CameraConfig) (*camera, error) {
 // not Start has been called yet: unlike internal/rtsp, nothing here depends
 // on a live listener, only on the in-memory dispatch map.
 func (s *Server) AddCamera(cc CameraConfig) error {
-	s.mu.Lock()
+	s.lockIdle()
 	defer s.mu.Unlock()
 
 	if err := validateCameraConfig(cc, s.cams); err != nil {
@@ -199,6 +228,15 @@ func (s *Server) AddCamera(cc CameraConfig) error {
 		return err
 	}
 	s.cams[cc.ID] = cam
+	if s.responder != nil {
+		if err := s.registerLocked(s.responder.resp, cam); err != nil {
+			// A failed Register took no effect on the responder (and
+			// registerLocked sets discoRef only on success), so there is
+			// nothing to unregister; just undo the local insert.
+			delete(s.cams, cc.ID)
+			return err
+		}
+	}
 
 	s.log.Info("camera added", "camera", cc.ID)
 	return nil
@@ -207,11 +245,15 @@ func (s *Server) AddCamera(cc CameraConfig) error {
 // RemoveCamera removes a camera's ONVIF endpoint. There is no goroutine or
 // stream to tear down on this side, so this is just the dispatch removal.
 func (s *Server) RemoveCamera(id string) error {
-	s.mu.Lock()
+	s.lockIdle()
 	defer s.mu.Unlock()
 
-	if _, ok := s.cams[id]; !ok {
+	cam, ok := s.cams[id]
+	if !ok {
 		return fmt.Errorf("onvif: unknown camera %q", id)
+	}
+	if s.responder != nil && cam.discoRef != "" {
+		s.responder.resp.Unregister(cam.discoRef)
 	}
 	delete(s.cams, id)
 
@@ -222,7 +264,7 @@ func (s *Server) RemoveCamera(id string) error {
 // Start binds the listener and begins serving.
 func (s *Server) Start() error {
 	s.mu.Lock()
-	if s.ln != nil || s.http != nil {
+	if s.ln != nil || s.http != nil || s.starting != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("onvif: already started")
 	}
@@ -234,31 +276,140 @@ func (s *Server) Start() error {
 	}
 	httpSrv := &http.Server{Handler: s.mux}
 
+	if d := s.cfg.Discovery; d != nil && d.Multicast {
+		// The spec check sees only the literal host text; a hostname can
+		// still resolve to loopback.
+		if tcp, ok := ln.Addr().(*net.TCPAddr); ok && tcp.IP.IsLoopback() {
+			s.mu.Unlock()
+			_ = ln.Close()
+			return fmt.Errorf("onvif: listen.host %q resolves to loopback %s; multicast discovery would advertise an address no other host can reach", s.cfg.Host, tcp.IP)
+		}
+	}
+
 	s.ln = ln
-	s.http = httpSrv
+	if s.cfg.Discovery == nil {
+		s.http = httpSrv
+		n := len(s.cams)
+		s.mu.Unlock()
+		s.serve(httpSrv, ln, n)
+		return nil
+	}
+
+	// Started only now that the ONVIF listener is bound, so the XAddrs
+	// advertised in Hello and ProbeMatches carry the real port. The wait for
+	// the responder happens with s.mu released (handlers need RLock), guarded
+	// by s.starting instead.
+	resp, ready, n, err := s.newResponder()
+	if err != nil {
+		s.ln = nil
+		s.mu.Unlock()
+		_ = ln.Close()
+		return err
+	}
+	done := make(chan struct{})
+	s.starting, s.startAborted = done, false
+	hook := s.startWindowHook
 	s.mu.Unlock()
 
+	if hook != nil {
+		hook()
+	}
+	st, err := s.runResponder(resp, ready, n)
+
+	s.mu.Lock()
+	aborted := s.startAborted
+	s.starting, s.startAborted = nil, false
+	if err != nil || aborted {
+		s.ln = nil
+	} else {
+		s.responder, s.http = st, httpSrv
+	}
+	s.mu.Unlock()
+
+	// Teardown completes before done is closed, so a Close waiting on it
+	// returns only once nothing is left running.
+	defer close(done)
+	switch {
+	case err != nil:
+		_ = ln.Close()
+		return err
+	case aborted:
+		st.stop(s)
+		_ = ln.Close()
+		return fmt.Errorf("onvif: closed while starting")
+	}
+	s.serve(httpSrv, ln, n)
+	return nil
+}
+
+func (s *Server) serve(httpSrv *http.Server, ln net.Listener, cameras int) {
 	go func() {
 		if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			s.log.Warn("onvif server stopped", "err", err)
 		}
 	}()
-
-	s.log.Info("onvif server started", "addr", ln.Addr().String(), "cameras", len(s.cams))
-	return nil
+	s.log.Info("onvif server started", "addr", ln.Addr().String(), "cameras", cameras)
 }
 
-// Close stops the server. Safe to call more than once.
+// lockIdle takes s.mu for writing once no Start is mid-way through bringing
+// the responder up.
+func (s *Server) lockIdle() {
+	for {
+		s.mu.Lock()
+		ch := s.starting
+		if ch == nil {
+			return
+		}
+		s.mu.Unlock()
+		<-ch
+	}
+}
+
+// Close stops the server. Safe to call more than once and from several
+// goroutines: every call returns only after the server has fully stopped. A
+// Close that arrives while Start is bringing the responder up makes that Start
+// fail and tear itself down.
 func (s *Server) Close() {
 	s.mu.Lock()
+	for {
+		if ch := s.starting; ch != nil {
+			s.startAborted = true
+			s.mu.Unlock()
+			<-ch
+			s.mu.Lock()
+			continue
+		}
+		if ch := s.closing; ch != nil {
+			s.mu.Unlock()
+			<-ch
+			return
+		}
+		break
+	}
 	httpSrv := s.http
+	st := s.responder
+	if httpSrv == nil && st == nil {
+		s.mu.Unlock()
+		return
+	}
+	ch := make(chan struct{})
+	s.closing = ch
 	s.http = nil
 	s.ln = nil
+	s.responder = nil
 	s.mu.Unlock()
 
+	if st != nil {
+		st.stop(s)
+	}
 	if httpSrv != nil {
 		_ = httpSrv.Close()
 	}
+
+	s.mu.Lock()
+	s.closing = nil
+	s.mu.Unlock()
+	close(ch)
 }
 
 // Addr returns the bound address, or nil before a successful Start or after
@@ -290,7 +441,18 @@ func (s *Server) Endpoint(cameraID string) string {
 	if !ok {
 		return ""
 	}
-	return fmt.Sprintf("http://%s/onvif/%s", addr.String(), cameraID)
+	return baseURL(addr, cameraID)
+}
+
+// baseURL builds "http://host:port/onvif/<id>" for a bound listener address.
+// A link-local IPv6 zone ("fe80::1%eth0") is written as %25eth0, as RFC 6874
+// requires, and the camera ID is escaped as a path segment.
+func baseURL(addr net.Addr, cameraID string) string {
+	hostport := addr.String()
+	if tcp, ok := addr.(*net.TCPAddr); ok && tcp.Zone != "" {
+		hostport = net.JoinHostPort(tcp.IP.String()+"%25"+url.PathEscape(tcp.Zone), strconv.Itoa(tcp.Port))
+	}
+	return fmt.Sprintf("http://%s/onvif/%s", hostport, url.PathEscape(cameraID))
 }
 
 func (s *Server) deviceURL(id string) string   { return s.Endpoint(id) + "/device" }

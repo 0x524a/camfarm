@@ -89,7 +89,7 @@ their APIs, since they may still be in flux:
    `main` now serves RTSP media plus a real ONVIF control-plane slice (Device and Media services,
    HTTP Digest auth, no WS-Security UsernameToken) — see the README's Status section for the current
    "Works" list, which is the source of truth for what has actually shipped rather than this file.
-   This does not resolve how much further ONVIF goes: PTZ, Imaging, and WS-Discovery remain deferred,
+   This does not resolve how much further ONVIF goes: PTZ and Imaging remain deferred (an opt-in WS-Discovery responder has since shipped),
    not decided against, simply not built yet. Treat any future slice's own design doc as the place
    that widens this, not an assumption made here.
 
@@ -133,11 +133,12 @@ answer; do not invent a decision that has not been made.
    should be measured, not asserted; build the harness to make that measurement rather than guessing at
    a number up front.
 
-5. **Discovery.** Whether to implement a WS-Discovery responder so real ONVIF clients can find the
-   fake fleet via multicast, and if so, how to handle the practical failure modes: multicast inside
-   Docker, multicast in CI runners, and multicast across network namespaces. This is a common source of
-   "works on a laptop, fails in CI," so the design needs to account for it rather than discover it
-   later.
+5. **Discovery.** A WS-Discovery responder has shipped: opt-in (`listen.discovery`,
+   `--discovery`), unicast and multicast, built on `onvif-go`'s responder with Hello/Bye following
+   camera add/remove, and CI exercises unicast only. What remains genuinely open is how multicast
+   behaves on real networks (Docker bridge networks, CI runners, network namespaces, firewalls and
+   IGMP); that has not been measured, so do not assert it. Resolve and WS-Discovery 1.1 are not
+   supported because the underlying responder does not support them.
 
 6. **Library or binary.** This needs to be usable as a Go library from another project's tests,
    something like `camfarm.Start(spec)` inside a `TestMain`, and not only as a standalone binary,
