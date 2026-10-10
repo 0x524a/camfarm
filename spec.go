@@ -68,6 +68,8 @@ type FaultSpec struct {
 	Kind string `json:"kind"`
 	// Rate is the per-frame probability for rate-based faults, in [0,1].
 	Rate float64 `json:"rate,omitempty"`
+	// ProtectKeyframes, for frame_drop, never drops a random-access frame.
+	ProtectKeyframes bool `json:"protectKeyframes,omitempty"`
 }
 
 // ListenSpec describes what the fleet binds.
@@ -156,13 +158,13 @@ func (s Spec) validate() (Spec, error) {
 // what a valid CameraSpec is.
 func validateCameraSpec(c CameraSpec, seen map[string]bool) (CameraSpec, error) {
 	if c.ID == "" {
-		return c, fmt.Errorf("camfarm: camera has an empty ID")
+		return c, fmt.Errorf("%w: camera has an empty ID", ErrInvalidSpec)
 	}
 	if strings.ContainsAny(c.ID, "/?# ") {
-		return c, fmt.Errorf("camfarm: camera ID %q contains a character reserved in a URL path", c.ID)
+		return c, fmt.Errorf("%w: camera ID %q contains a character reserved in a URL path", ErrInvalidSpec, c.ID)
 	}
 	if seen[c.ID] {
-		return c, fmt.Errorf("camfarm: duplicate camera ID %q", c.ID)
+		return c, fmt.Errorf("%w: %q", ErrDuplicateCamera, c.ID)
 	}
 	seen[c.ID] = true
 
@@ -172,14 +174,14 @@ func validateCameraSpec(c CameraSpec, seen map[string]bool) (CameraSpec, error) 
 	switch c.Source.Kind {
 	case SourceFixture:
 		if c.Source.Path != "" {
-			return c, fmt.Errorf("camfarm: camera %q uses the bundled fixture but also sets a path", c.ID)
+			return c, fmt.Errorf("%w: camera %q uses the bundled fixture but also sets a path", ErrInvalidSpec, c.ID)
 		}
 	case SourceFile:
 		if c.Source.Path == "" {
-			return c, fmt.Errorf("camfarm: camera %q has source kind %q but no path", c.ID, SourceFile)
+			return c, fmt.Errorf("%w: camera %q has source kind %q but no path", ErrInvalidSpec, c.ID, SourceFile)
 		}
 	default:
-		return c, fmt.Errorf("camfarm: camera %q has unknown source kind %q", c.ID, c.Source.Kind)
+		return c, fmt.Errorf("%w: camera %q has unknown source kind %q", ErrInvalidSpec, c.ID, c.Source.Kind)
 	}
 
 	// Only the string is checked here; comparing it against the loaded
@@ -196,21 +198,31 @@ func validateCameraSpec(c CameraSpec, seen map[string]bool) (CameraSpec, error) 
 
 	for _, f := range c.Faults {
 		if !fault.Known(fault.Kind(f.Kind)) {
-			return c, fmt.Errorf("camfarm: camera %q requests unknown fault kind %q", c.ID, f.Kind)
+			return c, fmt.Errorf("%w: camera %q requests unknown fault kind %q", ErrInvalidSpec, c.ID, f.Kind)
 		}
 		if f.Rate < 0 || f.Rate > 1 {
-			return c, fmt.Errorf("camfarm: camera %q fault %q has rate %v outside [0,1]", c.ID, f.Kind, f.Rate)
+			return c, fmt.Errorf("%w: camera %q fault %q has rate %v outside [0,1]", ErrInvalidSpec, c.ID, f.Kind, f.Rate)
 		}
-		// Catalogued, validated, and refused. Accepting it silently would make a
-		// test that asked for a fault pass while nothing misbehaved, which is
-		// worse than refusing.
-		return c, fmt.Errorf("%w: fault %q is catalogued but its effect is not implemented in this version",
-			ErrUnsupported, f.Kind)
+		if !fault.Implemented(fault.Kind(f.Kind)) {
+			// Catalogued, validated, and refused. Accepting it silently would
+			// make a test that asked for a fault pass while nothing misbehaved.
+			return c, fmt.Errorf("%w: fault %q is catalogued but its effect is not implemented in this version",
+				ErrUnsupported, f.Kind)
+		}
 	}
 
 	if (c.Auth.Username == "") != (c.Auth.Password == "") {
-		return c, fmt.Errorf("camfarm: camera %q sets one of auth username/password but not both", c.ID)
+		return c, fmt.Errorf("%w: camera %q sets one of auth username/password but not both", ErrInvalidSpec, c.ID)
 	}
 
 	return c, nil
+}
+
+// toFaultSpecs converts the public fault specs to the engine's.
+func toFaultSpecs(in []FaultSpec) []fault.Spec {
+	out := make([]fault.Spec, 0, len(in))
+	for _, f := range in {
+		out = append(out, fault.Spec{Kind: fault.Kind(f.Kind), Rate: f.Rate, ProtectKeyframes: f.ProtectKeyframes})
+	}
+	return out
 }
