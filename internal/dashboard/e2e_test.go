@@ -171,10 +171,14 @@ func (s *session) row(id string) playwright.Locator {
 }
 
 func TestE2ECameraTableRendersURLsAndReplayLine(t *testing.T) {
-	url, _ := e2eServer(t)
+	url, fleet := e2eServer(t)
 	s := newSession(t)
 	s.open(t, url)
 	row := s.row("front-door")
+	cam, _ := fleet.Camera("front-door")
+	if err := expect().Locator(row.Locator(`[data-testid="cell-uuid"]`)).ToHaveText(cam.ONVIFUUID()); err != nil {
+		t.Fatalf("ONVIF UUID missing: %v", err)
+	}
 	if err := expect().Locator(row).ToBeVisible(); err != nil {
 		t.Fatalf("row not visible: %v", err)
 	}
@@ -293,7 +297,7 @@ func TestE2EUnimplementedFaultKindsAreDisabled(t *testing.T) {
 	url, _ := e2eServer(t)
 	s := newSession(t)
 	s.open(t, url)
-	for _, kind := range []string{"keyframe_starvation", "packet_loss"} {
+	for _, kind := range []string{"teardown_mid_session", "accept_then_silence"} {
 		opt := s.page.Locator(fmt.Sprintf(`tr[data-id="front-door"] .fault-kind option[value=%q]`, kind))
 		if err := expect().Locator(opt).ToBeDisabled(); err != nil {
 			t.Fatalf("unimplemented fault kind %s is selectable: %v", kind, err)
@@ -443,6 +447,86 @@ func TestE2EPrototypeNamedCameraIDsRenderAndRemove(t *testing.T) {
 	}
 	if err := expect().Locator(s.row("front-door")).ToBeVisible(); err != nil {
 		t.Fatalf("the original camera disappeared: %v", err)
+	}
+	s.requireClean(t)
+}
+
+func selectKind(t *testing.T, kind playwright.Locator, v string) {
+	t.Helper()
+	if _, err := kind.SelectOption(playwright.SelectOptionValues{Values: &[]string{v}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestE2EFaultFormFollowsTheCatalogue(t *testing.T) {
+	url, _ := e2eServer(t)
+	s := newSession(t)
+	s.open(t, url)
+	row := s.row("front-door")
+	kind := row.Locator(".fault-kind")
+
+	selectKind(t, kind, "keyframe_starvation")
+	if err := expect().Locator(row.Locator(`.fault-param[data-param="keepEvery"]`)).ToBeVisible(); err != nil {
+		t.Fatalf("keepEvery input missing for keyframe_starvation: %v", err)
+	}
+	if err := expect().Locator(row.Locator(`.fault-param[data-param="rate"]`)).ToHaveCount(0); err != nil {
+		t.Fatalf("rate input should not exist for keyframe_starvation: %v", err)
+	}
+	if err := expect().Locator(row.Locator(".fault-hint")).ToContainText("keyframe"); err != nil {
+		t.Fatalf("hint text missing: %v", err)
+	}
+
+	selectKind(t, kind, "packet_loss")
+	for _, p := range []string{"rate", "meanBurst", "protectKeyframes"} {
+		if err := expect().Locator(row.Locator(`.fault-param[data-param="` + p + `"]`)).ToBeVisible(); err != nil {
+			t.Fatalf("%s input missing for packet_loss: %v", p, err)
+		}
+	}
+	s.requireClean(t)
+}
+
+func TestE2EApplyAndClearPacketLossAndKeyframeStarvation(t *testing.T) {
+	url, f := e2eServer(t)
+	s := newSession(t)
+	s.open(t, url)
+	row := s.row("front-door")
+	kind := row.Locator(".fault-kind")
+	cam, _ := f.Camera("front-door")
+
+	selectKind(t, kind, "packet_loss")
+	if err := row.Locator(`.fault-param[data-param="rate"]`).Fill("0.4"); err != nil {
+		t.Fatal(err)
+	}
+	if err := row.Locator(`.fault-param[data-param="meanBurst"]`).Fill("3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := row.Locator(".btn-fault").Click(); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(row.Locator(".fault-active")).ToContainText("packet_loss"); err != nil {
+		t.Fatalf("packet_loss not shown as active: %v", err)
+	}
+	got := cam.Faults()
+	if len(got) != 1 || got[0].Kind != "packet_loss" || got[0].MeanBurst != 3 || got[0].Rate != 0.4 {
+		t.Fatalf("camera faults = %+v", got)
+	}
+
+	selectKind(t, kind, "keyframe_starvation")
+	if err := row.Locator(`.fault-param[data-param="keepEvery"]`).Fill("2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := row.Locator(".btn-fault").Click(); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(row.Locator(".fault-active")).ToContainText("keyframe_starvation"); err != nil {
+		t.Fatalf("keyframe_starvation not shown as active: %v", err)
+	}
+
+	if err := row.Locator(".btn-clear-fault").Click(); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(row.Locator(".fault-active")).ToContainText("none"); err != nil {
+		t.Fatalf("faults not cleared: %v", err)
 	}
 	s.requireClean(t)
 }

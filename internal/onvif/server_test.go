@@ -210,3 +210,39 @@ func TestRemoveUnknownCameraErrorsONVIF(t *testing.T) {
 		t.Fatal("RemoveCamera of an unknown camera succeeded, want an error")
 	}
 }
+
+func TestGetEndpointReferenceReturnsTheCameraUUID(t *testing.T) {
+	srv := startTestServer(t,
+		CameraConfig{ID: "a", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/a", Seed: seed.Seed(1)},
+		CameraConfig{ID: "b", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/b", Seed: seed.Seed(2)},
+	)
+	guid := func(id string, s seed.Seed) string {
+		t.Helper()
+		resp := soapRequest(t, srv.Endpoint(id)+"/device", "GetEndpointReference")
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("%s: status = %d, want 200", id, resp.StatusCode)
+		}
+		out, _ := io.ReadAll(resp.Body)
+		want := EndpointUUID(s)
+		if !bytes.Contains(out, []byte("http://www.onvif.org/ver10/device/wsdl")) {
+			t.Fatalf("%s: body = %q, want the device namespace URI", id, out)
+		}
+		if !bytes.Contains(out, []byte("GetEndpointReferenceResponse")) || !bytes.Contains(out, []byte(">"+want+"<")) {
+			t.Fatalf("%s: body = %q, want a GetEndpointReferenceResponse carrying GUID %s", id, out, want)
+		}
+		return want
+	}
+	if guid("a", seed.Seed(1)) == guid("b", seed.Seed(2)) {
+		t.Fatal("two cameras answered with the same GUID")
+	}
+}
+
+func TestGetEndpointReferenceWithoutCredentialsIs401(t *testing.T) {
+	srv := startTestServer(t, CameraConfig{ID: "a", Media: testMedia(), RTSPURL: "rtsp://127.0.0.1:9/a", Seed: seed.Seed(1), Username: "u", Password: "p"})
+	resp := soapRequest(t, srv.Endpoint("a")+"/device", "GetEndpointReference")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}

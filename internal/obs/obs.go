@@ -18,11 +18,22 @@ type Event struct {
 	Detail     string
 }
 
-// Counters are per-camera totals.
+// KindCount tallies one fault kind's effects on one camera. Applied counts
+// frames dropped, packets withheld or keyframes withheld; Suppressed counts
+// decisions spared by ProtectKeyframes.
+type KindCount struct {
+	Applied    uint64
+	Suppressed uint64
+}
+
+// Counters are per-camera totals. ByKind holds per-fault-kind effect tallies;
+// it is never nil in a snapshot returned by Recorder.Counters. Counters holds
+// a map, so it is not comparable with ==.
 type Counters struct {
 	FramesServed   uint64
 	LoopsCompleted uint64
 	FaultsFired    uint64
+	ByKind         map[string]KindCount
 }
 
 // Recorder collects counters and a bounded event log. It is safe for concurrent
@@ -116,14 +127,37 @@ func (r *Recorder) Fault(cameraID string, frameIndex int, kind, detail string) {
 	r.dropped++
 }
 
-// Counters returns a snapshot for one camera. An unknown camera reads as zero.
+// FaultTally adds to a camera's per-kind effect counts. It is separate from
+// Fault so that one event can account for many packets. It neither increments
+// FaultsFired nor logs an event; the caller still calls Fault for that.
+func (r *Recorder) FaultTally(cameraID, kind string, applied, suppressed uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c := r.counterFor(cameraID)
+	if c.ByKind == nil {
+		c.ByKind = make(map[string]KindCount)
+	}
+	k := c.ByKind[kind]
+	k.Applied += applied
+	k.Suppressed += suppressed
+	c.ByKind[kind] = k
+}
+
+// Counters returns a snapshot for one camera. An unknown camera reads as zero,
+// with ByKind non-nil and empty. The snapshot's ByKind is an independent copy:
+// mutating it does not affect the recorder.
 func (r *Recorder) Counters(cameraID string) Counters {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	out := Counters{ByKind: map[string]KindCount{}}
 	if c, ok := r.counters[cameraID]; ok {
-		return *c
+		out = *c
+		out.ByKind = make(map[string]KindCount, len(c.ByKind))
+		for k, v := range c.ByKind {
+			out.ByKind[k] = v
+		}
 	}
-	return Counters{}
+	return out
 }
 
 // Events returns a copy of the retained event log, oldest first.

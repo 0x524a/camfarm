@@ -63,6 +63,7 @@ type camera struct {
 	id      string
 	srv     *onvifserver.Server
 	rtspURL string
+	uuid    string      // seed-derived endpoint UUID, see EndpointUUID
 	digest  *digestAuth // nil means open
 }
 
@@ -174,7 +175,7 @@ func buildCamera(cc CameraConfig) (*camera, error) {
 		return nil, fmt.Errorf("onvif: wiring stream URI for %q: %w", cc.ID, err)
 	}
 
-	cam := &camera{id: cc.ID, srv: srv, rtspURL: cc.RTSPURL}
+	cam := &camera{id: cc.ID, srv: srv, rtspURL: cc.RTSPURL, uuid: EndpointUUID(cc.Seed)}
 	if cc.Username != "" && cc.Password != "" {
 		cam.digest = newDigestAuth(cc.Username, cc.Password, cc.Seed.Stream("onvif-auth"))
 	}
@@ -349,16 +350,23 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h, ok := handlers[actionName]
-	if !ok {
-		writeFault(w, "Client", "Action not supported")
-		return
-	}
-
-	resp, err := h(cam.srv, payload)
-	if err != nil {
-		writeFault(w, "Server", err.Error())
-		return
+	var resp any
+	if actionName == "GetEndpointReference" {
+		// onvif-go has no such handler: answered natively from the camera's
+		// seed-derived UUID.
+		resp = &getEndpointReferenceResponse{GUID: cam.uuid}
+	} else {
+		h, ok := handlers[actionName]
+		if !ok {
+			writeFault(w, "Client", "Action not supported")
+			return
+		}
+		var herr error
+		resp, herr = h(cam.srv, payload)
+		if herr != nil {
+			writeFault(w, "Server", herr.Error())
+			return
+		}
 	}
 
 	rewriteXAddr(resp, s.deviceURL(id), s.mediaURL(id))

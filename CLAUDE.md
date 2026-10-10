@@ -121,7 +121,8 @@ answer; do not invent a decision that has not been made.
    teardown mid-session, TCP reset, RTSP interleaved-versus-UDP transport differences, and timestamp
    discontinuities. Decide which belong in the first usable version and which are later work, and hold
    each candidate to the standard that it maps to a real class of field bug rather than being arbitrary
-   chaos for its own sake.
+   chaos for its own sake. Slice A (`frame_drop`, `packet_loss`, `keyframe_starvation`, the catalogue) has
+   shipped; see the README fault table for the current state.
 
 3. **Determinism and reproducibility mechanics.** How a seed is threaded through fault selection,
    how a failing test reports the seed and fleet spec needed to reproduce the failure, and what "replay

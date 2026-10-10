@@ -67,6 +67,7 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
 #error:empty { position: absolute; width: 1px; height: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 #conn { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
 .fault-active { color: var(--ok); font-size: 12px; }
+.fault-hint { color: var(--muted); font-size: 12px; }
 .fault-controls input[type="number"] { width: 72px; }
 .empty { color: var(--muted); padding: 12px 8px; }
 </style>
@@ -84,6 +85,7 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
   </div>
 
   <div id="error" role="alert"></div>
+  <p id="notice" class="sub" role="status"></p>
 
   <div class="panel">
     <h2>Add a camera</h2>
@@ -122,6 +124,9 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
   var errorBox = document.getElementById("error");
   var connBox = document.getElementById("conn");
   var rows = Object.create(null);            // id -> {tr, refs, snapshotURL}
+  var catalogue = [];       // [{kind, implemented, models, clock, params:[...]}]
+  var noticeBox = document.getElementById("notice");
+  function showNotice(msg) { noticeBox.textContent = msg || ""; }
   var seq = 0, applied = 0; // refresh ordering: ignore responses older than the last applied
 
   // #error carries action errors only. Polling failures go to #conn, so a
@@ -142,6 +147,11 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
       });
     });
   }
+
+  var catalogueReady = request("GET", "/faults")
+    .then(function (r) { return r.json(); })
+    .then(function (c) { catalogue = c; })
+    .catch(function (e) { showNotice("Fault catalogue unavailable: " + e.message); });
 
   function el(tag, props, children) {
     var n = document.createElement(tag);
@@ -173,31 +183,82 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
     return el("button", { class: "copy secondary", type: "button", text: "Copy", "data-copy": value, "aria-label": "Copy " + what });
   }
 
-  function urlLine(label, value, cls) {
+  function urlLine(label, value, cls, copyLabel) {
     return el("div", { class: "row" }, [
       el("span", { text: label }),
       el("code", { class: cls, "data-testid": cls, text: value }),
-      copyButton(value, label + " URL")
+      copyButton(value, copyLabel || (label + " URL"))
     ]);
   }
 
   function faultText(c) {
     if (!c.faults.length) { return "none"; }
+    var counts = (c.stats && c.stats.FaultCounts) || {};
     return c.faults.map(function (f) {
-      return f.kind + " " + f.rate + (f.protectKeyframes ? " (keyframes protected)" : "");
+      var parts = [f.kind];
+      ["rate", "meanBurst", "keepEvery"].forEach(function (k) { if (f[k]) { parts.push(k + "=" + f[k]); } });
+      if (f.protectKeyframes) { parts.push("keyframes protected"); }
+      var n = counts[f.kind];
+      if (n) { parts.push("applied " + n.Applied + (n.Suppressed ? ", spared " + n.Suppressed : "")); }
+      return parts.join(" ");
     }).join(", ");
   }
 
   function createRow(c) {
     var entry = { snapshotURL: "" };
 
-    var rate = el("input", { class: "fault-rate", type: "number", min: "0", max: "1", step: "0.05", value: "0.2", "aria-label": "Rate, drop rate for " + c.id });
-    var protect = el("input", { class: "fault-protect", type: "checkbox", "aria-label": "Keep keyframes, protect keyframes for " + c.id });
-    var kind = el("select", { class: "fault-kind", "aria-label": "Fault kind for " + c.id }, [
-      el("option", { value: "frame_drop", text: "frame_drop" }),
-      el("option", { value: "keyframe_starvation", text: "keyframe_starvation (not implemented)", disabled: true }),
-      el("option", { value: "packet_loss", text: "packet_loss (not implemented)", disabled: true })
-    ]);
+    var kind = el("select", { class: "fault-kind", "aria-label": "Fault kind for " + c.id });
+    catalogue.forEach(function (k) {
+      kind.appendChild(el("option", {
+        value: k.kind,
+        text: k.implemented ? k.kind : k.kind + " (not implemented)",
+        disabled: !k.implemented
+      }));
+    });
+    var paramBox = el("div", { class: "fault-params row" });
+    var hint = el("div", { class: "fault-hint" });
+
+    function paramInput(k, p) {
+      var input;
+      if (p.type === "boolean") {
+        input = el("input", { type: "checkbox", checked: p["default"] === true });
+      } else if (p.type === "number" || p.type === "integer") {
+        input = el("input", { type: "number", value: p["default"] === undefined ? "" : String(p["default"]) });
+        if (p.min !== undefined) { input.setAttribute("min", String(p.min)); }
+        if (p.max !== undefined) { input.setAttribute("max", String(p.max)); }
+        input.setAttribute("step", p.type === "integer" ? "1" : "any");
+      } else {
+        showNotice("Skipped parameter " + p.name + " of " + k.kind + ": unsupported type " + p.type);
+        return null;
+      }
+      var cls = "fault-param";
+      if (p.name === "rate") { cls += " fault-rate"; }
+      if (p.name === "protectKeyframes") { cls += " fault-protect"; }
+      input.className = cls;
+      input.setAttribute("data-param", p.name);
+      input.setAttribute("title", p.help || "");
+      input.setAttribute("aria-label", p.name + " for " + c.id);
+      return input;
+    }
+
+    function renderParams() {
+      var k = catalogue.filter(function (x) { return x.kind === kind.value; })[0];
+      paramBox.textContent = "";
+      hint.textContent = "";
+      if (!k) { return; }
+      hint.textContent = k.models;
+      (k.params || []).forEach(function (p) {
+        var input = paramInput(k, p);
+        if (!input) { return; }
+        paramBox.appendChild(el("label", {}, [p.name + (p.required ? " *" : ""), input]));
+        if (p.help) { hint.textContent += " " + p.name + ": " + p.help; }
+      });
+    }
+    // Default to the first implemented kind.
+    var firstImpl = catalogue.filter(function (x) { return x.implemented; })[0];
+    if (firstImpl) { kind.value = firstImpl.kind; }
+    kind.addEventListener("change", renderParams);
+    renderParams();
 
     var img = el("img", { class: "snapshot", alt: "Snapshot of " + c.id, hidden: true });
     var base = "/cameras/" + encodeURIComponent(c.id);
@@ -220,15 +281,24 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
 
     var applyBtn = el("button", { class: "btn-fault", type: "button", text: "Apply fault" });
     guard(applyBtn, function () {
-      return request("POST", base + "/faults",
-        { kind: kind.value, rate: parseFloat(rate.value), protectKeyframes: protect.checked }).then(refresh);
+      var body = { kind: kind.value };
+      paramBox.querySelectorAll(".fault-param").forEach(function (input) {
+        var name = input.getAttribute("data-param");
+        if (input.type === "checkbox") {
+          if (input.checked) { body[name] = true; }
+        } else if (input.value !== "") {
+          body[name] = parseFloat(input.value);
+        }
+      });
+      return request("POST", base + "/faults", body).then(refresh);
     });
     var clearBtn = el("button", { class: "btn-clear-fault secondary", type: "button", text: "Clear" });
     guard(clearBtn, function () { return request("DELETE", base + "/faults").then(refresh); });
 
     var urls = el("td", {}, [
       urlLine("RTSP", c.rtspUrl, "cell-rtsp"),
-      urlLine("ONVIF", c.onvifEndpoint, "cell-onvif")
+      urlLine("ONVIF", c.onvifEndpoint, "cell-onvif"),
+      urlLine("UUID", c.onvifUuid, "cell-uuid", "UUID")
     ]);
     if (c.username) {
       urls.appendChild(el("div", { class: "row" }, [el("span", { text: "Auth" }), el("code", { text: c.username + " / " + c.password })]));
@@ -249,7 +319,7 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
       el("td", {}, [statsA, statsB]),
       el("td", {}, [
         active,
-        el("div", { class: "fault-controls row" }, [kind, el("label", {}, ["Rate", rate]), el("label", {}, ["Keep keyframes", protect])])
+        el("div", { class: "fault-controls row" }, [kind, paramBox, hint])
       ]),
       el("td", {}, [
         el("div", { class: "row" }, [snapBtn, applyBtn, clearBtn, removeBtn]),
@@ -291,7 +361,9 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
     document.getElementById("empty").hidden = cameras.length > 0;
   }
 
-  function refresh() {
+  function refresh() { return catalogueReady.then(doRefresh); }
+
+  function doRefresh() {
     var mine = ++seq;
     return Promise.all([
       request("GET", "/cameras").then(function (r) { return r.json(); }),

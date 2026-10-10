@@ -11,7 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/0x524a/camfarm/internal/fault"
 	"github.com/0x524a/camfarm/internal/media"
 	"github.com/0x524a/camfarm/internal/obs"
 	"github.com/0x524a/camfarm/internal/onvif"
@@ -52,6 +51,12 @@ type Status struct {
 	Readers int
 }
 
+// FaultCount is one fault kind's tally.
+type FaultCount struct {
+	Applied    uint64
+	Suppressed uint64
+}
+
 // Stats are a camera's counters, correlated with the seed that produced them.
 type Stats struct {
 	// Seed is this camera's derived seed, not the fleet root.
@@ -61,8 +66,14 @@ type Stats struct {
 	FramesServed uint64
 	// LoopsCompleted counts completed passes over the source media.
 	LoopsCompleted uint64
-	// FaultsFired counts fault decisions that have fired for this camera.
+	// FaultsFired counts fault decisions that have fired for this camera. For
+	// packet_loss it counts frames that had loss, not packets; use FaultCounts
+	// for packet counts.
 	FaultsFired uint64
+	// FaultCounts tallies each fault kind's effects: frames dropped, packets
+	// or keyframes withheld (Applied) and decisions spared by
+	// ProtectKeyframes (Suppressed). Never nil.
+	FaultCounts map[string]FaultCount
 	// OutboundRTPPackets counts RTP packets sent on this camera's stream,
 	// read from the RTSP stream's own counters.
 	OutboundRTPPackets uint64
@@ -527,12 +538,17 @@ func (c *Camera) ONVIFEndpoint() string { return c.fleet.onvifSrv.Endpoint(c.id)
 func (c *Camera) Stats() Stats {
 	counters := c.fleet.rec.Counters(c.id)
 	pkts, bytes := c.fleet.srv.StreamStats(c.id)
+	fc := make(map[string]FaultCount, len(counters.ByKind))
+	for k, v := range counters.ByKind {
+		fc[k] = FaultCount{Applied: v.Applied, Suppressed: v.Suppressed}
+	}
 
 	return Stats{
 		Seed:               uint64(c.seed),
 		FramesServed:       counters.FramesServed,
 		LoopsCompleted:     counters.LoopsCompleted,
 		FaultsFired:        counters.FaultsFired,
+		FaultCounts:        fc,
 		OutboundRTPPackets: pkts,
 		OutboundBytes:      bytes,
 		Readers:            c.fleet.srv.Readers(c.id),
@@ -580,18 +596,13 @@ func (c *Camera) Faults() []FaultSpec {
 // same kind. The change takes effect at the camera's next frame boundary.
 // Only implemented kinds are accepted; the rest return ErrUnsupported.
 //
-// Each injection rebuilds the camera's fault engines from the camera seed, so
-// every fault's random stream restarts at its first draw rather than
-// continuing. A replay must restart streams at each journaled inject or clear.
+// Any inject or clear rebuilds all of the camera's fault engines from the
+// camera seed, so every fault's random stream restarts at its first draw and
+// keyframe_starvation's keyframe counter restarts too (the next keyframe counts
+// as the first and is delivered), including faults the call did not touch. A replay must restart streams at each journaled inject or clear.
 func (c *Camera) Inject(f FaultSpec) error {
-	if !fault.Known(fault.Kind(f.Kind)) {
-		return fmt.Errorf("%w: unknown fault kind %q", ErrInvalidSpec, f.Kind)
-	}
-	if f.Rate < 0 || f.Rate > 1 {
-		return fmt.Errorf("%w: fault %q has rate %v outside [0,1]", ErrInvalidSpec, f.Kind, f.Rate)
-	}
-	if !fault.Implemented(fault.Kind(f.Kind)) {
-		return fmt.Errorf("%w: injecting fault %q is not implemented in this version", ErrUnsupported, f.Kind)
+	if err := validateFault(f); err != nil {
+		return err
 	}
 
 	c.mu.Lock()
@@ -649,3 +660,8 @@ func (c *Camera) swapFaults(next []FaultSpec, applied func(int)) error {
 func (c *Camera) noteFaultsApplied(action string, f FaultSpec, frameIndex int) {
 	c.fleet.noteFault(action, c.id, f, frameIndex)
 }
+
+// ONVIFUUID is the camera's ONVIF endpoint UUID. It is deterministic from the
+// camera seed and is the same value the camera's ONVIF Device service returns
+// from GetEndpointReference.
+func (c *Camera) ONVIFUUID() string { return onvif.EndpointUUID(c.seed) }

@@ -54,20 +54,45 @@ Early:
   page shows cameras' Digest credentials. It listens on loopback by default and has *no*
   authentication, token, Host-header check or CSRF protection, so a malicious web page can reach a
   loopback API through DNS rebinding or CSRF. Do not expose it.
-- **Works:** one fault, `frame_drop`: a seeded fraction of access units is never encoded or sent,
-  so RTP sequence numbers stay contiguous and the missing frame appears only as a timestamp jump
-  (an encoder skipping frames, not network loss). It can be set in a spec, or injected into and
-  cleared from a running camera; `protectKeyframes` keeps random-access frames. Runtime injections
-  and clears are journaled, and the fleet replay line gets a ` journal=<n>:<12hex>` suffix hashing
-  that journal. Honest limit: which frame an interactive click lands on is recorded but cannot be
-  derived from the seed, because it depends on when the click arrived.
+- **Works:** three fault effects, each tied to a real field bug (table below): `frame_drop`,
+  `packet_loss` and `keyframe_starvation`. A fault comes from a spec or is injected into and
+  cleared from a running camera (`Camera.Inject`, the dashboard, `POST /api/v1/cameras/{id}/faults`).
+  Runtime injections and clears are journaled, and the fleet replay line gets a
+  ` journal=<n>:<12hex>` suffix hashing that journal. Per-kind effect counts are in
+  `Stats.FaultCounts` and the dashboard. `GET /api/v1/faults` returns the catalogue that
+  validates specs and generates the dashboard's fault form.
+  Honest limits: which frame an interactive click lands on is recorded but cannot be derived
+  from the seed, because it depends on when the click arrived; `packet_loss` draws only for
+  frames that were actually encoded, so frames removed by `frame_drop` or `keyframe_starvation`
+  consume no `packet_loss` draws and combining them makes its sequence depend on theirs;
+  `FramesServed` still counts a frame whose packets were all withheld; a withheld packet is
+  only a sequence gap, with no stall, because RTSP is served over TCP-interleaved transport only
+  today (TCP delivers everything it is given); genuine loss arrives with UDP serving; loss applies to every reader of the camera, not per
+  reader; `keyframe_starvation` also withholds the in-band SPS/PPS that travel with the withheld
+  keyframe, and with `keepEvery` above about 15 (a 1s GOP at the fixture's 15fps) the 15s snapshot
+  deadline is exceeded, so dashboard and ONVIF snapshots fail.
 - **Works:** Playwright end-to-end tests of the dashboard, behind the `e2e` build tag and run in
   the `e2e` CI job. Locally, `go test -tags e2e ./internal/dashboard/` needs Chromium installed
   for Playwright.
-- **Not built yet:** device discovery (WS-Discovery), PTZ, Imaging, and the *effect* of every fault
-  other than `frame_drop`. The rest of the fault catalogue is defined and validated, and the seams
-  it acts through are in place, but those faults change nothing on the wire. A spec that names an
-  unimplemented fault is **refused** (`ErrUnsupported`), not silently ignored.
+- **Not built yet:** device discovery (WS-Discovery), PTZ, Imaging, and the *effect* of the
+  other catalogued faults. A spec that names an unimplemented fault is **refused**
+  (`ErrUnsupported`), not silently ignored.
+
+## Fault catalogue
+
+Kept in step with the catalogue in `internal/fault` by a test that fails if this table drifts.
+
+<!-- fault-table:start -->
+| Kind | Implemented | Models |
+|---|---|---|
+| `frame_drop` | yes | Encoder skipping frames: a frame is never encoded, so RTP sequence numbers stay contiguous and the loss shows only as a timestamp jump. |
+| `packet_loss` | yes | Lossy path: packets of an encoded frame are withheld, leaving real sequence-number gaps with honest timestamps. |
+| `keyframe_starvation` | yes | Long-GOP camera: only every Nth keyframe is sent, so a client joining mid-stream cannot start decoding. |
+| `teardown_mid_session` | no | Camera that drops live sessions; exercises reconnect logic and resource leaks. |
+| `accept_then_silence` | no | Camera that accepts the TCP connection and never answers. |
+| `sdp_codec_lie` | no | SDP that advertises one codec while the stream carries another. |
+| `sps_resolution_lie` | no | SDP and SPS that advertise a geometry the frames do not match. |
+<!-- fault-table:end -->
 
 ## Use as a library
 
@@ -113,7 +138,11 @@ closes itself when the test ends.
   PTZ and Imaging are not implemented: `GetCapabilities`/`GetServices` never
   advertise them, so a conformant client should not expect them. WS-Discovery
   (multicast device discovery) is not implemented; a client must be given the
-  ONVIF endpoint directly (`Camera.ONVIFEndpoint()`).
+  ONVIF endpoint directly (`Camera.ONVIFEndpoint()`). Each camera does have a
+  seed-derived endpoint UUID, returned by `GetEndpointReference` and shown in
+  the dashboard, but nothing announces it. The UUID is version 4 shaped and
+  returned bare (no `urn:uuid:` prefix); that format is unverified against a
+  real device capture.
 - **The bundled video is a fixture, not a sample.** Two of them: a two-second
   synthetic test pattern at 320×240 in H.264, and its H.265 counterpart, both
   generated by `scripts/gen-fixture.sh`. They exist so that tests need no media
@@ -128,10 +157,12 @@ closes itself when the test ends.
   - **A live upstream source is outside the guarantee.** Not implemented in this
     version; when it is, its bytes will differ run to run, so only the fault
     *decisions* over it will be reproducible, not the media.
-- **No network-path impairment.** Packet loss, bandwidth ceilings, and reordering
-  are properties of the path, not of the sender; they need `tc`/`netem` and
-  elevated privileges, and they are not reproducible from a seed. CamFarm owns
-  only what a camera itself chooses not to send, or sends late.
+- **No network-path impairment.** Bandwidth ceilings, reordering and real
+  network-path effects are properties of the path, not of the sender; they need
+  `tc`/`netem` and elevated privileges, and they are not reproducible from a
+  seed. `packet_loss` is a *sender-side simulation* of loss (the camera chooses
+  not to write packets), not a network impairment. CamFarm owns only what a
+  camera itself chooses not to send, or sends late.
 - **Not a benchmark result.** No cameras-per-core or memory-per-camera figure is
   published, because none has been measured yet. When one is, it will come from a
   committed benchmark, not an estimate.

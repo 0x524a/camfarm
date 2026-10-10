@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/0x524a/camfarm"
+	"github.com/0x524a/camfarm/internal/fault"
 )
 
 // Options configures the dashboard.
@@ -51,6 +52,7 @@ func Handler(f *camfarm.Fleet, opt Options) http.Handler {
 	mux.HandleFunc("GET /api/v1/cameras/{id}/snapshot.jpg", s.snapshot)
 	mux.HandleFunc("POST /api/v1/cameras/{id}/faults", s.injectFault)
 	mux.HandleFunc("DELETE /api/v1/cameras/{id}/faults", s.clearFaults)
+	mux.HandleFunc("GET /api/v1/faults", s.getFaultCatalogue)
 	mux.HandleFunc("GET /api/v1/events", s.events)
 
 	sub, err := fs.Sub(webFS, "web")
@@ -65,6 +67,7 @@ type cameraDTO struct {
 	ID            string              `json:"id"`
 	RTSPURL       string              `json:"rtspUrl"`
 	ONVIFEndpoint string              `json:"onvifEndpoint"`
+	ONVIFUUID     string              `json:"onvifUuid"`
 	Source        string              `json:"source"`
 	Codec         string              `json:"codec"`
 	Width         int                 `json:"width"`
@@ -86,6 +89,7 @@ type statsDTO struct {
 	FramesServed       uint64
 	LoopsCompleted     uint64
 	FaultsFired        uint64
+	FaultCounts        map[string]camfarm.FaultCount
 	OutboundRTPPackets uint64
 	OutboundBytes      uint64
 	Readers            int
@@ -99,17 +103,23 @@ func (s *server) dto(cam *camfarm.Camera, st camfarm.Status) cameraDTO {
 		faults = []camfarm.FaultSpec{}
 	}
 	return cameraDTO{
-		ID: st.ID, RTSPURL: st.RTSPURL, ONVIFEndpoint: cam.ONVIFEndpoint(),
+		ID: st.ID, RTSPURL: st.RTSPURL, ONVIFEndpoint: cam.ONVIFEndpoint(), ONVIFUUID: cam.ONVIFUUID(),
 		Source: st.Source, Codec: st.Codec, Width: st.Width, Height: st.Height, FPS: st.FPS,
 		Readers: st.Readers, Seed: strconv.FormatUint(stats.Seed, 10), Username: u, Password: p,
 		Faults: faults,
 		Stats: statsDTO{
 			Seed: strconv.FormatUint(stats.Seed, 10), FramesServed: stats.FramesServed,
-			LoopsCompleted: stats.LoopsCompleted, FaultsFired: stats.FaultsFired,
+			LoopsCompleted: stats.LoopsCompleted, FaultsFired: stats.FaultsFired, FaultCounts: stats.FaultCounts,
 			OutboundRTPPackets: stats.OutboundRTPPackets, OutboundBytes: stats.OutboundBytes,
 			Readers: stats.Readers,
 		},
 	}
+}
+
+// getFaultCatalogue serves the fault catalogue that drives validation and the
+// page's fault form, so the page cannot drift from the server.
+func (s *server) getFaultCatalogue(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, fault.Catalogue())
 }
 
 func (s *server) listCameras(w http.ResponseWriter, _ *http.Request) {

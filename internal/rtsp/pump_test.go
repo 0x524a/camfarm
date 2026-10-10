@@ -151,32 +151,6 @@ func TestLoopContinuesTimestamps(t *testing.T) {
 	}
 }
 
-// A catalogued fault whose effect does not exist yet is decided and recorded,
-// and changes nothing on the wire.
-func TestUnimplementedFaultIsRecordedButNotApplied(t *testing.T) {
-	rec := obs.New(1000)
-	p, w := newTestPump(t, seed.Seed(5), []fault.Spec{{Kind: fault.KindKeyframeStarvation, Rate: 1}}, rec)
-
-	const frames = 5
-	for i := 0; i < frames; i++ {
-		if err := p.Step(); err != nil {
-			t.Fatalf("Step: %v", err)
-		}
-	}
-	if got := rec.Counters("cam").FaultsFired; got != frames {
-		t.Fatalf("FaultsFired = %d, want %d", got, frames)
-	}
-	if got := rec.Counters("cam").FramesServed; got != frames {
-		t.Fatalf("FramesServed = %d, want %d -- an unimplemented fault must not drop anything", got, frames)
-	}
-	if len(w.pkts) == 0 {
-		t.Fatal("no packets written")
-	}
-	if ev := rec.Events(); ev[0].Detail != detailDecidedNotApplied {
-		t.Errorf("detail = %q, want %q", ev[0].Detail, detailDecidedNotApplied)
-	}
-}
-
 func TestFrameDropAtRateOneWritesNothingButAdvances(t *testing.T) {
 	rec := obs.New(1000)
 	p, w := newTestPump(t, seed.Seed(5), []fault.Spec{{Kind: fault.KindFrameDrop, Rate: 1}}, rec)
@@ -494,5 +468,209 @@ func TestNewPumpRejectsBadConfig(t *testing.T) {
 		if _, err := NewPump(mutate(good)); err == nil {
 			t.Errorf("%s: NewPump succeeded, want an error", name)
 		}
+	}
+}
+
+// perFrame runs a fault-free pump and records, for each of the first n access
+// units, how many packets it produced and whether it is random access. Loss
+// tests compare against it.
+func perFrame(t *testing.T, n int) (counts []int, random []bool) {
+	t.Helper()
+	m := testMedia(t)
+	p, w := newTestPump(t, seed.Seed(1), nil, obs.New(10))
+	for i := 0; i < n; i++ {
+		before := len(w.pkts)
+		if err := p.Step(); err != nil {
+			t.Fatalf("Step: %v", err)
+		}
+		counts = append(counts, len(w.pkts)-before)
+		random = append(random, m.AUs[i%len(m.AUs)].RandomAccess)
+	}
+	return counts, random
+}
+
+func TestKeyframeStarvationWithholdsAllButEveryNthKeyframe(t *testing.T) {
+	m := testMedia(t)
+	rec := obs.New(1000)
+	p, w := newTestPump(t, seed.Seed(3), []fault.Spec{{Kind: fault.KindKeyframeStarvation, KeepEvery: 2}}, rec)
+
+	steps := len(m.AUs) * 3
+	wantWithheld := map[int]bool{}
+	k := 0
+	for i := 0; i < steps; i++ {
+		if m.AUs[i%len(m.AUs)].RandomAccess {
+			if k%2 != 0 {
+				wantWithheld[i] = true
+			}
+			k++
+		}
+	}
+	if len(wantWithheld) == 0 {
+		t.Fatal("fixture has too few keyframes for this test")
+	}
+	for i := 0; i < steps; i++ {
+		if err := p.Step(); err != nil {
+			t.Fatalf("Step: %v", err)
+		}
+	}
+	gotWithheld := map[int]bool{}
+	for _, ev := range rec.Events() {
+		if ev.Kind != string(fault.KindKeyframeStarvation) || ev.Detail != detailKeyframeWithheld {
+			t.Fatalf("unexpected event %+v", ev)
+		}
+		gotWithheld[ev.FrameIndex] = true
+	}
+	if len(gotWithheld) != len(wantWithheld) {
+		t.Fatalf("withheld frames = %v, want %v", gotWithheld, wantWithheld)
+	}
+	for i := range wantWithheld {
+		if !gotWithheld[i] {
+			t.Fatalf("frame %d should have been withheld; got %v", i, gotWithheld)
+		}
+	}
+	c := rec.Counters("cam")
+	if got := c.FramesServed; got != uint64(steps-len(wantWithheld)) {
+		t.Errorf("FramesServed = %d, want %d", got, steps-len(wantWithheld))
+	}
+	if got := c.ByKind["keyframe_starvation"].Applied; got != uint64(len(wantWithheld)) {
+		t.Errorf("tally = %d, want %d", got, len(wantWithheld))
+	}
+	// Withheld frames are never encoded, so sequence numbers stay contiguous.
+	for i := 1; i < len(w.pkts); i++ {
+		if w.pkts[i].SequenceNumber != w.pkts[i-1].SequenceNumber+1 {
+			t.Fatalf("sequence gap at packet %d", i)
+		}
+	}
+}
+
+func TestPacketLossLeavesSequenceGapsAndHonestTimestamps(t *testing.T) {
+	const steps = 60
+	counts, _ := perFrame(t, steps)
+	total := 0
+	for _, c := range counts {
+		total += c
+	}
+
+	// Fault-free run of the same fixture and seed: the reference timestamps.
+	cleanP, cleanW := newTestPump(t, seed.Seed(0x1055), nil, obs.New(1000))
+	for i := 0; i < steps; i++ {
+		if err := cleanP.Step(); err != nil {
+			t.Fatalf("clean Step: %v", err)
+		}
+	}
+	cleanTS := map[uint16]uint32{}
+	for _, pkt := range cleanW.pkts {
+		cleanTS[pkt.SequenceNumber] = pkt.Timestamp
+	}
+
+	rec := obs.New(1000)
+	p, w := newTestPump(t, seed.Seed(0x1055), []fault.Spec{{Kind: fault.KindPacketLoss, Rate: 0.3}}, rec)
+	for i := 0; i < steps; i++ {
+		if err := p.Step(); err != nil {
+			t.Fatalf("Step: %v", err)
+		}
+	}
+	for i, pkt := range w.pkts {
+		want, ok := cleanTS[pkt.SequenceNumber]
+		if !ok || pkt.Timestamp != want {
+			t.Fatalf("packet %d (seq %d): timestamp %d, fault-free run has %d (present=%v)", i, pkt.SequenceNumber, pkt.Timestamp, want, ok)
+		}
+	}
+	tally := rec.Counters("cam").ByKind["packet_loss"]
+	if tally.Applied == 0 || int(tally.Applied) == total {
+		t.Fatalf("withheld %d of %d packets; need a mix", tally.Applied, total)
+	}
+	if got := uint64(len(w.pkts)) + tally.Applied; got != uint64(total) {
+		t.Fatalf("written %d + withheld %d != produced %d", len(w.pkts), tally.Applied, total)
+	}
+	gaps := 0
+	for i := 1; i < len(w.pkts); i++ {
+		d := w.pkts[i].SequenceNumber - w.pkts[i-1].SequenceNumber
+		if d == 0 {
+			t.Fatalf("duplicate sequence number at packet %d", i)
+		}
+		if d > 1 {
+			gaps++
+		}
+		if w.pkts[i].Timestamp < w.pkts[i-1].Timestamp {
+			t.Fatalf("timestamp went backwards at packet %d", i)
+		}
+	}
+	if gaps == 0 {
+		t.Fatal("no sequence gaps despite withheld packets")
+	}
+	// The frame still counts as served: it was encoded and offered.
+	if got := rec.Counters("cam").FramesServed; got != steps {
+		t.Errorf("FramesServed = %d, want %d", got, steps)
+	}
+}
+
+func TestPacketLossIsSeedDeterministicThroughThePump(t *testing.T) {
+	run := func() []uint16 {
+		p, w := newTestPump(t, seed.Seed(77), []fault.Spec{{Kind: fault.KindPacketLoss, Rate: 0.4}}, obs.New(1000))
+		for i := 0; i < 90; i++ {
+			if err := p.Step(); err != nil {
+				t.Fatalf("Step: %v", err)
+			}
+		}
+		var seqs []uint16
+		for _, pkt := range w.pkts {
+			seqs = append(seqs, pkt.SequenceNumber)
+		}
+		return seqs
+	}
+	a, b := run(), run()
+	if len(a) == 0 || len(a) != len(b) {
+		t.Fatalf("runs differ in length: %d vs %d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("packet %d: sequence %d vs %d", i, a[i], b[i])
+		}
+	}
+}
+
+func TestPacketLossProtectKeyframesSparesRandomAccessFrames(t *testing.T) {
+	const steps = 60
+	counts, random := perFrame(t, steps)
+	wantWritten, wantSpared := 0, 0
+	for i, c := range counts {
+		if random[i] {
+			wantWritten += c
+			wantSpared += c
+		}
+	}
+	if wantSpared == 0 {
+		t.Fatal("fixture produced no keyframe packets")
+	}
+
+	rec := obs.New(1000)
+	p, w := newTestPump(t, seed.Seed(4), []fault.Spec{{Kind: fault.KindPacketLoss, Rate: 1, ProtectKeyframes: true}}, rec)
+	for i := 0; i < steps; i++ {
+		if err := p.Step(); err != nil {
+			t.Fatalf("Step: %v", err)
+		}
+	}
+	if len(w.pkts) != wantWritten {
+		t.Fatalf("wrote %d packets, want exactly the keyframe packets (%d)", len(w.pkts), wantWritten)
+	}
+	tally := rec.Counters("cam").ByKind["packet_loss"]
+	if tally.Suppressed != uint64(wantSpared) {
+		t.Errorf("suppressed = %d, want %d", tally.Suppressed, wantSpared)
+	}
+}
+
+func TestFrameDropTallyCountsAppliedAndSuppressed(t *testing.T) {
+	rec := obs.New(1000)
+	p, _ := newTestPump(t, seed.Seed(5), []fault.Spec{{Kind: fault.KindFrameDrop, Rate: 1, ProtectKeyframes: true}}, rec)
+	steps := len(testMedia(t).AUs)
+	for i := 0; i < steps; i++ {
+		if err := p.Step(); err != nil {
+			t.Fatalf("Step: %v", err)
+		}
+	}
+	tally := rec.Counters("cam").ByKind["frame_drop"]
+	if tally.Applied == 0 || tally.Suppressed == 0 || tally.Applied+tally.Suppressed != uint64(steps) {
+		t.Fatalf("tally = %+v over %d frames; want applied+suppressed == frames, both non-zero", tally, steps)
 	}
 }

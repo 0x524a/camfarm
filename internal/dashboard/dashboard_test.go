@@ -46,7 +46,7 @@ func do(t *testing.T, method, url, body string) *http.Response {
 }
 
 func TestListAndGetCameras(t *testing.T) {
-	ts, _ := newServer(t, Options{})
+	ts, f := newServer(t, Options{})
 
 	resp := do(t, "GET", ts.URL+"/api/v1/cameras", "")
 	if resp.StatusCode != 200 {
@@ -58,6 +58,12 @@ func TestListAndGetCameras(t *testing.T) {
 	}
 	if len(list) != 1 || list[0]["id"] != "front-door" {
 		t.Fatalf("list = %v", list)
+	}
+	{
+		cam, _ := f.Camera("front-door")
+		if list[0]["onvifUuid"] != cam.ONVIFUUID() || cam.ONVIFUUID() == "" {
+			t.Errorf("onvifUuid = %v, want %q", list[0]["onvifUuid"], cam.ONVIFUUID())
+		}
 	}
 	for _, k := range []string{"rtspUrl", "onvifEndpoint", "seed", "codec", "width", "height"} {
 		if _, ok := list[0][k]; !ok {
@@ -255,7 +261,7 @@ func TestInjectAndClearFaultOverHTTP(t *testing.T) {
 	if got := cam.Faults(); len(got) != 1 || !got[0].ProtectKeyframes {
 		t.Fatalf("Faults() = %+v", got)
 	}
-	if resp = do(t, "POST", ts.URL+"/api/v1/cameras/front-door/faults", `{"kind":"keyframe_starvation","rate":1}`); resp.StatusCode != 422 {
+	if resp = do(t, "POST", ts.URL+"/api/v1/cameras/front-door/faults", `{"kind":"accept_then_silence","rate":1}`); resp.StatusCode != 422 {
 		t.Errorf("unsupported kind status = %d, want 422", resp.StatusCode)
 	}
 	if resp = do(t, "POST", ts.URL+"/api/v1/cameras/nope/faults", `{"kind":"frame_drop","rate":1}`); resp.StatusCode != 404 {
@@ -310,8 +316,12 @@ func TestEmbeddedPageCarriesTheTestHooks(t *testing.T) {
 		`class: "btn-fault"`,
 		`class: "btn-clear-fault secondary"`,
 		`class: "snapshot"`,
-		`class: "fault-rate", type: "number"`,
-		`class: "fault-protect", type: "checkbox"`,
+		`class: "fault-kind"`,
+		`cls += " fault-rate"`,
+		`cls += " fault-protect"`,
+		`"data-param"`,
+		`class: "fault-hint"`,
+		`id="notice"`,
 		`class: "fault-active"`,
 		`class: "copy secondary", type: "button"`,
 		`"data-copy": value`,

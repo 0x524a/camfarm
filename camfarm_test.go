@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,14 +115,14 @@ func TestStatsReportSeedAndProgress(t *testing.T) {
 // refused rather than silently ignored.
 func TestFaultsAreRefusedNotIgnored(t *testing.T) {
 	s := minimalSpec()
-	s.Cameras[0].Faults = []FaultSpec{{Kind: "keyframe_starvation", Rate: 0.5}}
+	s.Cameras[0].Faults = []FaultSpec{{Kind: "accept_then_silence", Rate: 0.5}}
 
 	_, err := Start(context.Background(), s)
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("err = %v, want ErrUnsupported", err)
 	}
 	// The message must name the kind, so a caller knows what was refused.
-	if !strings.Contains(err.Error(), "keyframe_starvation") {
+	if !strings.Contains(err.Error(), "accept_then_silence") {
 		t.Errorf("err = %v, want it to name the fault kind", err)
 	}
 
@@ -387,7 +388,7 @@ func TestAddCameraDuplicateIDRefused(t *testing.T) {
 // get a camera that never misbehaves.
 func TestAddCameraFaultRefused(t *testing.T) {
 	f := StartT(t, minimalSpec())
-	_, err := f.AddCamera(CameraSpec{ID: "new-cam", Faults: []FaultSpec{{Kind: "keyframe_starvation", Rate: 0.5}}})
+	_, err := f.AddCamera(CameraSpec{ID: "new-cam", Faults: []FaultSpec{{Kind: "accept_then_silence", Rate: 0.5}}})
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("err = %v, want ErrUnsupported", err)
 	}
@@ -576,7 +577,7 @@ func TestScreenshotRacesRemoveCamera(t *testing.T) {
 func TestInjectUnimplementedKindIsUnsupported(t *testing.T) {
 	f := StartT(t, minimalSpec())
 	cam, _ := f.Camera("front-door")
-	err := cam.Inject(FaultSpec{Kind: "keyframe_starvation", Rate: 1})
+	err := cam.Inject(FaultSpec{Kind: "accept_then_silence", Rate: 1})
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("err = %v, want ErrUnsupported", err)
 	}
@@ -715,5 +716,132 @@ func TestStaleCameraHandleCannotInjectIntoReaddedCamera(t *testing.T) {
 	}
 	if len(fresh.Faults()) != 0 || len(f.Journal()) != journalBefore {
 		t.Fatalf("stale handle changed the re-added camera: faults=%v journal grew=%d", fresh.Faults(), len(f.Journal())-journalBefore)
+	}
+}
+
+func TestInjectPacketLossAndKeyframeStarvationOnARunningCamera(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, _ := f.Camera("front-door")
+
+	if err := cam.Inject(FaultSpec{Kind: "packet_loss", Rate: 0.3, MeanBurst: 3}); err != nil {
+		t.Fatalf("Inject packet_loss: %v", err)
+	}
+	if err := cam.Inject(FaultSpec{Kind: "keyframe_starvation", KeepEvery: 2}); err != nil {
+		t.Fatalf("Inject keyframe_starvation: %v", err)
+	}
+	if got := cam.Faults(); len(got) != 2 {
+		t.Fatalf("Faults() = %+v, want both kinds active", got)
+	}
+}
+
+func TestInjectRejectsBadParametersAsInvalidSpec(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, _ := f.Camera("front-door")
+	for name, spec := range map[string]FaultSpec{
+		"starvation without keepEvery":   {Kind: "keyframe_starvation"},
+		"starvation with rate":           {Kind: "keyframe_starvation", KeepEvery: 3, Rate: 0.5},
+		"frame_drop with keepEvery":      {Kind: "frame_drop", Rate: 0.1, KeepEvery: 3},
+		"burst above the reachable rate": {Kind: "packet_loss", Rate: 0.9, MeanBurst: 4},
+		"rate above one":                 {Kind: "packet_loss", Rate: 1.5},
+	} {
+		if err := cam.Inject(spec); !errors.Is(err, ErrInvalidSpec) {
+			t.Errorf("%s: Inject = %v, want ErrInvalidSpec", name, err)
+		}
+	}
+	if len(cam.Faults()) != 0 {
+		t.Fatal("a refused injection changed the active faults")
+	}
+}
+
+func TestSpecAcceptsPacketLossAndRefusesBadParameters(t *testing.T) {
+	s := minimalSpec()
+	s.Cameras[0].Faults = []FaultSpec{{Kind: "packet_loss", Rate: 0.1}}
+	f, err := Start(context.Background(), s)
+	if err != nil {
+		t.Fatalf("Start with packet_loss: %v", err)
+	}
+	f.Close()
+
+	s.Cameras[0].Faults = []FaultSpec{{Kind: "keyframe_starvation"}}
+	if _, err := Start(context.Background(), s); !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("Start with starvation lacking keepEvery = %v, want ErrInvalidSpec", err)
+	}
+}
+
+func TestAddCameraRefusesBadFaultParametersAsInvalidSpec(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	_, err := f.AddCamera(CameraSpec{ID: "new-cam", Faults: []FaultSpec{{Kind: "keyframe_starvation"}}})
+	if !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("AddCamera with starvation lacking keepEvery = %v, want ErrInvalidSpec", err)
+	}
+}
+
+func TestStatsFaultCountsReportPerKindEffects(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, _ := f.Camera("front-door")
+	if cam.Stats().FaultCounts == nil {
+		t.Fatal("FaultCounts is nil on a camera with no faults")
+	}
+	if err := cam.Inject(FaultSpec{Kind: "frame_drop", Rate: 1}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "drops to be tallied", func() bool {
+		return cam.Stats().FaultCounts["frame_drop"].Applied >= 3
+	})
+}
+
+func TestStatsFaultCountsSuppressedIsPopulated(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, _ := f.Camera("front-door")
+	if err := cam.Inject(FaultSpec{Kind: "frame_drop", Rate: 1, ProtectKeyframes: true}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "a suppressed drop to be tallied", func() bool {
+		return cam.Stats().FaultCounts["frame_drop"].Suppressed >= 1
+	})
+}
+
+func TestValidateFaultOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		f    FaultSpec
+		want error
+	}{
+		{"NaN rate", FaultSpec{Kind: "frame_drop", Rate: math.NaN()}, ErrInvalidSpec},
+		{"NaN rate on unsupported kind", FaultSpec{Kind: "accept_then_silence", Rate: math.NaN()}, ErrInvalidSpec},
+		{"unsupported kind with bad param", FaultSpec{Kind: "accept_then_silence", Rate: 0.5, KeepEvery: -3}, ErrUnsupported},
+		{"unknown kind", FaultSpec{Kind: "nope", Rate: 0.5}, ErrInvalidSpec},
+		{"implemented kind, out-of-range param", FaultSpec{Kind: "keyframe_starvation", KeepEvery: 5000}, ErrInvalidSpec},
+	}
+	for _, c := range cases {
+		err := validateFault(c.f)
+		if !errors.Is(err, c.want) {
+			t.Errorf("%s: err = %v, want %v", c.name, err, c.want)
+		}
+		if c.want == ErrInvalidSpec && errors.Is(err, ErrUnsupported) {
+			t.Errorf("%s: wrongly classed as unsupported: %v", c.name, err)
+		}
+	}
+}
+
+func TestSpecRefusesRepeatedFaultKindPerCamera(t *testing.T) {
+	s := minimalSpec()
+	s.Cameras[0].Faults = []FaultSpec{{Kind: "frame_drop", Rate: 0.1}, {Kind: "frame_drop", Rate: 0.2}}
+	if _, err := Start(context.Background(), s); !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("err = %v, want ErrInvalidSpec", err)
+	}
+}
+
+func TestCameraONVIFUUIDIsStableAndDistinct(t *testing.T) {
+	f := StartT(t, Spec{Seed: 7, Cameras: []CameraSpec{{ID: "a"}, {ID: "b"}}})
+	a, _ := f.Camera("a")
+	b, _ := f.Camera("b")
+	if a.ONVIFUUID() == "" || a.ONVIFUUID() == b.ONVIFUUID() {
+		t.Fatalf("UUIDs: a=%q b=%q", a.ONVIFUUID(), b.ONVIFUUID())
+	}
+	g := StartT(t, Spec{Seed: 7, Cameras: []CameraSpec{{ID: "a"}, {ID: "b"}}})
+	a2, _ := g.Camera("a")
+	if a.ONVIFUUID() != a2.ONVIFUUID() {
+		t.Fatal("same seed and spec gave a different UUID")
 	}
 }
