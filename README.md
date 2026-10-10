@@ -1,8 +1,8 @@
-# camfarm
+# CamFarm
 
 [![ci](https://github.com/0x524a/camfarm/actions/workflows/ci.yml/badge.svg)](https://github.com/0x524a/camfarm/actions/workflows/ci.yml)
 
-A synthetic RTSP camera farm for testing video-analytics pipelines without
+CamFarm is a synthetic RTSP camera farm for testing video-analytics pipelines without
 physical hardware. It serves N fake cameras from one process, and it is built so
 that misbehaviour can be injected deterministically: a fault fires because a
 seed said it would, and the same seed and fleet spec reproduce it.
@@ -104,7 +104,7 @@ closes itself when the test ends.
     *decisions* over it will be reproducible, not the media.
 - **No network-path impairment.** Packet loss, bandwidth ceilings, and reordering
   are properties of the path, not of the sender; they need `tc`/`netem` and
-  elevated privileges, and they are not reproducible from a seed. `camfarm` owns
+  elevated privileges, and they are not reproducible from a seed. CamFarm owns
   only what a camera itself chooses not to send, or sends late.
 - **Not a benchmark result.** No cameras-per-core or memory-per-camera figure is
   published, because none has been measured yet. When one is, it will come from a
