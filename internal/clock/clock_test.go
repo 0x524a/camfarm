@@ -163,6 +163,10 @@ func TestVirtualConcurrentStopAndAdvance(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	close(done)
 	wg.Wait()
+	// Stop once more here: if the stopper goroutine never got scheduled (-cpu 1)
+	// the ticker is still live and the Advance(time.Hour) below would spin
+	// billions of one-nanosecond steps.
+	tk.Stop()
 
 	// Behavioural assertions, independent of the race detector. First:
 	// Advance's own bookkeeping must be exactly consistent with how many
@@ -180,5 +184,172 @@ func TestVirtualConcurrentStopAndAdvance(t *testing.T) {
 	case at := <-tk.C():
 		t.Fatalf("stopped ticker delivered a tick at %v", at)
 	default:
+	}
+}
+
+func TestVirtualAfterFiresOnAdvance(t *testing.T) {
+	v := NewVirtual(time.Unix(0, 0))
+	ch := v.After(50 * time.Millisecond)
+	select {
+	case <-ch:
+		t.Fatal("fired before advance")
+	default:
+	}
+	v.Advance(49 * time.Millisecond)
+	select {
+	case <-ch:
+		t.Fatal("fired early")
+	default:
+	}
+	v.Advance(time.Millisecond)
+	select {
+	case <-ch:
+	default:
+		t.Fatal("did not fire at deadline")
+	}
+	select {
+	case <-v.After(0):
+	default:
+		t.Fatal("zero duration must fire immediately")
+	}
+	select {
+	case <-v.After(-time.Second):
+	default:
+		t.Fatal("negative duration must fire immediately")
+	}
+}
+
+func TestVirtualAfterMultipleWaitersOneAdvance(t *testing.T) {
+	v := NewVirtual(time.Unix(0, 0))
+	a := v.After(10 * time.Millisecond)
+	b := v.After(20 * time.Millisecond)
+	late := v.After(500 * time.Millisecond)
+	v.Advance(30 * time.Millisecond)
+	for name, ch := range map[string]<-chan time.Time{"a": a, "b": b} {
+		select {
+		case <-ch:
+		default:
+			t.Fatalf("waiter %s did not fire", name)
+		}
+	}
+	select {
+	case <-late:
+		t.Fatal("late waiter fired early")
+	default:
+	}
+	v.Advance(470 * time.Millisecond)
+	select {
+	case <-late:
+	default:
+		t.Fatal("late waiter did not fire")
+	}
+}
+
+func TestVirtualAfterInterleavedWithTicker(t *testing.T) {
+	v := NewVirtual(time.Unix(0, 0))
+	tk := v.NewTicker(10 * time.Millisecond)
+	defer tk.Stop()
+	ch := v.After(15 * time.Millisecond)
+	v.Advance(10 * time.Millisecond)
+	select {
+	case <-tk.C():
+	default:
+		t.Fatal("ticker did not fire")
+	}
+	select {
+	case <-ch:
+		t.Fatal("waiter fired early")
+	default:
+	}
+	v.Advance(5 * time.Millisecond)
+	select {
+	case <-ch:
+	default:
+		t.Fatal("waiter did not fire")
+	}
+	v.Advance(5 * time.Millisecond)
+	select {
+	case <-tk.C():
+	default:
+		t.Fatal("ticker did not fire after waiter")
+	}
+}
+
+func TestRealAfterFires(t *testing.T) {
+	var c Clock = Real{}
+	select {
+	case <-c.After(time.Millisecond):
+	case <-time.After(2 * time.Second):
+		t.Fatal("real After never fired")
+	}
+}
+
+func TestVirtualAfterConcurrentWithAdvance(t *testing.T) {
+	v := NewVirtual(time.Unix(0, 0))
+	type reg struct {
+		floor time.Time // the earliest the deadline can be: clock reading before After, plus d
+		ch    <-chan time.Time
+	}
+	var (
+		mu   sync.Mutex
+		regs []reg
+		wg   sync.WaitGroup
+	)
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				floor := v.Now().Add(time.Millisecond)
+				ch := v.After(time.Millisecond)
+				mu.Lock()
+				regs = append(regs, reg{floor: floor, ch: ch})
+				mu.Unlock()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				v.Advance(time.Millisecond)
+			}
+		}()
+	}
+	wg.Wait()
+	v.Advance(time.Second)
+	if n := v.Waiters(); n != 0 {
+		t.Fatalf("%d waiters still pending after advancing past every deadline", n)
+	}
+	for i, r := range regs {
+		select {
+		case at := <-r.ch:
+			if at.Before(r.floor) {
+				t.Fatalf("waiter %d fired at %v, before its deadline %v", i, at, r.floor)
+			}
+		default:
+			t.Fatalf("waiter %d never fired", i)
+		}
+	}
+	select {
+	case <-v.After(0):
+	default:
+		t.Fatal("zero duration must fire immediately")
+	}
+}
+
+func TestVirtualWaitersCountsPendingAfters(t *testing.T) {
+	v := NewVirtual(time.Unix(0, 0))
+	_ = v.After(10 * time.Millisecond)
+	_ = v.After(20 * time.Millisecond)
+	_ = v.After(0) // fires immediately, never pending
+	if n := v.Waiters(); n != 2 {
+		t.Fatalf("Waiters = %d, want 2", n)
+	}
+	v.Advance(10 * time.Millisecond)
+	if n := v.Waiters(); n != 1 {
+		t.Fatalf("Waiters = %d after first deadline, want 1", n)
+	}
+	v.Advance(10 * time.Millisecond)
+	if n := v.Waiters(); n != 0 {
+		t.Fatalf("Waiters = %d after both deadlines, want 0", n)
 	}
 }

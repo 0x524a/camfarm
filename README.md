@@ -54,9 +54,10 @@ Early:
   page shows cameras' Digest credentials. It listens on loopback by default and has *no*
   authentication, token, Host-header check or CSRF protection, so a malicious web page can reach a
   loopback API through DNS rebinding or CSRF. Do not expose it.
-- **Works:** six fault effects, each tied to a real field bug (table below): `frame_drop`,
-  `packet_loss`, `keyframe_starvation`, and the control-plane faults `rtsp_error`, `teardown` and
-  `sdp_lie`. A fault comes from a spec or is injected into and
+- **Works:** ten fault effects, each tied to a real field bug (table below): the frame-path faults
+  `frame_drop`, `packet_loss` and `keyframe_starvation`, the timing faults `jitter`,
+  `burst_delivery`, `pts_dts_mismatch` and `pts_delayed`, and the control-plane faults
+  `rtsp_error`, `teardown` and `sdp_lie`. A fault comes from a spec or is injected into and
   cleared from a running camera (`Camera.Inject`, the dashboard, `POST /api/v1/cameras/{id}/faults`).
   Runtime injections and clears are journaled, and the fleet replay line gets a
   ` journal=<n>:<12hex>` suffix hashing that journal. Per-kind effect counts are in
@@ -71,7 +72,57 @@ Early:
   today (TCP delivers everything it is given); genuine loss arrives with UDP serving; loss applies to every reader of the camera, not per
   reader; `keyframe_starvation` also withholds the in-band SPS/PPS that travel with the withheld
   keyframe, and with `keepEvery` above about 15 (a 1s GOP at the fixture's 15fps) the 15s snapshot
-  deadline is exceeded, so dashboard and ONVIF snapshots fail.
+  deadline is exceeded, so dashboard and ONVIF snapshots fail. For the frame-path kinds with a
+  `rate` (`frame_drop`, `packet_loss`, `burst_delivery`) an omitted `rate` means 0, so the fault
+  is installed but never fires: the catalogue's default rate only prefills the dashboard form and
+  is not applied server-side (unlike `rtsp_error`, below).
+  Timing faults (`jitter`, `burst_delivery`, `pts_dts_mismatch`, `pts_delayed`) have their own
+  limits:
+  - **Arrival times are wall-clock and not reproducible; the delays, hold boundaries and
+    timestamps are.** The seed fixes how long each frame is delayed, which frames are held and
+    which timestamps are written; when those packets actually reach a client depends on the
+    scheduler and the network.
+  - **Compose order**, per frame: `frame_drop` / `keyframe_starvation` (the frame is removed or
+    kept), then encode, then `packet_loss`, then the timestamp faults (`pts_dts_mismatch`,
+    `pts_delayed`), then `burst_delivery` hold or flush, then `jitter`.
+  - `burst_delivery` and `packet_loss` interact in one way worth knowing: loss is decided at
+    encode, before the hold, so each frame's loss is drawn per frame regardless of whether the
+    frame is later held. A frame removed by `frame_drop` or `keyframe_starvation` while a hold is
+    open shortens the burst, so a release can be smaller than `holdFrames`.
+  - A change to the camera's frame-fault list while frames are held flushes them at the next
+    frame. A change to control-plane faults only (`rtsp_error`, `teardown`, `sdp_lie`), or
+    re-injecting an identical fault, does not touch the pump and does not flush. Frames still
+    held at shutdown are discarded.
+  - With `burst_delivery`, a `teardown` still counts held frames toward `afterFrames` (its
+    count fires per pump frame, held ones included), so a client torn down at `afterFrames` may
+    have received up to `holdFrames`-1 fewer frames: those were still in the hold buffer.
+  - The `burst_delivery` tally counts held frames, not the flush frame that releases them.
+  - RTP sequence numbers stay contiguous for all four timing kinds; only timing and timestamps
+    change.
+  - `jitter` delays are relative to each frame's nominal slot (`start + k × interval`, an
+    absolute schedule) and order is preserved: a frame never leaves before the one ahead of it,
+    so when a delay runs past later slots those frames go out back-to-back behind it rather than
+    being reordered. Every frame leaves within `maxMs` of its slot, so the long-run frame rate
+    stays nominal for any `maxMs`. A pump that wakes more than max(1 s, 10 frame intervals) behind
+    its schedule (a suspended process, a stalled host; never lateness jitter caused) skips the
+    missed slots and restarts its schedule from now instead of sending them as one burst; below
+    that it catches up back-to-back.
+  - `pts_dts_mismatch` reaches clients as out-of-order RTP timestamps (sequence numbers stay in
+    order). Its windows are phased on the absolute frame counter, not on the frame it was injected
+    at, so injecting it at a frame that is not a window start, or clearing it mid-window, can give
+    two consecutive frames the same timestamp (with `reorderDepth` 1 injected at frame 5, frame 5
+    is stamped like frame 4).
+  - `pts_delayed` is visible mainly in the RTCP sender report's own RTP timestamp. Measured on the
+    pinned `gortsplib` v5.6.5, the server-side sender pairs the already-shifted RTP timestamp with
+    the true write time, so a client that maps packets to wall-clock through the sender report
+    (`Client.PacketNTP`) sees a delayed camera at the same lag as a clean one (a difference near
+    0 ms). The delay shows only as the SR's RTP timestamp sitting about `delayMs` behind a clean
+    camera's (about -45000 ticks at 90 kHz for 500 ms). A wire test pins this, and a `gortsplib`
+    upgrade may change it, in which case that test fails loudly. `driftPpm` drift grows from the
+    frame the fault was installed on. Injecting or clearing an unrelated frame fault leaves an
+    unchanged `pts_delayed` drifting continuously; changing its own parameters, or clearing and
+    re-injecting it, restarts the drift at zero.
+
   Control-plane faults have their own limits:
   - `rtsp_error`, `sdp_lie` and `teardown` are deterministic for a **single client** only: their
     request counters and draws are per camera and shared across connections, so concurrent
@@ -110,7 +161,7 @@ Early:
   the `e2e` CI job. Locally, `go test -tags e2e ./internal/dashboard/` needs Chromium installed
   for Playwright.
 - **Not built yet:** device discovery (WS-Discovery), PTZ, Imaging, and the *effect* of the
-  other catalogued faults. A spec that names an unimplemented fault is **refused**
+  one remaining catalogued fault, `accept_then_silence`. A spec that names an unimplemented fault is **refused**
   (`ErrUnsupported`), not silently ignored.
 
 ## Fault catalogue
@@ -126,6 +177,10 @@ Kept in step with the catalogue in `internal/fault` by a test that fails if this
 | `rtsp_error` | yes | Flaky camera that answers 5xx or 454 to some DESCRIBE, SETUP or PLAY requests. |
 | `teardown` | yes | Camera that drops live sessions; TCP reset when mode is reset. |
 | `sdp_lie` | yes | SDP that misdescribes the stream: wrong codec, wrong parameter sets, wrong geometry or wrong Content-Base. |
+| `jitter` | yes | Inter-arrival jitter: each frame leaves a seeded random time late (order kept), which stresses jitter-buffer sizing. |
+| `burst_delivery` | yes | Bursty uplink or encoder buffering: frames are held and then released back-to-back, which overflows NVR queues. |
+| `pts_dts_mismatch` | yes | B-frame camera that stamps presentation time into RTP: timestamps run out of order, so decoders report non-monotonic dts. |
+| `pts_delayed` | yes | Camera whose timestamps lag capture, constantly or by drift: what a latency profiler such as framelag meets. |
 | `accept_then_silence` | no | Camera that accepts the TCP connection and never answers. |
 <!-- fault-table:end -->
 

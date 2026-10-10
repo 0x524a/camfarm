@@ -1,12 +1,14 @@
 package rtsp
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/pion/rtp"
 
 	"github.com/0x524a/camfarm/internal/fault"
+	"github.com/0x524a/camfarm/internal/media"
 	"github.com/0x524a/camfarm/internal/obs"
 	"github.com/0x524a/camfarm/internal/seed"
 )
@@ -694,6 +696,137 @@ func TestAfterFrameIsCalledOncePerStepIncludingDroppedFrames(t *testing.T) {
 		}
 		if calls != 7 {
 			t.Fatalf("faults %v: AfterFrame called %d times over 7 steps", faults, calls)
+		}
+	}
+}
+
+// pumpWithMedia is newTestPump over a caller-supplied source.
+func pumpWithMedia(t *testing.T, m *media.Media, faults []fault.Spec, rec *obs.Recorder) (*Pump, *recorder) {
+	t.Helper()
+	w := &recorder{}
+	p, err := NewPump(PumpConfig{
+		CameraID: "cam",
+		Media:    m,
+		Medi:     &description.Media{Type: description.MediaTypeVideo},
+		Writer:   w,
+		Seed:     seed.Seed(1),
+		Faults:   faults,
+		Obs:      rec,
+	})
+	if err != nil {
+		t.Fatalf("NewPump: %v", err)
+	}
+	return p, w
+}
+
+// frameTimestamps steps n times and returns the timestamp of the first packet
+// each step wrote (a step that wrote nothing contributes nothing).
+func frameTimestamps(t *testing.T, p *Pump, w *recorder, n int) []uint32 {
+	t.Helper()
+	var out []uint32
+	for i := 0; i < n; i++ {
+		before := len(w.pkts)
+		if err := p.Step(); err != nil {
+			t.Fatalf("Step: %v", err)
+		}
+		if len(w.pkts) > before {
+			out = append(out, w.pkts[before].Timestamp)
+		}
+	}
+	return out
+}
+
+// regularMedia returns the fixture with DTS and PTS rebased to a fixed frame
+// duration, so the nominal timestamps are known exactly.
+func regularMedia(t *testing.T, dur int64, fps float64) *media.Media {
+	t.Helper()
+	src := testMedia(t)
+	m := *src
+	m.FPS = fps
+	m.AUs = append([]media.AccessUnit(nil), src.AUs...)
+	for i := range m.AUs {
+		m.AUs[i].DTS = int64(i) * dur
+		m.AUs[i].PTS = int64(i) * dur
+	}
+	return &m
+}
+
+func TestReorderStampsOutOfOrderTimestamps(t *testing.T) {
+	spec := []fault.Spec{{Kind: fault.KindPTSDTSMismatch, ReorderDepth: 1}}
+	cases := []struct {
+		name string
+		dur  int64
+		fps  float64
+		want []uint32
+	}{
+		{"30 fps", 3000, 30, []uint32{3000, 0, 9000, 6000}},
+		{"25 fps", 3600, 25, []uint32{3600, 0, 10800, 7200}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := obs.New(100)
+			p, w := pumpWithMedia(t, regularMedia(t, c.dur, c.fps), spec, rec)
+			if p.frameDur != c.dur {
+				t.Fatalf("frameDur = %d, want %d", p.frameDur, c.dur)
+			}
+			got := frameTimestamps(t, p, w, 4)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("timestamps = %v, want %v", got, c.want)
+			}
+			// Sequence numbers stay contiguous: only the timestamps lie.
+			for i := 1; i < len(w.pkts); i++ {
+				if w.pkts[i].SequenceNumber != w.pkts[i-1].SequenceNumber+1 {
+					t.Fatalf("sequence gap at packet %d", i)
+				}
+			}
+			if ev := rec.Events(); len(ev) != 4 || ev[0].Kind != "pts_dts_mismatch" {
+				t.Fatalf("events = %+v, want one pts_dts_mismatch per frame", ev)
+			}
+			if k := rec.Counters("cam").ByKind["pts_dts_mismatch"]; k.Applied != 4 {
+				t.Errorf("tally = %+v, want 4 applied", k)
+			}
+		})
+	}
+}
+
+// A negative sum wraps in uint32; that is the required behaviour.
+func TestDelayedFirstFrameWrapsBelowZero(t *testing.T) {
+	p, w := pumpWithMedia(t, regularMedia(t, 3000, 30), []fault.Spec{{Kind: fault.KindPTSDelayed, DelayMs: 10}}, obs.New(10))
+	got := frameTimestamps(t, p, w, 1)
+	if len(got) != 1 || got[0] != 4294966396 {
+		t.Fatalf("timestamps = %v, want [4294966396]", got)
+	}
+}
+
+// R4: a frame removed by frame_drop still advances the timestamp-fault
+// counters, so lag is frame-clocked rather than delivery-clocked.
+func TestDroppedFrameStillAdvancesDriftCounter(t *testing.T) {
+	m := regularMedia(t, 3000, 30)
+	drift := fault.Spec{Kind: fault.KindPTSDelayed, DriftPpm: 100000}
+
+	pd, wd := pumpWithMedia(t, m, []fault.Spec{{Kind: fault.KindFrameDrop, Rate: 0.5}, drift}, obs.New(1000))
+	delivered := map[int]uint32{}
+	for i := 0; i < len(m.AUs); i++ {
+		before := len(wd.pkts)
+		if err := pd.Step(); err != nil {
+			t.Fatalf("Step: %v", err)
+		}
+		if len(wd.pkts) > before {
+			delivered[i] = wd.pkts[before].Timestamp
+		}
+	}
+	if len(delivered) == 0 || len(delivered) == len(m.AUs) {
+		t.Fatalf("seed gave %d delivered of %d; need a mix", len(delivered), len(m.AUs))
+	}
+
+	pu, wu := pumpWithMedia(t, m, []fault.Spec{drift}, obs.New(1000))
+	for i := 0; i < len(m.AUs); i++ {
+		before := len(wu.pkts)
+		if err := pu.Step(); err != nil {
+			t.Fatalf("Step: %v", err)
+		}
+		if ts, ok := delivered[i]; ok && ts != wu.pkts[before].Timestamp {
+			t.Fatalf("frame %d: timestamp %d with drops, %d without", i, ts, wu.pkts[before].Timestamp)
 		}
 	}
 }

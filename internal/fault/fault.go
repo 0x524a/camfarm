@@ -38,6 +38,17 @@ const (
 	KindTeardown Kind = "teardown"
 	// KindSDPLie makes DESCRIBE misdescribe the stream.
 	KindSDPLie Kind = "sdp_lie"
+	// KindJitter delays each frame by a seeded random time, keeping order.
+	// Reproduces jitter-buffer sizing bugs.
+	KindJitter Kind = "jitter"
+	// KindBurstDelivery holds frames and releases them back-to-back.
+	// Reproduces NVR queue overflow on bursty uplinks.
+	KindBurstDelivery Kind = "burst_delivery"
+	// KindPTSDTSMismatch emits RTP timestamps out of order, as a B-frame
+	// camera stamping presentation time does.
+	KindPTSDTSMismatch Kind = "pts_dts_mismatch"
+	// KindPTSDelayed makes timestamps lag capture, constantly or by drift.
+	KindPTSDelayed Kind = "pts_delayed"
 	// KindAcceptThenSilence accepts the TCP connection and never answers.
 	KindAcceptThenSilence Kind = "accept_then_silence"
 )
@@ -59,6 +70,10 @@ var knownKinds = map[Kind]bool{
 	KindRTSPError:          true,
 	KindTeardown:           true,
 	KindSDPLie:             true,
+	KindJitter:             true,
+	KindBurstDelivery:      true,
+	KindPTSDTSMismatch:     true,
+	KindPTSDelayed:         true,
 	KindAcceptThenSilence:  true,
 }
 
@@ -103,6 +118,19 @@ type Spec struct {
 	// Mode selects a variant: close or reset for teardown; codec, sprop,
 	// resolution or contentBase for sdp_lie.
 	Mode string
+	// MaxMs, for jitter, is the upper bound in milliseconds of a frame's
+	// random delay.
+	MaxMs int
+	// HoldFrames, for burst_delivery, is how many frames are held before the
+	// burst is released.
+	HoldFrames int
+	// ReorderDepth, for pts_dts_mismatch, is the B-frame depth: how far
+	// timestamps run out of order.
+	ReorderDepth int
+	// DelayMs, for pts_delayed, is a constant timestamp lag in milliseconds.
+	DelayMs int
+	// DriftPpm, for pts_delayed, is a timestamp drift in parts per million.
+	DriftPpm int
 }
 
 // Decision is a fault that fired.
@@ -120,6 +148,9 @@ type Decision struct {
 // camera's pump, so nothing is shared and no lock is needed.
 type Engine struct {
 	entries []entry
+	// tsKinds are the configured timestamp faults, built once in New so that
+	// TimestampKinds does not allocate per frame.
+	tsKinds []Kind
 }
 
 type entry struct {
@@ -132,6 +163,13 @@ type entry struct {
 	// probabilities (good->bad and bad->bad).
 	bad  bool
 	p, q float64
+	// calls counts TimestampShift calls since this entry was installed; it is
+	// pts_delayed's drift clock. Inherit carries it across an engine swap that
+	// leaves the entry's spec unchanged.
+	calls int
+	// remaining is burst_delivery's hold state: zero when not holding, else the
+	// frames left in the hold, counting the current one.
+	remaining int
 }
 
 // New returns an Engine for one camera. Each kind draws from its own generator,
@@ -164,6 +202,9 @@ func New(s seed.Seed, specs []Spec) (*Engine, error) {
 			en.p = sp.Rate * (1 - en.q) / (1 - sp.Rate)
 		}
 		e.entries = append(e.entries, en)
+		if sp.Kind == KindPTSDTSMismatch || sp.Kind == KindPTSDelayed {
+			e.tsKinds = append(e.tsKinds, sp.Kind)
+		}
 	}
 	return e, nil
 }

@@ -17,8 +17,10 @@ package dashboard
 
 import (
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -582,6 +584,62 @@ func TestE2EEnumParameterAppliesRtspError(t *testing.T) {
 		t.Fatalf("faults not cleared: %v", err)
 	}
 	s.requireClean(t)
+}
+
+func TestE2EApplyAndClearJitterThroughTheGenericForm(t *testing.T) {
+	url, f := e2eServer(t)
+	s := newSession(t)
+	s.open(t, url)
+	row := s.row("front-door")
+	cam, _ := f.Camera("front-door")
+
+	selectKind(t, row.Locator(".fault-kind"), "jitter")
+	if err := row.Locator(`.fault-param[data-param="maxMs"]`).Fill("100"); err != nil {
+		t.Fatal(err)
+	}
+	if err := row.Locator(".btn-fault").Click(); err != nil {
+		t.Fatal(err)
+	}
+	// The counter appears and keeps rising as frames are delayed.
+	if err := expect().Locator(row.Locator(".fault-active")).ToContainText("jitter"); err != nil {
+		t.Fatalf("jitter not shown as active: %v", err)
+	}
+	if err := expect().Locator(row.Locator(".fault-active")).ToContainText(regexp.MustCompile(`applied [1-9]`)); err != nil {
+		t.Fatalf("jitter counter never rose: %v", err)
+	}
+	if got := cam.Faults(); len(got) != 1 || got[0].Kind != "jitter" || got[0].MaxMs != 100 {
+		t.Fatalf("camera faults = %+v", got)
+	}
+	first := cam.Stats().FaultCounts["jitter"].Applied
+	waitFor(t, "jitter counter increases", func() bool { return cam.Stats().FaultCounts["jitter"].Applied > first })
+
+	if err := row.Locator(".btn-clear-fault").Click(); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(row.Locator(".fault-active")).ToContainText("none"); err != nil {
+		t.Fatalf("faults not cleared: %v", err)
+	}
+	s.requireClean(t)
+}
+
+func TestE2EPTSDelayedWithoutParametersShowsTheServerError(t *testing.T) {
+	url, f := e2eServer(t)
+	s := newSession(t)
+	s.open(t, url)
+	row := s.row("front-door")
+	cam, _ := f.Camera("front-door")
+
+	selectKind(t, row.Locator(".fault-kind"), "pts_delayed")
+	if err := row.Locator(".btn-fault").Click(); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(s.page.Locator("#error")).ToContainText("delayMs"); err != nil {
+		t.Fatalf("server error not shown: %v", err)
+	}
+	if len(cam.Faults()) != 0 {
+		t.Fatalf("a rejected fault was applied: %+v", cam.Faults())
+	}
+	s.requireClean(t, http.StatusUnprocessableEntity)
 }
 
 func TestE2EEnumSelectKindsRenderInBothColourSchemes(t *testing.T) {

@@ -1,6 +1,6 @@
 # Fault catalogue: media-path and control-plane faults — design
 
-Date: 2026-10-09 (slice C added 2026-10-10). Status: slices A and B implemented; slice C pending review, not yet implemented.
+Date: 2026-10-09 (slice C added 2026-10-10). Status: slices A, B and C implemented.
 
 This is the design for the next three slices after slice 3 (dashboard, binary and the first fault
 effect, `frame_drop`). It depends on slice 3 being merged: it reuses the pump's fault seam,
@@ -155,13 +155,23 @@ plan escalates rather than falling back to a spec-time-only lie silently.
 
 ### 2.6 `jitter` (slice C)
 
-Frame `k` normally leaves at its nominal deadline. With `jitter` its deadline is moved later by
+Frame `k` normally leaves at its nominal slot, `start + k · interval` on an absolute schedule (the
+pump paces on deadlines, not a ticker). With `jitter` its deadline is moved later by
 `d_k = u_k · maxMs`, where `u_k` is the `k`-th draw of the `jitter` stream (one draw per frame,
-unconditional). Frames are always sent in order, so a frame delayed past the next frame's slot makes
-the next one leave immediately after it: bunching falls out of the model rather than being a second
-mechanism. RTP timestamps and sequence numbers stay honest, so the receiver sees genuine
-inter-arrival jitter. `maxMs` is 1 to 5000. The planned delay of every frame is recorded in the
-observation stream, so tests assert the seeded schedule without sleeping; one wire test checks a
+unconditional); the delay is relative to the slot, not to when the previous frame left. Frames are
+always sent in order, so frame `k` leaves at `max(slot_k + d_k, departure of frame k-1)`: a frame
+delayed past later slots makes those frames leave immediately after it, back-to-back. Bunching falls
+out of the model rather than being a second mechanism, and because slots are absolute the long-run
+frame rate stays nominal for any `maxMs`; every frame leaves before `slot_k + maxMs`. RTP timestamps
+and sequence numbers stay honest, so the receiver sees genuine inter-arrival jitter. `maxMs` is 1 to
+5000. A resync guard bounds catch-up: if the pump wakes more than `max(1 s, 10 intervals)` after the
+time it meant to plan a frame (a suspended process or a stalled host, never lateness jitter itself
+caused), it plans that frame at once and restarts the schedule from now instead of emitting the
+missed slots as one burst. Below the guard a late pump catches up back-to-back, with or without
+jitter. The planned delay is recorded in the observation stream
+only for frames actually written with a delay above zero; a frame that is dropped or held discards
+its own draw, and the flush frame that releases a burst carries its own delay. Tests therefore assert
+the seeded schedule without sleeping; one wire test checks a
 loose lower bound on measured spread. The decision (the delay values) is reproducible; the arrival
 times a client measures are wall-clock and are not, which is the same limit the rest of this spec
 states.
@@ -193,13 +203,20 @@ randomness: the effect is a pure function of the frame counter, so a test can as
 A standing lag or drift of the RTP timestamp against the real send clock. `delayMs` subtracts a
 constant from every timestamp; `driftPpm` makes timestamps advance at `(1 - driftPpm/1e6)` of the
 nominal rate, so the lag grows with time (integer arithmetic, no floats). At least one of the two is
-required. Injected mid-stream, `delayMs` is a one-time backward step of the timestamp followed by
-normal-rate advance; at spec time the shift is only visible through the RTCP sender report, whose
-timestamp-to-wall-clock mapping then disagrees with the media by the lag. This is the field bug a
+required. The drift counts frames since the entry was installed (ruling R2); a fault-set swap that
+leaves the `pts_delayed` spec unchanged (an unrelated frame fault injected or cleared) carries the
+count over rather than reinstalling the entry, so drift stays continuous, while a changed spec
+starts again at zero. Injected mid-stream, `delayMs` is a one-time backward step of the timestamp followed by
+normal-rate advance; at spec time the shift shows up mainly in the RTCP sender report's own RTP timestamp. Measured
+on the pinned `gortsplib` v5.6.5, the server-side sender pairs the already-shifted RTP timestamp
+with the true write time, so a client mapping packets to wall-clock through the SR
+(`Client.PacketNTP`) sees a delayed camera at the same lag as a clean one (delta about 0 ms); the
+delay appears only as the SR's RTP timestamp sitting about `delayMs` behind a clean camera's
+(about -45000 ticks at 90 kHz for 500 ms). This is the field bug a
 latency profiler such as `framelag` meets: a camera whose timestamps lag capture. `delayMs` is 1 to
 60000 and `driftPpm` 1 to 100000. No randomness. Both timestamp kinds add into the stamped value, so
-they compose with each other and with the frame faults. The effect on the SR is stated as expected
-behaviour of the library and pinned by a wire test rather than assumed.
+they compose with each other and with the frame faults. This SR behaviour is the library's, pinned by a wire
+test rather than assumed; a `gortsplib` upgrade may change it and the test then fails loudly.
 
 ## 3. One schema for validation, API and UI (slice A)
 
@@ -217,7 +234,8 @@ read it, so they cannot drift:
    implemented status.
 
 The flat `FaultSpec` (root) and `fault.Spec` gain, all `omitempty`: `meanBurst`, `keepEvery`, `on`,
-`status`, `onlyRequest`, `afterFrames`, `mode`. Flat rather than per-kind nested structs, so the
+`status`, `onlyRequest`, `afterFrames`, `mode`, and for slice C `maxMs`, `holdFrames`,
+`reorderDepth`, `delayMs`, `driftPpm`. Flat rather than per-kind nested structs, so the
 journal, the replay hash and hand-written spec files stay simple.
 
 ### 3.1 Observability
@@ -298,8 +316,10 @@ Same standard as `frame_drop`: real wire, `-race`, fixed seeds.
   and releases exactly `holdFrames` frames at the seeded boundaries, with contiguous sequence numbers
   and honest timestamps; `pts_dts_mismatch` yields the exact timestamp sequence for each
   `reorderDepth` and the same set of timestamps; `pts_delayed` shifts the timestamp by `delayMs`,
-  grows it by `driftPpm` per frame interval, and a real client's sender-report mapping shows the
-  lag; the four compose without panics under `-race`.
+  grows it by `driftPpm` per frame interval, and a real client sees the lag in the RTCP sender
+  report's RTP timestamp (about `delayMs` behind a clean camera's), while its `PacketNTP`
+  wall-clock mapping does not show it (see 2.9, measured on the pinned `gortsplib`); the four
+  compose without panics under `-race`.
 - **Catalogue:** validation, `GET /api/v1/faults` and the README table agree; a parameter that does
   not apply to its kind is refused.
 - **Dashboard:** `httptest` for the catalogue endpoint and the mapped statuses; Playwright (the

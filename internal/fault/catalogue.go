@@ -46,6 +46,11 @@ type KindInfo struct {
 
 func f64(v float64) *float64 { return &v }
 
+// rateParam is the common rate parameter. Its Default prefills the dashboard
+// form and nothing else: for the frame-path kinds (frame_drop, packet_loss,
+// burst_delivery) an omitted rate decodes to 0, so the fault is installed and
+// never fires. rtsp_error is the exception: it applies its default rate
+// server-side (see ControlEngine).
 func rateParam() Param {
 	return Param{Name: "rate", Type: ParamNumber, Min: f64(0), Max: f64(1), Default: 0.2,
 		Help: "Probability in [0,1] that the fault fires for each unit of its clock."}
@@ -75,6 +80,9 @@ func Catalogue() []KindInfo {
 	lossRate.Help = "Long-run fraction of packets withheld, in [0,1]."
 	lossProtect := protectParam()
 	lossProtect.Help = "Never withhold a packet of a random-access (keyframe) frame. Draws are still consumed."
+	burstRate := rateParam()
+	burstRate.Default = 0.1
+	burstRate.Help = "Probability in [0,1] that a burst starts at each frame."
 	return []KindInfo{
 		{
 			Kind: KindFrameDrop, Implemented: true,
@@ -137,6 +145,45 @@ func Catalogue() []KindInfo {
 					Help: "Lie only on the Nth DESCRIBE (ignores rate). 0 or omitted means unset."},
 			},
 		},
+		{
+			Kind: KindJitter, Implemented: true,
+			Models: "Inter-arrival jitter: each frame leaves a seeded random time late (order kept), which stresses jitter-buffer sizing.",
+			Clock:  "frame counter; one draw per frame",
+			Params: []Param{
+				{Name: "maxMs", Type: ParamInteger, Min: f64(1), Max: f64(5000), Default: 100.0, Required: true,
+					Help: "Upper bound in milliseconds of the random delay added to each frame."},
+			},
+		},
+		{
+			Kind: KindBurstDelivery, Implemented: true,
+			Models: "Bursty uplink or encoder buffering: frames are held and then released back-to-back, which overflows NVR queues.",
+			Clock:  "frame counter; one draw per frame, unconditional",
+			Params: []Param{
+				burstRate,
+				{Name: "holdFrames", Type: ParamInteger, Min: f64(2), Max: f64(300), Default: 5.0, Required: true,
+					Help: "Frames held before the burst is released back-to-back."},
+			},
+		},
+		{
+			Kind: KindPTSDTSMismatch, Implemented: true,
+			Models: "B-frame camera that stamps presentation time into RTP: timestamps run out of order, so decoders report non-monotonic dts.",
+			Clock:  "frame counter; no randomness",
+			Params: []Param{
+				{Name: "reorderDepth", Type: ParamInteger, Min: f64(1), Max: f64(4), Default: 1.0, Required: true,
+					Help: "How many frames timestamps run out of order by."},
+			},
+		},
+		{
+			Kind: KindPTSDelayed, Implemented: true,
+			Models: "Camera whose timestamps lag capture, constantly or by drift: what a latency profiler such as framelag meets.",
+			Clock:  "frame counter; no randomness",
+			Params: []Param{
+				{Name: "delayMs", Type: ParamInteger, Min: f64(1), Max: f64(60000),
+					Help: "Constant timestamp lag in milliseconds. At least one of delayMs and driftPpm is required."},
+				{Name: "driftPpm", Type: ParamInteger, Min: f64(1), Max: f64(100000),
+					Help: "Timestamp drift in parts per million of elapsed time. At least one of delayMs and driftPpm is required."},
+			},
+		},
 		{Kind: KindAcceptThenSilence, Models: "Camera that accepts the TCP connection and never answers.", Params: []Param{}},
 	}
 }
@@ -153,7 +200,8 @@ func Info(kind Kind) (KindInfo, bool) {
 
 // paramNames fixes the order parameters are checked in, so the first error
 // reported is reproducible.
-var paramNames = []string{"rate", "protectKeyframes", "meanBurst", "keepEvery", "on", "status", "onlyRequest", "afterFrames", "mode"}
+var paramNames = []string{"rate", "protectKeyframes", "meanBurst", "keepEvery", "on", "status", "onlyRequest", "afterFrames", "mode",
+	"maxMs", "holdFrames", "reorderDepth", "delayMs", "driftPpm"}
 
 // param reads a Spec field by its public name. A parameter counts as set when
 // non-zero, which matches the omitempty behaviour of the JSON form.
@@ -173,6 +221,16 @@ func (s Spec) param(name string) (v float64, set bool) {
 		return float64(s.OnlyRequest), s.OnlyRequest != 0
 	case "afterFrames":
 		return float64(s.AfterFrames), s.AfterFrames != 0
+	case "maxMs":
+		return float64(s.MaxMs), s.MaxMs != 0
+	case "holdFrames":
+		return float64(s.HoldFrames), s.HoldFrames != 0
+	case "reorderDepth":
+		return float64(s.ReorderDepth), s.ReorderDepth != 0
+	case "delayMs":
+		return float64(s.DelayMs), s.DelayMs != 0
+	case "driftPpm":
+		return float64(s.DriftPpm), s.DriftPpm != 0
 	}
 	return 0, false
 }
@@ -281,6 +339,9 @@ func checkParams(info KindInfo, s Spec) error {
 		if limit := s.MeanBurst / (1 + s.MeanBurst); s.Rate > limit {
 			return fmt.Errorf("%w: with meanBurst %v the highest reachable rate is %v, got %v", ErrBadParam, s.MeanBurst, limit, s.Rate)
 		}
+	}
+	if s.Kind == KindPTSDelayed && s.DelayMs == 0 && s.DriftPpm == 0 {
+		return fmt.Errorf("%w: %q requires at least one of \"delayMs\" and \"driftPpm\"", ErrBadParam, s.Kind)
 	}
 	return nil
 }

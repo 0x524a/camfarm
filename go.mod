@@ -15,6 +15,8 @@ require (
 	github.com/playwright-community/playwright-go v0.6000.0
 )
 
+require github.com/pion/rtcp v1.2.17
+
 require (
 	github.com/Eyevinn/mp4ff v0.50.0 // indirect
 	github.com/abema/go-mp4 v1.7.1 // indirect
@@ -27,7 +29,6 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
-	github.com/pion/rtcp v1.2.17 // indirect
 	github.com/pion/sdp/v3 v3.0.19 // indirect
 	github.com/pion/srtp/v3 v3.0.13 // indirect
 	github.com/pion/transport/v4 v4.1.0 // indirect

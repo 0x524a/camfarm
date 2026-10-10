@@ -70,7 +70,9 @@ func sameSpecs(a, b []fault.Spec) bool {
 // Only a class whose spec list actually changed is touched: an unchanged class
 // is neither swapped nor notified, so injecting one fault does not restart the
 // draw sequence of an unrelated active one (ControlEngine.Set and a pump swap
-// both restart a class's streams).
+// both restart a class's streams; the one exception is an unchanged
+// pts_delayed, whose drift clock a pump swap carries over, see
+// fault.Engine.Inherit).
 //
 // applied, if non-nil, is called once per changed class: with ("request",
 // requests decided so far) synchronously, before SetFaults returns, because a
