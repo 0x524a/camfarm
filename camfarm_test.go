@@ -717,3 +717,74 @@ func TestStaleCameraHandleCannotInjectIntoReaddedCamera(t *testing.T) {
 		t.Fatalf("stale handle changed the re-added camera: faults=%v journal grew=%d", fresh.Faults(), len(f.Journal())-journalBefore)
 	}
 }
+
+func TestInjectPacketLossAndKeyframeStarvationOnARunningCamera(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, _ := f.Camera("front-door")
+
+	if err := cam.Inject(FaultSpec{Kind: "packet_loss", Rate: 0.3, MeanBurst: 3}); err != nil {
+		t.Fatalf("Inject packet_loss: %v", err)
+	}
+	if err := cam.Inject(FaultSpec{Kind: "keyframe_starvation", KeepEvery: 2}); err != nil {
+		t.Fatalf("Inject keyframe_starvation: %v", err)
+	}
+	if got := cam.Faults(); len(got) != 2 {
+		t.Fatalf("Faults() = %+v, want both kinds active", got)
+	}
+}
+
+func TestInjectRejectsBadParametersAsInvalidSpec(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, _ := f.Camera("front-door")
+	for name, spec := range map[string]FaultSpec{
+		"starvation without keepEvery":   {Kind: "keyframe_starvation"},
+		"starvation with rate":           {Kind: "keyframe_starvation", KeepEvery: 3, Rate: 0.5},
+		"frame_drop with keepEvery":      {Kind: "frame_drop", Rate: 0.1, KeepEvery: 3},
+		"burst above the reachable rate": {Kind: "packet_loss", Rate: 0.9, MeanBurst: 4},
+		"rate above one":                 {Kind: "packet_loss", Rate: 1.5},
+	} {
+		if err := cam.Inject(spec); !errors.Is(err, ErrInvalidSpec) {
+			t.Errorf("%s: Inject = %v, want ErrInvalidSpec", name, err)
+		}
+	}
+	if len(cam.Faults()) != 0 {
+		t.Fatal("a refused injection changed the active faults")
+	}
+}
+
+func TestSpecAcceptsPacketLossAndRefusesBadParameters(t *testing.T) {
+	s := minimalSpec()
+	s.Cameras[0].Faults = []FaultSpec{{Kind: "packet_loss", Rate: 0.1}}
+	f, err := Start(context.Background(), s)
+	if err != nil {
+		t.Fatalf("Start with packet_loss: %v", err)
+	}
+	f.Close()
+
+	s.Cameras[0].Faults = []FaultSpec{{Kind: "keyframe_starvation"}}
+	if _, err := Start(context.Background(), s); !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("Start with starvation lacking keepEvery = %v, want ErrInvalidSpec", err)
+	}
+}
+
+func TestAddCameraRefusesBadFaultParametersAsInvalidSpec(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	_, err := f.AddCamera(CameraSpec{ID: "new-cam", Faults: []FaultSpec{{Kind: "keyframe_starvation"}}})
+	if !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("AddCamera with starvation lacking keepEvery = %v, want ErrInvalidSpec", err)
+	}
+}
+
+func TestStatsFaultCountsReportPerKindEffects(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, _ := f.Camera("front-door")
+	if cam.Stats().FaultCounts == nil {
+		t.Fatal("FaultCounts is nil on a camera with no faults")
+	}
+	if err := cam.Inject(FaultSpec{Kind: "frame_drop", Rate: 1}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "drops to be tallied", func() bool {
+		return cam.Stats().FaultCounts["frame_drop"].Applied >= 3
+	})
+}

@@ -66,10 +66,15 @@ type AuthSpec struct {
 type FaultSpec struct {
 	// Kind names a catalogued fault.
 	Kind string `json:"kind"`
-	// Rate is the per-frame probability for rate-based faults, in [0,1].
+	// Rate is the probability for rate-based faults, in [0,1].
 	Rate float64 `json:"rate,omitempty"`
-	// ProtectKeyframes, for frame_drop, never drops a random-access frame.
+	// ProtectKeyframes never applies frame_drop or packet_loss to a
+	// random-access frame.
 	ProtectKeyframes bool `json:"protectKeyframes,omitempty"`
+	// MeanBurst, for packet_loss, selects burst loss when greater than 1.
+	MeanBurst float64 `json:"meanBurst,omitempty"`
+	// KeepEvery, for keyframe_starvation, delivers every Nth keyframe.
+	KeepEvery int `json:"keepEvery,omitempty"`
 }
 
 // ListenSpec describes what the fleet binds.
@@ -197,17 +202,8 @@ func validateCameraSpec(c CameraSpec, seen map[string]bool) (CameraSpec, error) 
 	}
 
 	for _, f := range c.Faults {
-		if !fault.Known(fault.Kind(f.Kind)) {
-			return c, fmt.Errorf("%w: camera %q requests unknown fault kind %q", ErrInvalidSpec, c.ID, f.Kind)
-		}
-		if f.Rate < 0 || f.Rate > 1 {
-			return c, fmt.Errorf("%w: camera %q fault %q has rate %v outside [0,1]", ErrInvalidSpec, c.ID, f.Kind, f.Rate)
-		}
-		if !fault.Implemented(fault.Kind(f.Kind)) {
-			// Catalogued, validated, and refused. Accepting it silently would
-			// make a test that asked for a fault pass while nothing misbehaved.
-			return c, fmt.Errorf("%w: fault %q is catalogued but its effect is not implemented in this version",
-				ErrUnsupported, f.Kind)
+		if err := validateFault(f); err != nil {
+			return c, fmt.Errorf("camera %q: %w", c.ID, err)
 		}
 	}
 
@@ -222,7 +218,34 @@ func validateCameraSpec(c CameraSpec, seen map[string]bool) (CameraSpec, error) 
 func toFaultSpecs(in []FaultSpec) []fault.Spec {
 	out := make([]fault.Spec, 0, len(in))
 	for _, f := range in {
-		out = append(out, fault.Spec{Kind: fault.Kind(f.Kind), Rate: f.Rate, ProtectKeyframes: f.ProtectKeyframes})
+		out = append(out, toFaultSpec(f))
 	}
 	return out
+}
+
+func toFaultSpec(f FaultSpec) fault.Spec {
+	return fault.Spec{Kind: fault.Kind(f.Kind), Rate: f.Rate, ProtectKeyframes: f.ProtectKeyframes,
+		MeanBurst: f.MeanBurst, KeepEvery: f.KeepEvery}
+}
+
+// validateFault is the one place a fault is checked, shared by spec
+// validation, AddCamera and Camera.Inject so they cannot disagree.
+func validateFault(f FaultSpec) error {
+	k := fault.Kind(f.Kind)
+	if !fault.Known(k) {
+		return fmt.Errorf("%w: unknown fault kind %q", ErrInvalidSpec, f.Kind)
+	}
+	// Written so that NaN is refused too.
+	if !(f.Rate >= 0 && f.Rate <= 1) {
+		return fmt.Errorf("%w: fault %q has rate %v outside [0,1]", ErrInvalidSpec, f.Kind, f.Rate)
+	}
+	if !fault.Implemented(k) {
+		// Catalogued, validated, and refused. Accepting it silently would
+		// make a test that asked for a fault pass while nothing misbehaved.
+		return fmt.Errorf("%w: fault %q is catalogued but its effect is not implemented in this version", ErrUnsupported, f.Kind)
+	}
+	if err := fault.Validate(toFaultSpec(f)); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidSpec, err)
+	}
+	return nil
 }

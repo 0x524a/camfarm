@@ -11,7 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/0x524a/camfarm/internal/fault"
 	"github.com/0x524a/camfarm/internal/media"
 	"github.com/0x524a/camfarm/internal/obs"
 	"github.com/0x524a/camfarm/internal/onvif"
@@ -52,6 +51,12 @@ type Status struct {
 	Readers int
 }
 
+// FaultCount is one fault kind's tally.
+type FaultCount struct {
+	Applied    uint64
+	Suppressed uint64
+}
+
 // Stats are a camera's counters, correlated with the seed that produced them.
 type Stats struct {
 	// Seed is this camera's derived seed, not the fleet root.
@@ -63,6 +68,10 @@ type Stats struct {
 	LoopsCompleted uint64
 	// FaultsFired counts fault decisions that have fired for this camera.
 	FaultsFired uint64
+	// FaultCounts tallies each fault kind's effects: frames dropped, packets
+	// or keyframes withheld (Applied) and decisions spared by
+	// ProtectKeyframes (Suppressed). Never nil.
+	FaultCounts map[string]FaultCount
 	// OutboundRTPPackets counts RTP packets sent on this camera's stream,
 	// read from the RTSP stream's own counters.
 	OutboundRTPPackets uint64
@@ -527,12 +536,17 @@ func (c *Camera) ONVIFEndpoint() string { return c.fleet.onvifSrv.Endpoint(c.id)
 func (c *Camera) Stats() Stats {
 	counters := c.fleet.rec.Counters(c.id)
 	pkts, bytes := c.fleet.srv.StreamStats(c.id)
+	fc := make(map[string]FaultCount, len(counters.ByKind))
+	for k, v := range counters.ByKind {
+		fc[k] = FaultCount{Applied: v.Applied, Suppressed: v.Suppressed}
+	}
 
 	return Stats{
 		Seed:               uint64(c.seed),
 		FramesServed:       counters.FramesServed,
 		LoopsCompleted:     counters.LoopsCompleted,
 		FaultsFired:        counters.FaultsFired,
+		FaultCounts:        fc,
 		OutboundRTPPackets: pkts,
 		OutboundBytes:      bytes,
 		Readers:            c.fleet.srv.Readers(c.id),
@@ -584,14 +598,8 @@ func (c *Camera) Faults() []FaultSpec {
 // every fault's random stream restarts at its first draw rather than
 // continuing. A replay must restart streams at each journaled inject or clear.
 func (c *Camera) Inject(f FaultSpec) error {
-	if !fault.Known(fault.Kind(f.Kind)) {
-		return fmt.Errorf("%w: unknown fault kind %q", ErrInvalidSpec, f.Kind)
-	}
-	if f.Rate < 0 || f.Rate > 1 {
-		return fmt.Errorf("%w: fault %q has rate %v outside [0,1]", ErrInvalidSpec, f.Kind, f.Rate)
-	}
-	if !fault.Implemented(fault.Kind(f.Kind)) {
-		return fmt.Errorf("%w: injecting fault %q is not implemented in this version", ErrUnsupported, f.Kind)
+	if err := validateFault(f); err != nil {
+		return err
 	}
 
 	c.mu.Lock()
