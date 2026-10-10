@@ -1,1 +1,327 @@
-<!doctype html><html lang="en"><meta charset="utf-8"><title>CamFarm</title><body><main id="app">CamFarm</main>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CamFarm</title>
+<link rel="icon" href="data:,">
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1b1f24; --muted: #5b6672;
+  --line: #d9dee4; --accent: #1e5fd6; --accent-text: #ffffff;
+  --danger: #b3261e; --ok: #1a7f37; --field: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #101317; --panel: #181c22; --text: #e8ecf1; --muted: #98a3b0;
+    --line: #2b323b; --accent: #6ea0ff; --accent-text: #0b1220;
+    --danger: #ff8a80; --ok: #5ac17a; --field: #11151a;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #101317; --panel: #181c22; --text: #e8ecf1; --muted: #98a3b0;
+  --line: #2b323b; --accent: #6ea0ff; --accent-text: #0b1220;
+  --danger: #ff8a80; --ok: #5ac17a; --field: #11151a;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding-inline: 16px; padding-block: 16px 32px;
+}
+main { max-width: 1200px; margin-inline: auto; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 15px; margin: 0 0 8px; }
+.sub { color: var(--muted); margin: 0 0 16px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-block: 12px; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
+form.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; align-items: end; }
+label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); }
+input, select, button { font: inherit; }
+input, select {
+  background: var(--field); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 8px; min-width: 0;
+}
+button {
+  background: var(--accent); color: var(--accent-text); border: 0; border-radius: 6px;
+  padding: 6px 10px; cursor: pointer;
+}
+button:disabled { opacity: .6; cursor: default; }
+button.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); }
+button.danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.copy { padding: 1px 6px; font-size: 11px; margin-inline-start: 4px; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; min-width: 760px; }
+th, td { text-align: left; vertical-align: top; padding: 8px; border-top: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; font-size: 12px; }
+td .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 4px; }
+img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; border: 1px solid var(--line); border-radius: 4px; }
+#error { color: var(--danger); margin-block: 8px; }
+#error:empty { display: none; }
+.fault-active { color: var(--ok); font-size: 12px; }
+.fault-controls input[type="number"] { width: 72px; }
+.empty { color: var(--muted); padding: 12px 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>CamFarm</h1>
+  <p class="sub">A simulated camera fleet. It simulates cameras and is not an ONVIF-conformant implementation.</p>
+
+  <div class="panel">
+    <h2>Replay</h2>
+    <code id="replay">loading…</code>
+  </div>
+
+  <div id="error" role="alert"></div>
+
+  <div class="panel">
+    <h2>Add a camera</h2>
+    <form id="add-form" class="grid">
+      <label>ID<input id="add-id" required autocomplete="off"></label>
+      <label>Username (optional)<input id="add-user" autocomplete="off"></label>
+      <label>Password (optional)<input id="add-pass" autocomplete="off"></label>
+      <label>Source
+        <select id="add-source">
+          <option value="fixture">Bundled fixture (H.264)</option>
+          <option value="file">File on this machine</option>
+        </select>
+      </label>
+      <label id="add-path-label" hidden>File path<input id="add-path" autocomplete="off"></label>
+      <button id="add-submit" type="submit">Add camera</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Cameras</h2>
+    <div class="table-wrap">
+      <table id="cameras">
+        <thead><tr><th>Camera</th><th>URLs</th><th>Stream</th><th>Faults</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p id="empty" class="empty" hidden>No cameras.</p>
+  </div>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var api = "/api/v1";
+  var tbody = document.querySelector("#cameras tbody");
+  var errorBox = document.getElementById("error");
+  var cameras = [];
+  var snapshotURLs = {};   // id -> object URL of the last snapshot
+  var inputState = {};     // id -> {rate, protect}, survives re-renders
+
+  function showError(msg) { errorBox.textContent = msg || ""; }
+
+  function request(method, path, body) {
+    var opts = { method: method, headers: {} };
+    if (body !== undefined) {
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    return fetch(api + path, opts).then(function (r) {
+      if (r.ok) { return r; }
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        throw new Error(j.error || (r.status + " " + r.statusText));
+      });
+    });
+  }
+
+  function el(tag, props, children) {
+    var n = document.createElement(tag);
+    Object.keys(props || {}).forEach(function (k) {
+      if (k === "text") { n.textContent = props[k]; }
+      else if (k === "class") { n.className = props[k]; }
+      else if (k.indexOf("data-") === 0 || k.indexOf("aria-") === 0 || k === "type" || k === "min" || k === "max" || k === "step" || k === "alt") { n.setAttribute(k, props[k]); }
+      else { n[k] = props[k]; }
+    });
+    (children || []).forEach(function (c) { n.appendChild(typeof c === "string" ? document.createTextNode(c) : c); });
+    return n;
+  }
+
+  function copyButton(value, what) {
+    return el("button", { class: "copy secondary", type: "button", text: "Copy", "data-copy": value, "aria-label": "Copy " + what });
+  }
+
+  function urlLine(label, value, cls) {
+    return el("div", { class: "row" }, [
+      el("span", { text: label }),
+      el("code", { class: cls, "data-testid": cls, text: value }),
+      copyButton(value, label + " URL")
+    ]);
+  }
+
+  function faultText(c) {
+    if (!c.faults.length) { return "none"; }
+    return c.faults.map(function (f) {
+      return f.kind + " " + f.rate + (f.protectKeyframes ? " (keyframes protected)" : "");
+    }).join(", ");
+  }
+
+  function renderRow(c) {
+    var st = inputState[c.id] || { rate: "0.2", protect: false };
+    inputState[c.id] = st;
+
+    var rate = el("input", { class: "fault-rate", type: "number", min: "0", max: "1", step: "0.05", value: st.rate, "aria-label": "Drop rate for " + c.id });
+    rate.addEventListener("input", function () { st.rate = rate.value; });
+    var protect = el("input", { class: "fault-protect", type: "checkbox", checked: st.protect, "aria-label": "Protect keyframes for " + c.id });
+    protect.addEventListener("change", function () { st.protect = protect.checked; });
+
+    var kind = el("select", { class: "fault-kind", "aria-label": "Fault kind for " + c.id }, [
+      el("option", { value: "frame_drop", text: "frame_drop" }),
+      el("option", { value: "keyframe_starvation", text: "keyframe_starvation (not implemented)", disabled: true }),
+      el("option", { value: "packet_loss", text: "packet_loss (not implemented)", disabled: true })
+    ]);
+
+    var img = el("img", { class: "snapshot", alt: "Snapshot of " + c.id, hidden: !snapshotURLs[c.id] });
+    if (snapshotURLs[c.id]) { img.src = snapshotURLs[c.id]; }
+
+    var snapBtn = el("button", { class: "btn-snapshot secondary", type: "button", text: "Snapshot" });
+    snapBtn.addEventListener("click", function () {
+      snapBtn.disabled = true;
+      showError("");
+      fetch(api + "/cameras/" + encodeURIComponent(c.id) + "/snapshot.jpg").then(function (r) {
+        if (!r.ok) { return r.json().catch(function () { return {}; }).then(function (j) { throw new Error(j.error || r.statusText); }); }
+        return r.blob();
+      }).then(function (blob) {
+        if (snapshotURLs[c.id]) { URL.revokeObjectURL(snapshotURLs[c.id]); }
+        snapshotURLs[c.id] = URL.createObjectURL(blob);
+        img.src = snapshotURLs[c.id];
+        img.hidden = false;
+      }).catch(function (e) { showError("Snapshot failed: " + e.message); })
+        .then(function () { snapBtn.disabled = false; });
+    });
+
+    var removeBtn = el("button", { class: "btn-remove danger", type: "button", text: "Remove" });
+    removeBtn.addEventListener("click", function () {
+      showError("");
+      request("DELETE", "/cameras/" + encodeURIComponent(c.id)).then(refresh).catch(function (e) { showError(e.message); });
+    });
+
+    var applyBtn = el("button", { class: "btn-fault", type: "button", text: "Apply fault" });
+    applyBtn.addEventListener("click", function () {
+      showError("");
+      request("POST", "/cameras/" + encodeURIComponent(c.id) + "/faults",
+        { kind: kind.value, rate: parseFloat(rate.value), protectKeyframes: protect.checked })
+        .then(refresh).catch(function (e) { showError(e.message); });
+    });
+    var clearBtn = el("button", { class: "btn-clear-fault secondary", type: "button", text: "Clear" });
+    clearBtn.addEventListener("click", function () {
+      showError("");
+      request("DELETE", "/cameras/" + encodeURIComponent(c.id) + "/faults").then(refresh).catch(function (e) { showError(e.message); });
+    });
+
+    var urls = el("td", {}, [
+      urlLine("RTSP", c.rtspUrl, "cell-rtsp"),
+      urlLine("ONVIF", c.onvifEndpoint, "cell-onvif")
+    ]);
+    if (c.username) {
+      urls.appendChild(el("div", { class: "row" }, [el("span", { text: "Auth" }), el("code", { text: c.username + " / " + c.password })]));
+    }
+
+    var tr = el("tr", { "data-id": c.id }, [
+      el("td", {}, [
+        el("strong", { text: c.id }),
+        el("div", { class: "sub", text: c.codec + " " + c.width + "x" + c.height + " @ " + c.fps }),
+        el("div", { class: "sub mono", text: "seed " + c.seed })
+      ]),
+      urls,
+      el("td", {}, [
+        el("div", { class: "mono", text: "frames " + c.stats.FramesServed + " · loops " + c.stats.LoopsCompleted }),
+        el("div", { class: "mono", text: "faults fired " + c.stats.FaultsFired + " · readers " + c.readers })
+      ]),
+      el("td", {}, [
+        el("div", { class: "fault-active", text: faultText(c) }),
+        el("div", { class: "fault-controls row" }, [kind, el("label", {}, ["Rate", rate]), el("label", {}, ["Keep keyframes", protect])])
+      ]),
+      el("td", {}, [
+        el("div", { class: "row" }, [snapBtn, applyBtn, clearBtn, removeBtn]),
+        img
+      ])
+    ]);
+    return tr;
+  }
+
+  function render() {
+    // Re-rendering replaces rows, so keep any input the user is editing.
+    var focused = document.activeElement;
+    var keep = focused && tbody.contains(focused) && focused.closest("tr") ? { id: focused.closest("tr").dataset.id, cls: focused.className } : null;
+    tbody.textContent = "";
+    cameras.forEach(function (c) { tbody.appendChild(renderRow(c)); });
+    document.getElementById("empty").hidden = cameras.length > 0;
+    if (keep && keep.cls) {
+      var row = tbody.querySelector('tr[data-id="' + CSS.escape(keep.id) + '"]');
+      var again = row && row.querySelector("." + keep.cls.split(" ")[0]);
+      if (again) { again.focus(); }
+    }
+  }
+
+  function refresh() {
+    return Promise.all([
+      // Seeds are uint64 and exceed 2^53, so JSON.parse would silently round
+      // them. Quote them in the text first so the replay seed shown is exact.
+      request("GET", "/cameras").then(function (r) { return r.text(); }).then(function (t) {
+        return JSON.parse(t.replace(/"([sS]eed)":\s*(\d+)/g, '"$1":"$2"'));
+      }),
+      request("GET", "/fleet").then(function (r) { return r.json(); })
+    ]).then(function (res) {
+      cameras = res[0];
+      document.getElementById("replay").textContent = res[1].replayLine;
+      render();
+    }).catch(function (e) { showError("Could not load the fleet: " + e.message); });
+  }
+
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest && ev.target.closest("button.copy");
+    if (!b) { return; }
+    var text = b.getAttribute("data-copy");
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        var old = b.textContent; b.textContent = "Copied";
+        setTimeout(function () { b.textContent = old; }, 1200);
+      }).catch(function () { showError("Copy failed; select the text manually."); });
+    }
+  });
+
+  var source = document.getElementById("add-source");
+  source.addEventListener("change", function () {
+    document.getElementById("add-path-label").hidden = source.value !== "file";
+  });
+
+  document.getElementById("add-form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    showError("");
+    var spec = { id: document.getElementById("add-id").value.trim() };
+    var u = document.getElementById("add-user").value, p = document.getElementById("add-pass").value;
+    if (u || p) { spec.auth = { username: u, password: p }; }
+    if (source.value === "file") { spec.source = { kind: "file", path: document.getElementById("add-path").value }; }
+    request("POST", "/cameras", spec).then(function () {
+      document.getElementById("add-form").reset();
+      document.getElementById("add-path-label").hidden = true;
+      return refresh();
+    }).catch(function (e) { showError(e.message); });
+  });
+
+  // SSE gives immediate updates on change; the interval keeps counters fresh.
+  if (window.EventSource) {
+    var es = new EventSource(api + "/events");
+    ["camera_added", "camera_removed", "fault_injected", "fault_cleared"].forEach(function (t) {
+      es.addEventListener(t, refresh);
+    });
+    es.onerror = function () { /* the browser reconnects; refresh covers missed events */ };
+    es.onopen = refresh;
+  }
+  setInterval(refresh, 2000);
+  refresh();
+})();
+</script>
+</body>
+</html>

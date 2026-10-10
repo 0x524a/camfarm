@@ -281,6 +281,25 @@ func TestRootServesTheEmbeddedPage(t *testing.T) {
 	}
 }
 
+func TestEmbeddedPageCarriesTheTestHooks(t *testing.T) {
+	ts, _ := newServer(t, Options{})
+	resp := do(t, "GET", ts.URL+"/", "")
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(resp.Body)
+	page := buf.String()
+	for _, hook := range []string{
+		`id="replay"`, `id="error"`, `role="alert"`, `id="add-form"`, `id="add-id"`,
+		`id="add-user"`, `id="add-pass"`, `id="add-source"`, `id="add-path"`, `id="add-submit"`,
+		`id="cameras"`, "btn-snapshot", "btn-remove", "img.snapshot", "fault-rate",
+		"fault-protect", "btn-fault", "btn-clear-fault", "fault-active", "button.copy",
+		"data-copy", "cell-rtsp", "cell-onvif",
+	} {
+		if !strings.Contains(page, hook) {
+			t.Errorf("page is missing hook %q", hook)
+		}
+	}
+}
+
 func TestCancelledWaiterDoesNotCancelSharedCapture(t *testing.T) {
 	release := make(chan struct{})
 	capture, calls := capturing(release)
