@@ -596,10 +596,14 @@ func (c *Camera) Faults() []FaultSpec {
 // same kind. The change takes effect at the camera's next frame boundary.
 // Only implemented kinds are accepted; the rest return ErrUnsupported.
 //
-// Any inject or clear rebuilds all of the camera's fault engines from the
-// camera seed, so every fault's random stream restarts at its first draw and
-// keyframe_starvation's keyframe counter restarts too (the next keyframe counts
-// as the first and is delivered), including faults the call did not touch. A replay must restart streams at each journaled inject or clear.
+// Faults come in two classes, per-frame (the pump) and per-request (the control
+// engine). An inject or clear rebuilds the engine of every class whose fault
+// list changed, from the camera seed, so that class's random streams restart at
+// their first draw and keyframe_starvation's keyframe counter restarts too (the
+// next keyframe counts as the first and is delivered). A class whose list did
+// not change is left alone, and injecting a fault identical to the active one
+// is a no-op that journals nothing. A replay must restart a class's streams at
+// each journaled inject or clear of that class (see JournalEntry.Clock).
 func (c *Camera) Inject(f FaultSpec) error {
 	if err := validateFault(f); err != nil {
 		return err

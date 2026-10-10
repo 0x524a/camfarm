@@ -2,7 +2,10 @@ package rtsp
 
 import (
 	"errors"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
@@ -70,11 +73,13 @@ func TestSetFaultsRoutesEachKindAndClearClearsBoth(t *testing.T) {
 	if err := s.SetFaults("cam-00", specs, applied); err != nil {
 		t.Fatal(err)
 	}
-	if n := <-notes; n.clock != "frame" {
-		t.Fatalf("first applied clock = %q, want frame", n.clock)
-	}
+	// Effect order: the control class is live at once, the frame class at the
+	// next frame boundary.
 	if n := <-notes; n.clock != "request" {
-		t.Fatalf("second applied clock = %q, want request", n.clock)
+		t.Fatalf("first applied clock = %q, want request", n.clock)
+	}
+	if n := <-notes; n.clock != "frame" {
+		t.Fatalf("second applied clock = %q, want frame", n.clock)
 	}
 	if got := describeStatus(t, s); got != 503 {
 		t.Fatalf("DESCRIBE = %v, want 503", got)
@@ -84,8 +89,13 @@ func TestSetFaultsRoutesEachKindAndClearClearsBoth(t *testing.T) {
 	if err := s.SetFaults("cam-00", nil, applied); err != nil {
 		t.Fatal(err)
 	}
-	<-notes
-	<-notes
+	// A mixed clear on a camera with no readers reports both classes it removed.
+	if n := <-notes; n.clock != "request" {
+		t.Fatalf("first clear clock = %q, want request", n.clock)
+	}
+	if n := <-notes; n.clock != "frame" {
+		t.Fatalf("second clear clock = %q, want frame", n.clock)
+	}
 	if got := describeStatus(t, s); got != base.StatusOK {
 		t.Fatalf("DESCRIBE after clear = %v, want 200", got)
 	}
@@ -104,5 +114,65 @@ func TestSetFaultsControlOnlyAppliesImmediatelyWithTheRequestClock(t *testing.T)
 	}
 	if clock != "request" || index != 1 {
 		t.Fatalf("applied (%d, %q), want (1, request) synchronously", index, clock)
+	}
+}
+
+func TestSetFaultsLeavesAnUnchangedClassAloneWhenTheOtherChanges(t *testing.T) {
+	s, _ := startFaultServer(t, nil)
+	var mu sync.Mutex
+	var clocks []string
+	applied := func(_ int, clock string) { mu.Lock(); clocks = append(clocks, clock); mu.Unlock() }
+	got := func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), clocks...) }
+	rtspErr := fault.Spec{Kind: fault.KindRTSPError, On: "describe", Status: 454, OnlyRequest: 2}
+	if err := s.SetFaults("cam-00", []fault.Spec{rtspErr}, applied); err != nil {
+		t.Fatal(err)
+	}
+	if got := describeStatus(t, s); got != base.StatusOK {
+		t.Fatalf("request 1 = %v, want 200", got)
+	}
+	// Control-only -> mixed: only the frame class changes. If the control
+	// engine were rebuilt, its OnlyRequest count would restart and request 2
+	// below would not be the 454.
+	both := []fault.Spec{rtspErr, {Kind: fault.KindFrameDrop, Rate: 0.5}}
+	if err := s.SetFaults("cam-00", both, applied); err != nil {
+		t.Fatal(err)
+	}
+	awaitCond(t, "the frame notification", func() bool { return len(got()) >= 2 })
+	// The first set was control-only (request); the second changed only frame.
+	if c := got(); len(c) != 2 || c[0] != "request" || c[1] != "frame" {
+		t.Fatalf("clocks = %v, want [request frame]", c)
+	}
+	if got := describeStatus(t, s); got != 454 {
+		t.Fatalf("request 2 = %v, want 454 (control engine must not restart)", got)
+	}
+	// Resubmitting the same set changes nothing and notifies nothing.
+	if err := s.SetFaults("cam-00", both, applied); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond) // a wrongly queued pump swap would report by now
+	if c := got(); len(c) != 2 {
+		t.Fatalf("an unchanged set was notified: %v", c)
+	}
+}
+
+func TestAnswerErrorAlwaysCarriesAReasonPhrase(t *testing.T) {
+	s, _ := startFaultServer(t, nil)
+	for _, c := range []struct {
+		status int
+		want   string
+	}{{454, ""}, {418, "Client Error"}, {599, "Server Error"}} {
+		res := s.answerError(fault.MethodDescribe, "cam-00", fault.ControlDecision{Request: 1, Error: &fault.ErrorDecision{Status: c.status}})
+		if int(res.StatusCode) != c.status {
+			t.Fatalf("status = %v, want %d", res.StatusCode, c.status)
+		}
+		if c.want == "" {
+			if _, known := base.StatusMessages[res.StatusCode]; !known {
+				t.Fatalf("%d is expected to be in gortsplib's table", c.status)
+			}
+			continue
+		}
+		if !strings.Contains(res.StatusMessage, c.want) {
+			t.Fatalf("%d message = %q, want %q", c.status, res.StatusMessage, c.want)
+		}
 	}
 }

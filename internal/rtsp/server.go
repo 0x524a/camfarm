@@ -76,11 +76,12 @@ type camera struct {
 	// ctl decides the camera's control-plane faults. Set under s.mu before the
 	// camera is visible to a handler; internally synchronised thereafter.
 	ctl *fault.ControlEngine
-	// setMu guards hadMedia and hadControl, which record which fault classes
-	// the last SetFaults installed so a clear can report the classes it removed.
-	setMu      sync.Mutex
-	hadMedia   bool
-	hadControl bool
+	// setMu guards media and control, the spec lists currently installed in
+	// the pump and the control engine, so SetFaults can skip a class that did
+	// not change.
+	setMu   sync.Mutex
+	media   []fault.Spec
+	control []fault.Spec
 }
 
 // Server serves a fleet of synthetic RTSP cameras.
@@ -221,6 +222,7 @@ func (s *Server) buildPumps() (pumps map[string]*Pump, failedID string, err erro
 			return nil, id, err
 		}
 		cam.ctl = ctl
+		cam.media, cam.control = splitFaults(cam.cfg.Faults)
 		pumps[id] = pump
 	}
 	return pumps, "", nil
@@ -448,6 +450,7 @@ func (s *Server) AddCamera(cc CameraConfig) error {
 	camCtx, camCancel := context.WithCancel(s.rootCtx)
 	done := make(chan struct{})
 	cam := &camera{id: cc.ID, cfg: cc, stream: stream, medi: medi, forma: forma, cancel: camCancel, done: done, pump: pump, ctl: ctl}
+	cam.media, cam.control = splitFaults(cc.Faults)
 	s.cams[cc.ID] = cam
 	s.order = append(s.order, cc.ID)
 

@@ -147,14 +147,67 @@ func TestJournalClocksFaultChangesByClass(t *testing.T) {
 	if err := cam.Inject(FaultSpec{Kind: "frame_drop", Rate: 0.5}); err != nil {
 		t.Fatalf("Inject frame_drop: %v", err)
 	}
-	waitUntil(t, "journal", func() bool { return len(f.Journal()) >= 3 })
+	waitUntil(t, "journal", func() bool { return len(f.Journal()) >= 2 })
 
 	j := f.Journal()
 	if j[0].Clock != "request" || j[0].Fault.Kind != "rtsp_error" {
 		t.Errorf("first entry = %+v, want a request-clocked rtsp_error", j[0])
 	}
-	// The second inject installs both classes: one entry per class, frame first.
-	if j[1].Clock != "frame" || j[2].Clock != "request" {
-		t.Errorf("clocks = %q, %q; want frame, request", j[1].Clock, j[2].Clock)
+	// The second inject changes only the frame class, so it adds exactly one
+	// entry: the active rtsp_error is not re-announced.
+	if len(j) != 2 || j[1].Clock != "frame" || j[1].Fault.Kind != "frame_drop" {
+		t.Errorf("journal = %+v, want a frame-clocked frame_drop second", j)
+	}
+}
+
+// Journal order must equal effect order: a mixed clear reports request then
+// frame, and a control change issued right after lands after the request
+// entry. The deferred frame entry may fall anywhere after the clear's request.
+func TestJournalOrderFollowsEffectOrderAcrossBackToBackSets(t *testing.T) {
+	spec := minimalSpec()
+	spec.Cameras[0].Faults = []FaultSpec{
+		{Kind: "frame_drop", Rate: 0.5},
+		{Kind: "rtsp_error", On: "describe", Status: 503, Rate: 1},
+	}
+	f := StartT(t, spec)
+	cam, _ := f.Camera("front-door")
+	if err := cam.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if err := cam.Inject(FaultSpec{Kind: "rtsp_error", On: "play", Status: 454, Rate: 1}); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	waitUntil(t, "journal", func() bool { return len(f.Journal()) >= 3 })
+
+	j := f.Journal()
+	if len(j) != 3 {
+		t.Fatalf("journal has %d entries, want 3: %+v", len(j), j)
+	}
+	for i := 1; i < len(j); i++ {
+		if j[i].Seq <= j[i-1].Seq {
+			t.Fatalf("journal seq not increasing: %+v", j)
+		}
+	}
+	if j[0].Action != "clear" || j[0].Clock != "request" {
+		t.Errorf("entry 0 = %+v, want clear/request first", j[0])
+	}
+	var sawFrameClear, sawInject bool
+	for _, e := range j[1:] {
+		switch {
+		case e.Action == "clear" && e.Clock == "frame":
+			sawFrameClear = true
+		case e.Action == "inject" && e.Clock == "request" && e.Fault.Kind == "rtsp_error":
+			sawInject = true
+		}
+	}
+	if !sawFrameClear || !sawInject {
+		t.Errorf("journal = %+v, want a frame clear and a request inject", j)
+	}
+	// The request-class inject is effective immediately, so it precedes nothing
+	// before the clear's own request entry and must not precede it.
+	for i, e := range j {
+		if e.Action == "inject" && i == 0 {
+			t.Errorf("inject journaled before the clear it followed: %+v", j)
+		}
 	}
 }
