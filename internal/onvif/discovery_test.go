@@ -214,29 +214,159 @@ func TestDiscoveryCloseStopsResponderAndLeaksNothing(t *testing.T) {
 	}
 }
 
-func TestDiscoveryNonMatchingProbeFindsNothing(t *testing.T) {
-	srv := newDiscoServer(t, discoCam("a", 1))
+const (
+	actionHelloURI = "http://schemas.xmlsoap.org/ws/2005/04/discovery/Hello"
+	actionByeURI   = "http://schemas.xmlsoap.org/ws/2005/04/discovery/Bye"
+	readWindow     = 3 * time.Second
+)
 
-	const body = `<?xml version="1.0"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" ` +
+func rawProbe(types string) string {
+	typesEl := ""
+	if types != "" {
+		typesEl = `<d:Types>` + types + `</d:Types>`
+	}
+	return `<?xml version="1.0"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" ` +
 		`xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery" ` +
-		`xmlns:x="urn:example:other"><s:Header><a:MessageID>urn:uuid:11111111-1111-1111-1111-111111111111</a:MessageID>` +
+		`xmlns:dn="http://www.onvif.org/ver10/network/wsdl" xmlns:x="urn:example:other">` +
+		`<s:Header><a:MessageID>urn:uuid:11111111-1111-1111-1111-111111111111</a:MessageID>` +
 		`<a:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</a:To>` +
 		`<a:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</a:Action></s:Header>` +
-		`<s:Body><d:Probe><d:Types>x:Thermostat</d:Types></d:Probe></s:Body></s:Envelope>`
+		`<s:Body><d:Probe>` + typesEl + `</d:Probe></s:Body></s:Envelope>`
+}
 
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+func localUDP(t *testing.T) *net.UDPConn {
+	t.Helper()
+	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+func TestDiscoveryProbeTypeFiltering(t *testing.T) {
+	srv := newDiscoServer(t, discoCam("a", 1))
+	ref := "urn:uuid:" + EndpointUUID(seed.Seed(1))
+	conn := localUDP(t)
 	dst := srv.DiscoveryAddr().(*net.UDPAddr)
-	if _, err := conn.WriteToUDP([]byte(body), dst); err != nil {
+	buf := make([]byte, 65535)
+
+	// Positive controls: the same envelope and socket, matching types and none.
+	for _, types := range []string{"dn:NetworkVideoTransmitter", ""} {
+		if _, err := conn.WriteToUDP([]byte(rawProbe(types)), dst); err != nil {
+			t.Fatal(err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(readWindow))
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			t.Fatalf("probe with Types %q got no reply: %v", types, err)
+		}
+		if !strings.Contains(string(buf[:n]), ref) {
+			t.Errorf("reply to Types %q lacks endpoint ref %s: %s", types, ref, buf[:n])
+		}
+	}
+
+	// Negative: only the type differs, and now nothing answers.
+	if _, err := conn.WriteToUDP([]byte(rawProbe("x:Thermostat")), dst); err != nil {
 		t.Fatal(err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(probeTimeout))
-	buf := make([]byte, 65535)
 	if n, _, err := conn.ReadFromUDP(buf); err == nil {
 		t.Fatalf("non-matching probe was answered: %s", buf[:n])
+	}
+}
+
+// expectAnnounce reads datagrams from conn until every ref has been seen with
+// the given action URI, failing on timeout.
+func expectAnnounce(t *testing.T, conn *net.UDPConn, action string, refs ...string) {
+	t.Helper()
+	want := make(map[string]bool, len(refs))
+	for _, r := range refs {
+		want[r] = true
+	}
+	buf := make([]byte, 65535)
+	_ = conn.SetReadDeadline(time.Now().Add(readWindow))
+	for len(want) > 0 {
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			t.Fatalf("waiting for %s of %v: %v", action, want, err)
+		}
+		msg := string(buf[:n])
+		if !strings.Contains(msg, "<a:Action>"+action+"</a:Action>") {
+			t.Fatalf("expected %s, got: %s", action, msg)
+		}
+		for r := range want {
+			if strings.Contains(msg, "<a:Address>"+r+"</a:Address>") {
+				delete(want, r)
+			}
+		}
+	}
+}
+
+func TestDiscoveryAnnouncesHelloAndBye(t *testing.T) {
+	// onvif-go's responder sends Hello at Start and on Register while running,
+	// and Bye on Unregister and when stopped, to AnnounceAddr (unicast mode
+	// included), so a test-owned socket sees all of them.
+	sink := localUDP(t)
+	refOf := func(n int64) string { return "urn:uuid:" + EndpointUUID(seed.Seed(n)) }
+
+	srv, err := New(Config{Host: "127.0.0.1", Cameras: []CameraConfig{discoCam("a", 1), discoCam("b", 2)},
+		Discovery: &DiscoveryConfig{ListenAddr: "127.0.0.1:0", AnnounceAddr: sink.LocalAddr().String()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	expectAnnounce(t, sink, actionHelloURI, refOf(1), refOf(2))
+
+	if err := srv.AddCamera(discoCam("c", 3)); err != nil {
+		t.Fatal(err)
+	}
+	expectAnnounce(t, sink, actionHelloURI, refOf(3))
+
+	if err := srv.RemoveCamera("b"); err != nil {
+		t.Fatal(err)
+	}
+	expectAnnounce(t, sink, actionByeURI, refOf(2))
+
+	srv.Close()
+	expectAnnounce(t, sink, actionByeURI, refOf(1), refOf(3))
+}
+
+func TestDiscoveryRestartGetsFreshResponder(t *testing.T) {
+	srv, err := New(Config{Host: "127.0.0.1", Cameras: []CameraConfig{discoCam("a", 1), discoCam("b", 2)},
+		Discovery: &DiscoveryConfig{ListenAddr: "127.0.0.1:0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	first := srv.DiscoveryAddr().String()
+	srv.Close()
+
+	if err := srv.Start(); err != nil {
+		t.Fatalf("second Start: %v", err)
+	}
+	defer srv.Close()
+	addr := srv.DiscoveryAddr()
+	if addr == nil {
+		t.Fatal("DiscoveryAddr nil after restart")
+	}
+	if addr.String() == first {
+		t.Errorf("restart reused discovery address %s; want a fresh socket", first)
+	}
+	found := probe(t, addr)
+	if len(found) != 2 {
+		t.Fatalf("after restart found %d, want 2", len(found))
+	}
+	for id, d := range found {
+		if !strings.HasPrefix(d.XAddrs[0], "http://"+srv.Addr().String()+"/onvif/") {
+			t.Errorf("%s XAddr %s does not use the restarted ONVIF listener %s", id, d.XAddrs[0], srv.Addr())
+		}
 	}
 }
 
