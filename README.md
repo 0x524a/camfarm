@@ -1,10 +1,12 @@
-# camfarm
+<p align="center"><img src="docs/assets/camfarm-icon.svg" alt="CamFarm icon" width="96" height="96"></p>
+
+# CamFarm
 
 [![ci](https://github.com/0x524a/camfarm/actions/workflows/ci.yml/badge.svg)](https://github.com/0x524a/camfarm/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/0x524a/camfarm/graph/badge.svg)](https://codecov.io/gh/0x524a/camfarm)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=0x524a_camfarm&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=0x524a_camfarm)
 
-A synthetic RTSP camera farm for testing video-analytics pipelines without
+CamFarm is a synthetic RTSP camera farm for testing video-analytics pipelines without
 physical hardware. It serves N fake cameras from one process, and it is built so
 that misbehaviour can be injected deterministically: a fault fires because a
 seed said it would, and the same seed and fleet spec reproduce it.
@@ -40,10 +42,32 @@ Early:
   and H.265 is not yet. Sources outside that subset may fail with an error or
   decode incorrectly. Only the bundled fixture and similarly encoded files are
   tested.
-- **Not built yet:** device discovery (WS-Discovery), PTZ, Imaging, and every
-  fault's *effect*. The fault catalogue is defined and validated, and the seams
-  it will act through are in place, but no fault changes a byte on the wire. A
-  spec that names a fault is **refused**, not silently ignored.
+- **Works:** a web dashboard and `cmd/camfarm` binary. `go run ./cmd/camfarm --cameras 3` (or the
+  built `camfarm` binary) serves a fleet and a page at `http://127.0.0.1:8080/` that lists cameras
+  with copyable RTSP and ONVIF URLs, adds and removes cameras, takes on-demand snapshots, and
+  injects and clears faults. Changes appear live over Server-Sent Events. The JSON API is under
+  `/api/v1/` (`fleet`, `cameras`, `cameras/{id}`, `cameras/{id}/snapshot.jpg`,
+  `cameras/{id}/faults`, and the `events` stream). Seeds are decimal strings in the API. Flags:
+  `--spec`, `--seed`, `--cameras` (mutually exclusive with `--spec`), `--http-addr`,
+  `--listen-host`, `--rtsp-port`, `--onvif-port`; run with `-h` for details. **Security:** the
+  dashboard can start servers and, with file sources, make the process read local paths, and the
+  page shows cameras' Digest credentials. It listens on loopback by default and has *no*
+  authentication, token, Host-header check or CSRF protection, so a malicious web page can reach a
+  loopback API through DNS rebinding or CSRF. Do not expose it.
+- **Works:** one fault, `frame_drop`: a seeded fraction of access units is never encoded or sent,
+  so RTP sequence numbers stay contiguous and the missing frame appears only as a timestamp jump
+  (an encoder skipping frames, not network loss). It can be set in a spec, or injected into and
+  cleared from a running camera; `protectKeyframes` keeps random-access frames. Runtime injections
+  and clears are journaled, and the fleet replay line gets a ` journal=<n>:<12hex>` suffix hashing
+  that journal. Honest limit: which frame an interactive click lands on is recorded but cannot be
+  derived from the seed, because it depends on when the click arrived.
+- **Works:** Playwright end-to-end tests of the dashboard, behind the `e2e` build tag and run in
+  the `e2e` CI job. Locally, `go test -tags e2e ./internal/dashboard/` needs Chromium installed
+  for Playwright.
+- **Not built yet:** device discovery (WS-Discovery), PTZ, Imaging, and the *effect* of every fault
+  other than `frame_drop`. The rest of the fault catalogue is defined and validated, and the seams
+  it acts through are in place, but those faults change nothing on the wire. A spec that names an
+  unimplemented fault is **refused** (`ErrUnsupported`), not silently ignored.
 
 ## Use as a library
 
@@ -106,7 +130,7 @@ closes itself when the test ends.
     *decisions* over it will be reproducible, not the media.
 - **No network-path impairment.** Packet loss, bandwidth ceilings, and reordering
   are properties of the path, not of the sender; they need `tc`/`netem` and
-  elevated privileges, and they are not reproducible from a seed. `camfarm` owns
+  elevated privileges, and they are not reproducible from a seed. CamFarm owns
   only what a camera itself chooses not to send, or sends late.
 - **Not a benchmark result.** No cameras-per-core or memory-per-camera figure is
   published, because none has been measured yet. When one is, it will come from a

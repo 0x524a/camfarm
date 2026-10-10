@@ -23,4 +23,11 @@ var (
 	// and "this camera is broken" being indistinguishable would make the whole
 	// tool useless.
 	ErrFaultActive = errors.New("camfarm: refused by an active fault")
+
+	// ErrDuplicateCamera means a camera with that ID already exists.
+	ErrDuplicateCamera = errors.New("camfarm: duplicate camera")
+
+	// ErrInvalidSpec means a spec was malformed or out of range, as opposed to
+	// merely unsupported by this build.
+	ErrInvalidSpec = errors.New("camfarm: invalid spec")
 )

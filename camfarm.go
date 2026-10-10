@@ -10,6 +10,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/0x524a/camfarm/internal/fault"
 	"github.com/0x524a/camfarm/internal/media"
 	"github.com/0x524a/camfarm/internal/obs"
 	"github.com/0x524a/camfarm/internal/onvif"
@@ -97,6 +98,10 @@ type Fleet struct {
 	// dynamically added camera's seed is a pure function of call order.
 	nextIndex int
 	stopWatch func()
+
+	// ev is the change feed and runtime journal. Its own lock; the only lock
+	// order is mu then ev.mu.
+	ev events
 }
 
 // Camera is one camera in a running fleet.
@@ -106,6 +111,10 @@ type Camera struct {
 	seed   seed.Seed
 	source string
 	media  *media.Media
+	spec   CameraSpec
+
+	mu     sync.Mutex
+	faults []FaultSpec
 }
 
 // Start brings up a fleet.
@@ -130,6 +139,7 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 		cameras:  make(map[string]*Camera, len(valid.Cameras)),
 		sources:  make(map[SourceSpec]*media.Media),
 	}
+	f.ev.init()
 
 	// Parse each distinct source once and share it. This is the scale lever:
 	// M cameras on one source cost one copy of the media plus M encoder states.
@@ -169,16 +179,16 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 			seed:   camSeed,
 			source: sourceDescription(cs.Source),
 			media:  m,
+			spec:   cs,
+			faults: append([]FaultSpec(nil), cs.Faults...),
 		}
 		f.order = append(f.order, cs.ID)
 
-		// Faults is deliberately left unset: spec.validate() above rejects any
-		// camera with a non-empty Faults before this loop runs, so no camera
-		// reaching here has any.
 		cfg.Cameras = append(cfg.Cameras, rtsp.CameraConfig{
-			ID:    cs.ID,
-			Media: m,
-			Seed:  camSeed,
+			ID:     cs.ID,
+			Media:  m,
+			Seed:   camSeed,
+			Faults: toFaultSpecs(cs.Faults),
 		})
 	}
 
@@ -309,7 +319,7 @@ func (f *Fleet) SpecHash() string { return f.specHash }
 // ReplayLine returns the one line a failing test should print to make its
 // failure reproducible.
 func (f *Fleet) ReplayLine() string {
-	return fmt.Sprintf("camfarm: seed=%#x spec=sha256:%s", f.spec.Seed, f.specHash[:12])
+	return fmt.Sprintf("camfarm: seed=%#x spec=sha256:%s", f.spec.Seed, f.specHash[:12]) + f.journalSuffix()
 }
 
 // Addr returns the fleet's bound addresses.
@@ -358,7 +368,7 @@ func (f *Fleet) AddCamera(spec CameraSpec) (*Camera, error) {
 	camSeed := root.Camera(f.nextIndex)
 	f.nextIndex++
 
-	if err := f.srv.AddCamera(rtsp.CameraConfig{ID: cs.ID, Media: m, Seed: camSeed}); err != nil {
+	if err := f.srv.AddCamera(rtsp.CameraConfig{ID: cs.ID, Media: m, Seed: camSeed, Faults: toFaultSpecs(cs.Faults)}); err != nil {
 		return nil, err
 	}
 
@@ -385,10 +395,13 @@ func (f *Fleet) AddCamera(spec CameraSpec) (*Camera, error) {
 		seed:   camSeed,
 		source: sourceDescription(cs.Source),
 		media:  m,
+		spec:   cs,
+		faults: append([]FaultSpec(nil), cs.Faults...),
 	}
 	f.cameras[cs.ID] = cam
 	f.order = append(f.order, cs.ID)
 
+	f.publish(Event{Type: EventCameraAdded, Camera: cs.ID, FrameIndex: -1})
 	f.log.Info("camera added", "camera", cs.ID, "seed", fmt.Sprintf("%#x", camSeed))
 	return cam, nil
 }
@@ -412,6 +425,7 @@ func (f *Fleet) RemoveCamera(id string) error {
 		}
 	}
 	f.mu.Unlock()
+	f.publish(Event{Type: EventCameraRemoved, Camera: id, FrameIndex: -1})
 
 	var errs []error
 	if err := f.srv.RemoveCamera(id); err != nil {
@@ -482,6 +496,7 @@ func (f *Fleet) Close() error {
 	if stop != nil {
 		stop()
 	}
+	f.closeSubscribers()
 	f.srv.Close()
 	if f.onvifSrv != nil {
 		f.onvifSrv.Close()
@@ -517,16 +532,6 @@ func (c *Camera) Stats() Stats {
 	}
 }
 
-// Inject adds a fault to a running camera.
-//
-// Not implemented in this version: the fault catalogue's effects land in the
-// next slice. The refusal names the kind so a caller learns what was asked for
-// rather than seeing a silent no-op.
-func (c *Camera) Inject(f FaultSpec) error {
-	return fmt.Errorf("%w: injecting fault %q into a running camera is not implemented in this version",
-		ErrUnsupported, f.Kind)
-}
-
 // Screenshot returns one decoded frame from this camera's live RTSP stream.
 //
 // It dials the camera's own RTSP URL, so it exercises the real wire path, and
@@ -541,7 +546,89 @@ func (c *Camera) Screenshot(ctx context.Context) (image.Image, error) {
 	return screenshot.Capture(ctx, url)
 }
 
-// Clear removes every fault from a camera. With no faults configured this
-// succeeds and does nothing: asking for the state that already holds is not an
-// error.
-func (c *Camera) Clear() error { return nil }
+// Spec returns the camera's spec as it was added, with its currently active
+// faults.
+func (c *Camera) Spec() CameraSpec {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.spec
+	s.Faults = append([]FaultSpec(nil), c.faults...)
+	return s
+}
+
+// Auth returns the camera's ONVIF Digest credentials, and false if it is open.
+func (c *Camera) Auth() (user, pass string, ok bool) {
+	a := c.spec.Auth
+	return a.Username, a.Password, a.Username != "" && a.Password != ""
+}
+
+// Faults returns the camera's currently active faults.
+func (c *Camera) Faults() []FaultSpec {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]FaultSpec(nil), c.faults...)
+}
+
+// Inject adds a fault to a running camera, replacing any active fault of the
+// same kind. The change takes effect at the camera's next frame boundary.
+// Only implemented kinds are accepted; the rest return ErrUnsupported.
+func (c *Camera) Inject(f FaultSpec) error {
+	if !fault.Known(fault.Kind(f.Kind)) {
+		return fmt.Errorf("%w: unknown fault kind %q", ErrInvalidSpec, f.Kind)
+	}
+	if f.Rate < 0 || f.Rate > 1 {
+		return fmt.Errorf("%w: fault %q has rate %v outside [0,1]", ErrInvalidSpec, f.Kind, f.Rate)
+	}
+	if !fault.Implemented(fault.Kind(f.Kind)) {
+		return fmt.Errorf("%w: injecting fault %q is not implemented in this version", ErrUnsupported, f.Kind)
+	}
+
+	c.mu.Lock()
+	next := make([]FaultSpec, 0, len(c.faults)+1)
+	for _, ex := range c.faults {
+		if ex.Kind != f.Kind {
+			next = append(next, ex)
+		}
+	}
+	next = append(next, f)
+	err := c.swapFaults(next, func(frame int) { c.noteFaultsApplied("inject", f, frame) })
+	if err == nil {
+		c.faults = next
+	}
+	c.mu.Unlock()
+	return err
+}
+
+// Clear removes every fault from a camera. With no faults active this succeeds
+// and does nothing: asking for the state that already holds is not an error.
+func (c *Camera) Clear() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.faults) == 0 {
+		return nil
+	}
+	err := c.swapFaults(nil, func(frame int) { c.noteFaultsApplied("clear", FaultSpec{}, frame) })
+	if err == nil {
+		c.faults = nil
+	}
+	return err
+}
+
+// swapFaults hands a new fault set to the camera's pump. Caller holds c.mu.
+func (c *Camera) swapFaults(next []FaultSpec, applied func(int)) error {
+	if err := c.fleet.srv.SetFaults(c.id, toFaultSpecs(next), applied); err != nil {
+		if !c.fleet.srv.Has(c.id) {
+			return fmt.Errorf("%w: %q", ErrUnknownCamera, c.id)
+		}
+		return err
+	}
+	return nil
+}
+
+// noteFaultsApplied is called when a fault change takes effect at a frame
+// boundary. It runs on the pump goroutine and publishes to the fleet's change
+// feed and journal; it takes neither c.mu nor Fleet.mu, and Inject never waits
+// on it.
+func (c *Camera) noteFaultsApplied(action string, f FaultSpec, frameIndex int) {
+	c.fleet.noteFault(action, c.id, f, frameIndex)
+}

@@ -16,7 +16,7 @@ func TestNoSpecsDecidesNothing(t *testing.T) {
 		t.Error("Enabled() true with no specs")
 	}
 	for i := 0; i < 1000; i++ {
-		if d := e.DecideFrame(i); len(d) != 0 {
+		if d := e.DecideFrame(i, false); len(d) != 0 {
 			t.Fatalf("frame %d decided %v with no specs configured", i, d)
 		}
 	}
@@ -33,7 +33,7 @@ func TestSameSeedSameDecisionSequence(t *testing.T) {
 		}
 		var out []Decision
 		for i := 0; i < 500; i++ {
-			out = append(out, e.DecideFrame(i)...)
+			out = append(out, e.DecideFrame(i, false)...)
 		}
 		return out
 	}
@@ -63,7 +63,7 @@ func TestDifferentCamerasDecideDifferently(t *testing.T) {
 		}
 		var out []Decision
 		for i := 0; i < 200; i++ {
-			out = append(out, e.DecideFrame(i)...)
+			out = append(out, e.DecideFrame(i, false)...)
 		}
 		return out
 	}
@@ -99,7 +99,7 @@ func TestAddingAKindDoesNotShiftAnother(t *testing.T) {
 		}
 		var frames []int
 		for i := 0; i < 300; i++ {
-			for _, d := range e.DecideFrame(i) {
+			for _, d := range e.DecideFrame(i, false) {
 				if d.Kind == KindFrameDrop {
 					frames = append(frames, d.FrameIndex)
 				}
@@ -125,7 +125,7 @@ func TestRateBoundaries(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	for i := 0; i < 50; i++ {
-		if len(e.DecideFrame(i)) != 1 {
+		if len(e.DecideFrame(i, false)) != 1 {
 			t.Fatalf("rate 1 did not fire at frame %d", i)
 		}
 	}
@@ -135,7 +135,7 @@ func TestRateBoundaries(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	for i := 0; i < 50; i++ {
-		if len(e0.DecideFrame(i)) != 0 {
+		if len(e0.DecideFrame(i, false)) != 0 {
 			t.Fatalf("rate 0 fired at frame %d", i)
 		}
 	}
@@ -146,7 +146,7 @@ func TestDecisionCarriesFrameIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	d := e.DecideFrame(123)
+	d := e.DecideFrame(123, false)
 	if len(d) != 1 {
 		t.Fatalf("decisions = %d, want 1", len(d))
 	}
@@ -180,8 +180,60 @@ func TestNonFrameScopedKindNeverDecides(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	for i := 0; i < 1000; i++ {
-		if d := e.DecideFrame(i); len(d) != 0 {
+		if d := e.DecideFrame(i, false); len(d) != 0 {
 			t.Fatalf("frame %d: non-frame-scoped kind decided %v", i, d)
+		}
+	}
+}
+
+func TestProtectKeyframesSuppressesDropOnRandomAccess(t *testing.T) {
+	e, err := New(seed.Seed(9), []Spec{{Kind: KindFrameDrop, Rate: 1, ProtectKeyframes: true}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d := e.DecideFrame(0, true)
+	if len(d) != 1 || !d[0].Suppressed {
+		t.Fatalf("random-access frame: got %+v, want one suppressed decision", d)
+	}
+	d = e.DecideFrame(1, false)
+	if len(d) != 1 || d[0].Suppressed {
+		t.Fatalf("non-random-access frame: got %+v, want one unsuppressed decision", d)
+	}
+}
+
+func TestProtectKeyframesDoesNotChangeTheDrawSequence(t *testing.T) {
+	run := func(protect bool) []int {
+		e, err := New(seed.Seed(42), []Spec{{Kind: KindFrameDrop, Rate: 0.5, ProtectKeyframes: protect}})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		var fired []int
+		for i := 0; i < 200; i++ {
+			// Alternate random-access so protection actually engages.
+			if len(e.DecideFrame(i, i%15 == 0)) > 0 {
+				fired = append(fired, i)
+			}
+		}
+		return fired
+	}
+	a, b := run(false), run(true)
+	if len(a) != len(b) {
+		t.Fatalf("protect changed how many decisions fire: %d vs %d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("protect changed the draw sequence at %d: %d vs %d", i, a[i], b[i])
+		}
+	}
+}
+
+func TestImplemented(t *testing.T) {
+	if !Implemented(KindFrameDrop) {
+		t.Error("frame_drop should be implemented")
+	}
+	for _, k := range []Kind{KindKeyframeStarvation, KindTeardownMidSession, KindAcceptThenSilence, KindSDPCodecLie, KindSPSResolutionLie} {
+		if Implemented(k) {
+			t.Errorf("%s should not be implemented yet", k)
 		}
 	}
 }

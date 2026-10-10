@@ -11,6 +11,8 @@ require (
 	github.com/bluenviron/gortsplib/v5 v5.6.5
 	github.com/bluenviron/mediacommon/v2 v2.9.4
 	github.com/pion/rtp v1.10.5
+	// Used only by the e2e-tagged dashboard tests; not part of the shipped binary.
+	github.com/playwright-community/playwright-go v0.6000.0
 )
 
 require (
@@ -18,6 +20,9 @@ require (
 	github.com/abema/go-mp4 v1.7.1 // indirect
 	github.com/asticode/go-astikit v0.30.0 // indirect
 	github.com/asticode/go-astits v1.16.0 // indirect
+	github.com/deckarep/golang-set/v2 v2.8.0 // indirect
+	github.com/go-jose/go-jose/v3 v3.0.5 // indirect
+	github.com/go-stack/stack v1.8.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/pion/logging v0.2.4 // indirect

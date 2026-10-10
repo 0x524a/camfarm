@@ -10,6 +10,10 @@ checked on 2026-09-06: no module on `pkg.go.dev` matches, and the one exact-name
 is an unrelated project in another field, which cannot conflict in any case because Go module paths
 are namespaced by owner. The name must not embed the ONVIF word mark, and does not.
 
+The display name in prose, the README title and the dashboard is **CamFarm**. The Go module path, repository,
+package and binary names stay lowercase `camfarm`: module paths are case-sensitive, so changing their case
+would break every importer.
+
 ## What this project is
 
 `camfarm` is a synthetic RTSP and ONVIF camera farm, written in Go, for testing video-analytics
@@ -93,8 +97,8 @@ their APIs, since they may still be in flux:
    `Fleet.AddCamera`/`Fleet.RemoveCamera` (`docs/superpowers/specs/2026-09-13-dynamic-camera-lifecycle-design.md`)
    are the runtime half; the declarative `Spec` remains the source of truth for a fleet's initial
    construction, and both paths share the same per-camera validation so they cannot enforce
-   different rules for what a valid camera is. This does not resolve the dashboard or the binary
-   that will drive this API interactively — those are later slices built on top of it.
+   different rules for what a valid camera is. The dashboard and the `cmd/camfarm` binary now
+   drive this API interactively, built on top of it.
 
 ## Open architectural decisions
 

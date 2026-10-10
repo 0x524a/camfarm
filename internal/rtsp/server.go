@@ -71,6 +71,8 @@ type camera struct {
 	// Start() or later by AddCamera, so RemoveCamera works uniformly on either.
 	cancel context.CancelFunc
 	done   chan struct{}
+	// pump is the camera's stepping loop, kept so SetFaults can reach it.
+	pump *Pump
 }
 
 // Server serves a fleet of synthetic RTSP cameras.
@@ -307,6 +309,7 @@ func (s *Server) Start() error {
 		cam := s.cams[camID]
 		cam.cancel = camCancel
 		cam.done = done
+		cam.pump = pump
 
 		s.wg.Add(1)
 		go func() {
@@ -419,7 +422,7 @@ func (s *Server) AddCamera(cc CameraConfig) error {
 
 	camCtx, camCancel := context.WithCancel(s.rootCtx)
 	done := make(chan struct{})
-	cam := &camera{id: cc.ID, cfg: cc, stream: stream, medi: medi, forma: forma, cancel: camCancel, done: done}
+	cam := &camera{id: cc.ID, cfg: cc, stream: stream, medi: medi, forma: forma, cancel: camCancel, done: done, pump: pump}
 	s.cams[cc.ID] = cam
 	s.order = append(s.order, cc.ID)
 
@@ -476,6 +479,23 @@ func (s *Server) RemoveCamera(id string) error {
 
 	s.log.Info("camera removed", "camera", id)
 	return nil
+}
+
+// SetFaults replaces a camera's fault set on a running server. The swap takes
+// effect at the camera's next frame boundary; applied, if non-nil, receives the
+// frame index it took effect on.
+func (s *Server) SetFaults(id string, specs []fault.Spec, applied func(frameIndex int)) error {
+	s.mu.RLock()
+	started := s.srv != nil
+	cam, ok := s.cams[id]
+	s.mu.RUnlock()
+	if !started {
+		return ErrNotStarted
+	}
+	if !ok || cam.pump == nil {
+		return fmt.Errorf("rtsp: unknown camera %q", id)
+	}
+	return cam.pump.SetFaults(specs, applied)
 }
 
 // Addr returns the bound address, or nil before a successful Start.
@@ -561,7 +581,11 @@ func (s *Server) lookup(path string) (id string, stream *gortsplib.ServerStream,
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	cam, ok := s.cams[strings.Trim(path, "/")]
-	if !ok {
+	// Close and Start's rollback clear cam.stream without removing the camera
+	// from s.cams, so a nil stream means the camera is shutting down. Reporting
+	// it as found would make a handler answer StatusOK with a nil stream, which
+	// gortsplib rejects with a panic; treat it as not found instead.
+	if !ok || cam.stream == nil {
 		return "", nil, false
 	}
 	return cam.id, cam.stream, true

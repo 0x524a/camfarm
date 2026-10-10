@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CamFarm</title>
+<link rel="icon" href="data:,">
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1b1f24; --muted: #5b6672;
+  --line: #d9dee4; --accent: #1e5fd6; --accent-text: #ffffff;
+  --danger: #b3261e; --ok: #1a7f37; --field: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #101317; --panel: #181c22; --text: #e8ecf1; --muted: #98a3b0;
+    --line: #2b323b; --accent: #6ea0ff; --accent-text: #0b1220;
+    --danger: #ff8a80; --ok: #5ac17a; --field: #11151a;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #101317; --panel: #181c22; --text: #e8ecf1; --muted: #98a3b0;
+  --line: #2b323b; --accent: #6ea0ff; --accent-text: #0b1220;
+  --danger: #ff8a80; --ok: #5ac17a; --field: #11151a;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding-inline: 16px; padding-block: 16px 32px;
+}
+main { max-width: 1200px; margin-inline: auto; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 15px; margin: 0 0 8px; }
+.sub { color: var(--muted); margin: 0 0 16px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-block: 12px; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
+form.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; align-items: end; }
+label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); }
+input, select, button { font: inherit; }
+input, select {
+  background: var(--field); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 8px; min-width: 0;
+}
+button {
+  background: var(--accent); color: var(--accent-text); border: 0; border-radius: 6px;
+  padding: 6px 10px; cursor: pointer;
+}
+button:disabled { opacity: .6; cursor: default; }
+button.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); }
+button.danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.copy { padding: 1px 6px; font-size: 11px; margin-inline-start: 4px; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; min-width: 760px; }
+th, td { text-align: left; vertical-align: top; padding: 8px; border-top: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; font-size: 12px; }
+td .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 4px; }
+img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; border: 1px solid var(--line); border-radius: 4px; }
+#error { color: var(--danger); margin-block: 8px; }
+/* Visually hidden when empty but kept in the accessibility tree, so a later
+   message is announced as an alert. */
+#error:empty { position: absolute; width: 1px; height: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#conn { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+.fault-active { color: var(--ok); font-size: 12px; }
+.fault-controls input[type="number"] { width: 72px; }
+.empty { color: var(--muted); padding: 12px 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>CamFarm</h1>
+  <p class="sub">A simulated camera fleet. It simulates cameras and is not an ONVIF-conformant implementation.</p>
+
+  <p id="conn" role="status">connecting…</p>
+
+  <div class="panel">
+    <h2>Replay</h2>
+    <code id="replay">loading…</code>
+  </div>
+
+  <div id="error" role="alert"></div>
+
+  <div class="panel">
+    <h2>Add a camera</h2>
+    <form id="add-form" class="grid">
+      <label>ID<input id="add-id" required autocomplete="off"></label>
+      <label>Username (optional)<input id="add-user" autocomplete="off"></label>
+      <label>Password (optional)<input id="add-pass" autocomplete="off"></label>
+      <label>Source
+        <select id="add-source">
+          <option value="fixture">Bundled fixture (H.264)</option>
+          <option value="file">File on this machine</option>
+        </select>
+      </label>
+      <label id="add-path-label" hidden>File path<input id="add-path" autocomplete="off"></label>
+      <button id="add-submit" type="submit">Add camera</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Cameras</h2>
+    <div class="table-wrap">
+      <table id="cameras">
+        <thead><tr><th>Camera</th><th>URLs</th><th>Stream</th><th>Faults</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p id="empty" class="empty" hidden>No cameras.</p>
+  </div>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var api = "/api/v1";
+  var tbody = document.querySelector("#cameras tbody");
+  var errorBox = document.getElementById("error");
+  var connBox = document.getElementById("conn");
+  var rows = {};            // id -> {tr, refs, snapshotURL}
+  var seq = 0, applied = 0; // refresh ordering: ignore responses older than the last applied
+
+  // #error carries action errors only. Polling failures go to #conn, so a
+  // failed refresh can never overwrite (or clear) an error from a user action.
+  function showError(msg) { errorBox.textContent = msg || ""; }
+  function setConn(ok) { connBox.textContent = ok ? "connected" : "disconnected, retrying"; }
+
+  function request(method, path, body) {
+    var opts = { method: method, headers: {} };
+    if (body !== undefined) {
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    return fetch(api + path, opts).then(function (r) {
+      if (r.ok) { return r; }
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        throw new Error(j.error || (r.status + " " + r.statusText));
+      });
+    });
+  }
+
+  function el(tag, props, children) {
+    var n = document.createElement(tag);
+    Object.keys(props || {}).forEach(function (k) {
+      if (k === "text") { n.textContent = props[k]; }
+      else if (k === "class") { n.className = props[k]; }
+      else if (k.indexOf("data-") === 0 || k.indexOf("aria-") === 0 || k === "type" || k === "min" || k === "max" || k === "step" || k === "alt") { n.setAttribute(k, props[k]); }
+      else { n[k] = props[k]; }
+    });
+    (children || []).forEach(function (c) { n.appendChild(typeof c === "string" ? document.createTextNode(c) : c); });
+    return n;
+  }
+
+  // guard disables the button while fn's promise is in flight. Rows are
+  // updated in place rather than rebuilt, so the disabled state survives polls.
+  function guard(btn, fn) {
+    btn.addEventListener("click", function () {
+      if (btn.disabled) { return; }
+      btn.disabled = true;
+      showError("");
+      var p;
+      try { p = Promise.resolve(fn()); } catch (e) { p = Promise.reject(e); }
+      p.catch(function (e) { showError(e.message); })
+        .then(function () { btn.disabled = false; });
+    });
+  }
+
+  function copyButton(value, what) {
+    return el("button", { class: "copy secondary", type: "button", text: "Copy", "data-copy": value, "aria-label": "Copy " + what });
+  }
+
+  function urlLine(label, value, cls) {
+    return el("div", { class: "row" }, [
+      el("span", { text: label }),
+      el("code", { class: cls, "data-testid": cls, text: value }),
+      copyButton(value, label + " URL")
+    ]);
+  }
+
+  function faultText(c) {
+    if (!c.faults.length) { return "none"; }
+    return c.faults.map(function (f) {
+      return f.kind + " " + f.rate + (f.protectKeyframes ? " (keyframes protected)" : "");
+    }).join(", ");
+  }
+
+  function createRow(c) {
+    var entry = { snapshotURL: "" };
+
+    var rate = el("input", { class: "fault-rate", type: "number", min: "0", max: "1", step: "0.05", value: "0.2", "aria-label": "Rate, drop rate for " + c.id });
+    var protect = el("input", { class: "fault-protect", type: "checkbox", "aria-label": "Keep keyframes, protect keyframes for " + c.id });
+    var kind = el("select", { class: "fault-kind", "aria-label": "Fault kind for " + c.id }, [
+      el("option", { value: "frame_drop", text: "frame_drop" }),
+      el("option", { value: "keyframe_starvation", text: "keyframe_starvation (not implemented)", disabled: true }),
+      el("option", { value: "packet_loss", text: "packet_loss (not implemented)", disabled: true })
+    ]);
+
+    var img = el("img", { class: "snapshot", alt: "Snapshot of " + c.id, hidden: true });
+    var base = "/cameras/" + encodeURIComponent(c.id);
+
+    var snapBtn = el("button", { class: "btn-snapshot secondary", type: "button", text: "Snapshot" });
+    guard(snapBtn, function () {
+      return fetch(api + base + "/snapshot.jpg").then(function (r) {
+        if (!r.ok) { return r.json().catch(function () { return {}; }).then(function (j) { throw new Error("Snapshot failed: " + (j.error || r.statusText)); }); }
+        return r.blob();
+      }).then(function (blob) {
+        if (entry.snapshotURL) { URL.revokeObjectURL(entry.snapshotURL); }
+        entry.snapshotURL = URL.createObjectURL(blob);
+        img.src = entry.snapshotURL;
+        img.hidden = false;
+      });
+    });
+
+    var removeBtn = el("button", { class: "btn-remove danger", type: "button", text: "Remove" });
+    guard(removeBtn, function () { return request("DELETE", base).then(refresh); });
+
+    var applyBtn = el("button", { class: "btn-fault", type: "button", text: "Apply fault" });
+    guard(applyBtn, function () {
+      return request("POST", base + "/faults",
+        { kind: kind.value, rate: parseFloat(rate.value), protectKeyframes: protect.checked }).then(refresh);
+    });
+    var clearBtn = el("button", { class: "btn-clear-fault secondary", type: "button", text: "Clear" });
+    guard(clearBtn, function () { return request("DELETE", base + "/faults").then(refresh); });
+
+    var urls = el("td", {}, [
+      urlLine("RTSP", c.rtspUrl, "cell-rtsp"),
+      urlLine("ONVIF", c.onvifEndpoint, "cell-onvif")
+    ]);
+    if (c.username) {
+      urls.appendChild(el("div", { class: "row" }, [el("span", { text: "Auth" }), el("code", { text: c.username + " / " + c.password })]));
+    }
+
+    var meta = el("div", { class: "sub" });
+    var statsA = el("div", { class: "mono" });
+    var statsB = el("div", { class: "mono" });
+    var active = el("div", { class: "fault-active" });
+
+    var tr = el("tr", { "data-id": c.id }, [
+      el("td", {}, [
+        el("strong", { text: c.id }),
+        meta,
+        el("div", { class: "sub mono", text: "seed " + c.seed })
+      ]),
+      urls,
+      el("td", {}, [statsA, statsB]),
+      el("td", {}, [
+        active,
+        el("div", { class: "fault-controls row" }, [kind, el("label", {}, ["Rate", rate]), el("label", {}, ["Keep keyframes", protect])])
+      ]),
+      el("td", {}, [
+        el("div", { class: "row" }, [snapBtn, applyBtn, clearBtn, removeBtn]),
+        img
+      ])
+    ]);
+    entry.tr = tr;
+    entry.refs = { meta: meta, statsA: statsA, statsB: statsB, active: active };
+    return entry;
+  }
+
+  // updateRow touches only the text that can change; inputs, buttons and the
+  // snapshot image are left alone so polling never eats a click or an edit.
+  function updateRow(entry, c) {
+    var r = entry.refs;
+    var set = function (n, t) { if (n.textContent !== t) { n.textContent = t; } };
+    set(r.meta, c.codec + " " + c.width + "x" + c.height + " @ " + c.fps);
+    set(r.statsA, "frames " + c.stats.FramesServed + " · loops " + c.stats.LoopsCompleted);
+    set(r.statsB, "faults fired " + c.stats.FaultsFired + " · readers " + c.readers);
+    set(r.active, faultText(c));
+  }
+
+  function render(cameras) {
+    var seen = {};
+    cameras.forEach(function (c, i) {
+      seen[c.id] = true;
+      var entry = rows[c.id];
+      if (!entry) { entry = rows[c.id] = createRow(c); }
+      updateRow(entry, c);
+      if (tbody.children[i] !== entry.tr) { tbody.insertBefore(entry.tr, tbody.children[i] || null); }
+    });
+    // Prune rows (and their blob URLs and input state) for removed cameras.
+    Object.keys(rows).forEach(function (id) {
+      if (seen[id]) { return; }
+      if (rows[id].snapshotURL) { URL.revokeObjectURL(rows[id].snapshotURL); }
+      rows[id].tr.remove();
+      delete rows[id];
+    });
+    document.getElementById("empty").hidden = cameras.length > 0;
+  }
+
+  function refresh() {
+    var mine = ++seq;
+    return Promise.all([
+      request("GET", "/cameras").then(function (r) { return r.json(); }),
+      request("GET", "/fleet").then(function (r) { return r.json(); })
+    ]).then(function (res) {
+      if (mine < applied) { return; }   // a newer response was already applied
+      applied = mine;
+      document.getElementById("replay").textContent = res[1].replayLine;
+      render(res[0]);
+      setConn(true);
+    }).catch(function () {
+      if (mine >= applied) { setConn(false); }
+    });
+  }
+
+  function legacyCopy(text) {
+    var ta = el("textarea", { value: text, readOnly: true });
+    ta.style.cssText = "position:fixed;left:-9999px;top:0";
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest && ev.target.closest("button.copy");
+    if (!b) { return; }
+    var text = b.getAttribute("data-copy");
+    var done = function () {
+      var old = b.dataset.label || b.textContent;
+      b.dataset.label = old;
+      b.textContent = "Copied";
+      setTimeout(function () { b.textContent = old; }, 1200);
+    };
+    var fail = function () { showError("Copy failed; select the text manually."); };
+    var fallback = function () { if (legacyCopy(text)) { done(); } else { fail(); } };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(fallback);
+    } else {
+      fallback();
+    }
+  });
+
+  var source = document.getElementById("add-source");
+  source.addEventListener("change", function () {
+    document.getElementById("add-path-label").hidden = source.value !== "file";
+  });
+
+  var addForm = document.getElementById("add-form");
+  var addSubmit = document.getElementById("add-submit");
+  addForm.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    if (addSubmit.disabled) { return; }
+    addSubmit.disabled = true;
+    showError("");
+    var spec = { id: document.getElementById("add-id").value.trim() };
+    var u = document.getElementById("add-user").value, p = document.getElementById("add-pass").value;
+    if (u || p) { spec.auth = { username: u, password: p }; }
+    if (source.value === "file") { spec.source = { kind: "file", path: document.getElementById("add-path").value }; }
+    request("POST", "/cameras", spec).then(function () {
+      addForm.reset();
+      document.getElementById("add-path-label").hidden = true;
+      return refresh();
+    }).catch(function (e) { showError(e.message); })
+      .then(function () { addSubmit.disabled = false; });
+  });
+
+  // SSE gives immediate updates on change; the interval keeps counters fresh
+  // and is the fallback when the stream is unavailable.
+  if (window.EventSource) {
+    var es = new EventSource(api + "/events");
+    ["camera_added", "camera_removed", "fault_injected", "fault_cleared"].forEach(function (t) {
+      es.addEventListener(t, refresh);
+    });
+    es.onerror = function () { setConn(false); };
+    es.onopen = function () { setConn(true); refresh(); };
+  }
+  setInterval(refresh, 2000);
+  refresh();
+})();
+</script>
+</body>
+</html>

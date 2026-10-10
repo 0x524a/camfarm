@@ -61,17 +61,28 @@ var knownKinds = map[Kind]bool{
 // Known reports whether kind is catalogued.
 func Known(kind Kind) bool { return knownKinds[kind] }
 
+// Implemented reports whether a kind's effect exists in this version. Only
+// implemented kinds are accepted by the public API; the rest stay refused.
+func Implemented(kind Kind) bool { return kind == KindFrameDrop }
+
 // Spec configures one fault.
 type Spec struct {
 	Kind Kind
 	// Rate is the per-frame probability for rate-based kinds, in [0,1].
 	Rate float64
+	// ProtectKeyframes, for frame_drop, suppresses a drop that would remove a
+	// random-access access unit. The draw is still consumed, so the sequence
+	// does not depend on which frames happen to be keyframes.
+	ProtectKeyframes bool
 }
 
 // Decision is a fault that fired.
 type Decision struct {
 	Kind       Kind
 	FrameIndex int
+	// Suppressed reports that the fault fired but must not be applied (for
+	// example a frame_drop on a keyframe with ProtectKeyframes set).
+	Suppressed bool
 }
 
 // Engine makes fault decisions for one camera.
@@ -111,13 +122,15 @@ func New(s seed.Seed, specs []Spec) (*Engine, error) {
 func (e *Engine) Enabled() bool { return len(e.entries) > 0 }
 
 // DecideFrame returns the faults that fire for the given frame counter.
+// randomAccess reports whether the access unit at that position is a random
+// access point; only ProtectKeyframes consults it.
 //
 // The counter is monotonic across loops of the source media, so a decision is
 // tied to a position in the run rather than to a position in the file.
 //
 // Entries are walked in configured order, never map order, so the draw sequence
 // is reproducible.
-func (e *Engine) DecideFrame(frameIndex int) []Decision {
+func (e *Engine) DecideFrame(frameIndex int, randomAccess bool) []Decision {
 	var out []Decision
 	for i := range e.entries {
 		en := &e.entries[i]
@@ -125,9 +138,14 @@ func (e *Engine) DecideFrame(frameIndex int) []Decision {
 		case KindFrameDrop, KindKeyframeStarvation:
 			// Draw unconditionally so the sequence does not depend on earlier
 			// outcomes.
-			if en.rnd.Float64() < en.spec.Rate {
-				out = append(out, Decision{Kind: en.spec.Kind, FrameIndex: frameIndex})
+			if en.rnd.Float64() >= en.spec.Rate {
+				continue
 			}
+			d := Decision{Kind: en.spec.Kind, FrameIndex: frameIndex}
+			if en.spec.Kind == KindFrameDrop && en.spec.ProtectKeyframes && randomAccess {
+				d.Suppressed = true
+			}
+			out = append(out, d)
 		default:
 			// Session, transport and control-plane faults are not frame-scoped.
 			// They are catalogued and validated, and decided elsewhere when

@@ -114,14 +114,14 @@ func TestStatsReportSeedAndProgress(t *testing.T) {
 // refused rather than silently ignored.
 func TestFaultsAreRefusedNotIgnored(t *testing.T) {
 	s := minimalSpec()
-	s.Cameras[0].Faults = []FaultSpec{{Kind: "frame_drop", Rate: 0.5}}
+	s.Cameras[0].Faults = []FaultSpec{{Kind: "keyframe_starvation", Rate: 0.5}}
 
 	_, err := Start(context.Background(), s)
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("err = %v, want ErrUnsupported", err)
 	}
 	// The message must name the kind, so a caller knows what was refused.
-	if !strings.Contains(err.Error(), "frame_drop") {
+	if !strings.Contains(err.Error(), "keyframe_starvation") {
 		t.Errorf("err = %v, want it to name the fault kind", err)
 	}
 
@@ -129,27 +129,6 @@ func TestFaultsAreRefusedNotIgnored(t *testing.T) {
 	s.Cameras[0].Faults = []FaultSpec{{Kind: "not-a-fault", Rate: 0.5}}
 	if _, err := Start(context.Background(), s); err == nil {
 		t.Fatal("unknown fault kind was accepted")
-	}
-}
-
-func TestInjectAndClear(t *testing.T) {
-	f, err := Start(context.Background(), minimalSpec())
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(func() { _ = f.Close() })
-
-	cam, err := f.Camera("front-door")
-	if err != nil {
-		t.Fatalf("Camera: %v", err)
-	}
-	if err := cam.Inject(FaultSpec{Kind: "frame_drop", Rate: 1}); !errors.Is(err, ErrUnsupported) {
-		t.Errorf("Inject: err = %v, want ErrUnsupported", err)
-	}
-	// Clearing nothing succeeds: it is not an error to ask for the state that
-	// already holds.
-	if err := cam.Clear(); err != nil {
-		t.Errorf("Clear: %v", err)
 	}
 }
 
@@ -408,7 +387,7 @@ func TestAddCameraDuplicateIDRefused(t *testing.T) {
 // get a camera that never misbehaves.
 func TestAddCameraFaultRefused(t *testing.T) {
 	f := StartT(t, minimalSpec())
-	_, err := f.AddCamera(CameraSpec{ID: "new-cam", Faults: []FaultSpec{{Kind: "frame_drop", Rate: 0.5}}})
+	_, err := f.AddCamera(CameraSpec{ID: "new-cam", Faults: []FaultSpec{{Kind: "keyframe_starvation", Rate: 0.5}}})
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("err = %v, want ErrUnsupported", err)
 	}
@@ -591,5 +570,125 @@ func TestScreenshotRacesRemoveCamera(t *testing.T) {
 	case <-done:
 	case <-ctx.Done():
 		t.Fatal("Screenshot did not return after RemoveCamera")
+	}
+}
+
+func TestInjectUnimplementedKindIsUnsupported(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, _ := f.Camera("front-door")
+	err := cam.Inject(FaultSpec{Kind: "keyframe_starvation", Rate: 1})
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v, want ErrUnsupported", err)
+	}
+	if err := cam.Inject(FaultSpec{Kind: "not-a-fault", Rate: 1}); !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("unknown kind: err = %v, want ErrInvalidSpec", err)
+	}
+	if err := cam.Inject(FaultSpec{Kind: "frame_drop", Rate: 2}); !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("bad rate: err = %v, want ErrInvalidSpec", err)
+	}
+}
+
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestSpecTimeFrameDropTakesEffect(t *testing.T) {
+	s := minimalSpec()
+	s.Cameras[0].Faults = []FaultSpec{{Kind: "frame_drop", Rate: 1}}
+	f := StartT(t, s)
+	cam, _ := f.Camera("front-door")
+	other, _ := f.Camera("lobby")
+
+	waitUntil(t, "drops to be recorded", func() bool { return cam.Stats().FaultsFired >= 3 })
+	if got := cam.Stats().FramesServed; got != 0 {
+		t.Errorf("FramesServed = %d, want 0 under frame_drop rate 1", got)
+	}
+	waitUntil(t, "the other camera to serve frames", func() bool { return other.Stats().FramesServed > 0 })
+	if other.Stats().FaultsFired != 0 {
+		t.Error("a fault on one camera fired on another")
+	}
+	if got := cam.Faults(); len(got) != 1 || got[0].Kind != "frame_drop" {
+		t.Errorf("Faults() = %+v", got)
+	}
+}
+
+func TestInjectThenClearOnARunningCamera(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, _ := f.Camera("front-door")
+	waitUntil(t, "frames to flow", func() bool { return cam.Stats().FramesServed > 0 })
+
+	if err := cam.Inject(FaultSpec{Kind: "frame_drop", Rate: 1}); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	waitUntil(t, "drops to be recorded", func() bool { return cam.Stats().FaultsFired >= 3 })
+	if got := cam.Faults(); len(got) != 1 {
+		t.Fatalf("Faults() = %+v, want the injected fault", got)
+	}
+
+	if err := cam.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if len(cam.Faults()) != 0 {
+		t.Fatal("Faults() not empty after Clear")
+	}
+	before := cam.Stats().FramesServed
+	waitUntil(t, "frames to resume", func() bool { return cam.Stats().FramesServed > before })
+
+	// Clearing with nothing active succeeds.
+	if err := cam.Clear(); err != nil {
+		t.Errorf("second Clear: %v", err)
+	}
+}
+
+func TestInjectReplacesTheSameKind(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, _ := f.Camera("front-door")
+	_ = cam.Inject(FaultSpec{Kind: "frame_drop", Rate: 0.2})
+	_ = cam.Inject(FaultSpec{Kind: "frame_drop", Rate: 0.9, ProtectKeyframes: true})
+	got := cam.Faults()
+	if len(got) != 1 || got[0].Rate != 0.9 || !got[0].ProtectKeyframes {
+		t.Fatalf("Faults() = %+v, want one frame_drop at 0.9 with protectKeyframes", got)
+	}
+}
+
+func TestSpecAndAuthAccessors(t *testing.T) {
+	s := Spec{Seed: 1, Cameras: []CameraSpec{{ID: "locked", Auth: AuthSpec{Username: "admin", Password: "pw"}}, {ID: "open"}}}
+	f := StartT(t, s)
+	locked, _ := f.Camera("locked")
+	open, _ := f.Camera("open")
+
+	if u, p, ok := locked.Auth(); !ok || u != "admin" || p != "pw" {
+		t.Errorf("Auth() = %q %q %v", u, p, ok)
+	}
+	if _, _, ok := open.Auth(); ok {
+		t.Error("open camera reports credentials")
+	}
+	if got := locked.Spec(); got.ID != "locked" || got.Source.Kind != SourceFixture {
+		t.Errorf("Spec() = %+v", got)
+	}
+}
+
+func TestSentinelErrors(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	if _, err := f.AddCamera(CameraSpec{ID: "front-door"}); !errors.Is(err, ErrDuplicateCamera) {
+		t.Errorf("duplicate: err = %v, want ErrDuplicateCamera", err)
+	}
+	for name, cs := range map[string]CameraSpec{
+		"empty id":   {ID: ""},
+		"slash":      {ID: "a/b"},
+		"half auth":  {ID: "x", Auth: AuthSpec{Username: "u"}},
+		"bad source": {ID: "y", Source: SourceSpec{Kind: "nonsense"}},
+		"bad fault":  {ID: "z", Faults: []FaultSpec{{Kind: "nope", Rate: 1}}},
+	} {
+		if _, err := f.AddCamera(cs); !errors.Is(err, ErrInvalidSpec) {
+			t.Errorf("%s: err = %v, want ErrInvalidSpec", name, err)
+		}
 	}
 }
