@@ -105,15 +105,10 @@ type Server struct {
 	// yet delivered by OnResponse. It is a leaf lock, never held with mu or armMu.
 	lieMu      sync.Mutex
 	pendingLie map[*gortsplib.ServerConn]lieInfo
-	rootCtx    context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
 
-	// Test-only seams, nil in production, set before Start. They let tests
-	// install behaviour in the finaliser and PLAY hooks without any production
-	// fault depending on them.
-	testOnResponse func(*gortsplib.ServerConn, *base.Response)
-	testOnPlay     func(*gortsplib.ServerHandlerOnPlayCtx)
+	rootCtx context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 }
 
 // newFormat builds the gortsplib format describing a camera's codec.
@@ -677,9 +672,6 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 	if res := s.answerError(fault.MethodPlay, id, ctl.Decide(fault.MethodPlay)); res != nil {
 		return res, nil
 	}
-	if s.testOnPlay != nil {
-		s.testOnPlay(ctx)
-	}
 	if a := ctl.ArmPlay(); a != nil {
 		s.arm(id, ctx.Session, ctx.Conn, a)
 	}
@@ -694,8 +686,5 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 // the only place those headers can be rewritten. It delivers an sdp_lie decided
 // in OnDescribe for this connection.
 func (s *Server) OnResponse(c *gortsplib.ServerConn, res *base.Response) {
-	if s.testOnResponse != nil {
-		s.testOnResponse(c, res)
-	}
 	s.applyLie(c, res)
 }
