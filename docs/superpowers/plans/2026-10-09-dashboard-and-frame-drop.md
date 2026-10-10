@@ -12,7 +12,7 @@
 
 **Precondition:** slice 2 (PR #2, `Camera.Screenshot`) must be merged to `main` first. Execute on a fresh branch from `main`.
 
-**Code status:** the code below was written against the repository as read on 2026-10-09 and has *not* been compiled. Where a snippet has a trivial compile issue (an unused import, a renamed helper), fix it without changing behaviour. Do not weaken a test to make it pass.
+**Code status:** Tasks 1-5 were applied, compiled and run under `-race` in a scratch copy on 2026-10-09 and the corrections found are folded in below. Tasks 6-10 have *not* been compiled. Where a snippet has a trivial compile issue (an unused import, a renamed helper), fix it without changing behaviour. Do not weaken a test to make it pass.
 
 ## Global Constraints
 
@@ -54,6 +54,7 @@
 **Files:**
 - Modify: `internal/fault/fault.go`
 - Modify: `internal/fault/fault_test.go` (every `DecideFrame(x)` becomes `DecideFrame(x, false)`)
+- Modify: `internal/rtsp/pump.go` (one-line call-site fix only, so the tree keeps building: `p.faults.DecideFrame(p.frameCounter, au.RandomAccess)`; Task 2 builds the real effect on that line)
 
 **Interfaces:**
 - Consumes: existing `fault.New`, `seed.Seed`.
@@ -189,13 +190,15 @@ func (e *Engine) DecideFrame(frameIndex int, randomAccess bool) []Decision {
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `gofmt -l . ; go vet ./internal/fault/ && go test -race -count=1 ./internal/fault/`
-Expected: PASS. (`internal/rtsp` does not compile until Task 2; do not run `./...` yet.)
+Also change the call in `internal/rtsp/pump.go` (currently `p.faults.DecideFrame(p.frameCounter)`) to `p.faults.DecideFrame(p.frameCounter, au.RandomAccess)` — `au` is the access unit in scope there.
+
+Run: `gofmt -l . ; go vet ./... && CGO_ENABLED=0 go build ./... && go test -race -count=1 ./internal/fault/ ./internal/rtsp/`
+Expected: PASS and the whole tree builds (no red commit).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add internal/fault
+git add internal/fault internal/rtsp/pump.go
 git commit -m "fault: add ProtectKeyframes, Suppressed and Implemented for frame_drop"
 ```
 
@@ -211,9 +214,11 @@ git commit -m "fault: add ProtectKeyframes, Suppressed and Implemented for frame
 - Consumes: Task 1's `DecideFrame(int, bool)`, `Decision.Suppressed`, `fault.New`.
 - Produces: `func (p *Pump) SetFaults(specs []fault.Spec, applied func(frameIndex int)) error` — validates now, swaps in at the start of the next `Step`, calls `applied(frameCounter)` (if non-nil) from the pump goroutine when it does. Dropped frames are not encoded or written, do not call `obs.Frame`, but still advance `frameCounter`, `idx`, loop bookkeeping.
 
+**Extra required tests (spec section 6, missing from the code below; write them in the same style):** (1) across a dropped frame the written RTP timestamp advances by exactly the dropped count plus one times `m.FrameDuration()` converted to the 90 kHz clock (assert on consecutive written timestamps, not just distinctness); (2) determinism after a mid-run swap: two pumps with the same seed, each calling `SetFaults` with the same specs at the same frame index, record identical dropped frame indices.
+
 - [ ] **Step 1: Write the failing tests**
 
-In `internal/rtsp/pump_test.go`, delete `TestFaultDecisionsAreRecordedButNotApplied` and add (imports: add `"sync"` if needed by you; `media` is already reachable via `testMedia`):
+In `internal/rtsp/pump_test.go`, delete `TestFaultDecisionsAreRecordedButNotApplied` together with its two-line doc comment ("The seam is real: ...") and one of the two surrounding blank lines, then append the tests below (run `gofmt -l .` afterwards; `media` is already reachable via `testMedia`; no new imports are needed):
 
 ```go
 // A catalogued fault whose effect does not exist yet is decided and recorded,
@@ -587,7 +592,7 @@ git commit -m "rtsp: apply frame_drop in the pump and swap faults between frames
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `internal/rtsp/server_test.go` (add imports `"sync/atomic"`, `"time"` if absent; `fault`):
+Append to `internal/rtsp/server_test.go`. Add to its import block exactly `"sync/atomic"` and `"github.com/0x524a/camfarm/internal/fault"`; `errors`, `time`, `description`, `format`, `rtp` and `base` are already imported. `server.go` already imports `fault`.
 
 ```go
 func TestSetFaultsStopsAndResumesDeliveryToARealClient(t *testing.T) {
@@ -738,7 +743,7 @@ git commit -m "rtsp: add Server.SetFaults for swapping a camera's faults at runt
 
 - [ ] **Step 1: Write the failing tests**
 
-In `camfarm_test.go`, change the three refusals that used `frame_drop` to `keyframe_starvation` (lines using `Kind: "frame_drop"` at `TestFaultsAreRefusedNotIgnored`, `TestInjectAndClear`, `TestAddCameraFaultRefused`, and the `strings.Contains(err.Error(), "frame_drop")` check). Rewrite `TestInjectAndClear` and add:
+In `camfarm_test.go`, in this order: (a) delete `TestInjectAndClear` entirely (its role is taken by `TestInjectUnimplementedKindIsUnsupported` and `TestInjectThenClearOnARunningCamera` below); (b) in `TestFaultsAreRefusedNotIgnored` and `TestAddCameraFaultRefused` change `frame_drop` to `keyframe_starvation` (the two `Kind:` literals and the `strings.Contains(err.Error(), "frame_drop")` check) — do this BEFORE appending, never as a blanket replace afterwards; (c) then append the tests below. `time` is already imported there.
 
 ```go
 func TestInjectUnimplementedKindIsUnsupported(t *testing.T) {
@@ -1227,9 +1232,9 @@ const (
 
 // Event is one change to a running fleet.
 type Event struct {
-	Seq    uint64    `json:"seq"`
-	Type   EventType `json:"type"`
-	Camera string    `json:"camera"`
+	Seq    uint64     `json:"seq"`
+	Type   EventType  `json:"type"`
+	Camera string     `json:"camera"`
 	Fault  *FaultSpec `json:"fault,omitempty"`
 	// FrameIndex is the frame a fault change took effect on; -1 for add/remove.
 	FrameIndex int `json:"frameIndex"`
@@ -1249,7 +1254,18 @@ type JournalEntry struct {
 
 const subscriberBuffer = 64
 
-type subscriber struct{ ch chan Event }
+// subscriber is one Subscribe call. end closes both channels exactly once; the
+// caller must have removed s from events.subs under events.mu first. done lets
+// the per-subscription goroutine exit even when its ctx never ends.
+type subscriber struct {
+	ch   chan Event
+	done chan struct{}
+}
+
+func (s *subscriber) end() {
+	close(s.ch)
+	close(s.done)
+}
 
 // events holds the fleet's change feed and journal.
 type events struct {
@@ -1293,7 +1309,7 @@ func (f *Fleet) publish(ev Event) {
 		case s.ch <- ev:
 		default:
 			delete(e.subs, s)
-			close(s.ch)
+			s.end()
 		}
 	}
 }
@@ -1301,11 +1317,11 @@ func (f *Fleet) publish(ev Event) {
 // Subscribe returns a channel of fleet changes, closed when ctx ends, when the
 // fleet closes, or if the subscriber falls too far behind.
 func (f *Fleet) Subscribe(ctx context.Context) <-chan Event {
-	s := &subscriber{ch: make(chan Event, subscriberBuffer)}
+	s := &subscriber{ch: make(chan Event, subscriberBuffer), done: make(chan struct{})}
 	e := &f.ev
 	e.mu.Lock()
 	if e.closed {
-		close(s.ch)
+		s.end()
 		e.mu.Unlock()
 		return s.ch
 	}
@@ -1313,11 +1329,15 @@ func (f *Fleet) Subscribe(ctx context.Context) <-chan Event {
 	e.mu.Unlock()
 
 	go func() {
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-s.done:
+			return
+		}
 		e.mu.Lock()
 		if _, ok := e.subs[s]; ok {
 			delete(e.subs, s)
-			close(s.ch)
+			s.end()
 		}
 		e.mu.Unlock()
 	}()
@@ -1332,7 +1352,7 @@ func (f *Fleet) closeSubscribers() {
 	e.closed = true
 	for s := range e.subs {
 		delete(e.subs, s)
-		close(s.ch)
+		s.end()
 	}
 }
 
@@ -1368,7 +1388,7 @@ func (f *Fleet) noteFault(action, camera string, spec FaultSpec, frame int) {
 }
 ```
 
-In `camfarm.go`: add `ev events` to `Fleet`; call `f.ev.init()` in `Start` right after the `Fleet` literal is built; delete Task 4's empty `noteFault`; in `AddCamera` after the camera is registered (just before the `f.log.Info("camera added"...)`) call `f.publish(Event{Type: EventCameraAdded, Camera: cs.ID, FrameIndex: -1})`; in `RemoveCamera` after both servers are removed and before the log, call `f.publish(Event{Type: EventCameraRemoved, Camera: id, FrameIndex: -1})` (publish even if one side errored — the camera is gone from the fleet — so place the publish right after the map delete, before the server removals); in `Close` call `f.closeSubscribers()` after `stop()`; change `ReplayLine` to:
+In `camfarm.go`: add `ev events` to `Fleet`; call `f.ev.init()` in `Start` right after the `Fleet` literal is built; delete Task 4's empty `noteFault` method and its doc comment from `camfarm.go` (mandatory: `events.go` defines `noteFault`, so leaving both is a duplicate-method compile error); in `AddCamera` after the camera is registered (just before the `f.log.Info("camera added"...)`) call `f.publish(Event{Type: EventCameraAdded, Camera: cs.ID, FrameIndex: -1})`; in `RemoveCamera` after both servers are removed and before the log, call `f.publish(Event{Type: EventCameraRemoved, Camera: id, FrameIndex: -1})` (publish even if one side errored — the camera is gone from the fleet — so place the publish right after the map delete, before the server removals); in `Close` call `f.closeSubscribers()` after `stop()`; change `ReplayLine` to:
 
 ```go
 	return fmt.Sprintf("camfarm: seed=%#x spec=sha256:%s", f.spec.Seed, f.specHash[:12]) + f.journalSuffix()
