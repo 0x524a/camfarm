@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/camfarm-icon.svg" alt="CamFarm icon" width="96" height="96"></p>
+
 # CamFarm
 
 [![ci](https://github.com/0x524a/camfarm/actions/workflows/ci.yml/badge.svg)](https://github.com/0x524a/camfarm/actions/workflows/ci.yml)
