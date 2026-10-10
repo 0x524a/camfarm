@@ -249,6 +249,8 @@ func toFaultSpecs(in []FaultSpec) []fault.Spec {
 	return out
 }
 
+// toFaultSpec converts one public fault spec to the engine's. Every field of
+// FaultSpec must be carried here: a field dropped here is silently ignored.
 func toFaultSpec(f FaultSpec) fault.Spec {
 	return fault.Spec{Kind: fault.Kind(f.Kind), Rate: f.Rate, ProtectKeyframes: f.ProtectKeyframes,
 		MeanBurst: f.MeanBurst, KeepEvery: f.KeepEvery,

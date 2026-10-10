@@ -61,7 +61,16 @@ func rateParam() Param {
 func onceRate(help string) Param {
 	p := rateParam()
 	p.Default = 1.0
-	p.Help = help
+	p.Help = help + " 0 or omitted means 1: the fault fires every time."
+	return p
+}
+
+// controlRate is the rate parameter of rtsp_error. The JSON form omits a zero
+// rate, so 0 cannot mean "never": it is the same as omitted, which means the
+// catalogue default.
+func controlRate() Param {
+	p := rateParam()
+	p.Help += " 0 or omitted means the default, 0.2."
 	return p
 }
 
@@ -118,7 +127,7 @@ func Catalogue() []KindInfo {
 					Help: "Which RTSP method the fault answers with an error; all covers every method."},
 				{Name: "status", Type: ParamInteger, Min: f64(400), Max: f64(599), Default: 503.0,
 					Help: "RTSP status code of the error reply."},
-				rate,
+				controlRate(),
 				{Name: "onlyRequest", Type: ParamInteger, Min: f64(1), Max: f64(1000000), Default: 0.0,
 					Help: "Fail only the Nth matching request (ignores rate); with on all, requests of every method share one count. 0 or omitted means unset."},
 			},
