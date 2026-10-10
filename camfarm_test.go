@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0x524a/camfarm/internal/media"
 	"github.com/0x524a/camfarm/internal/media/fixture"
@@ -516,5 +517,79 @@ func TestAddThenRemoveCamera(t *testing.T) {
 	}
 	if len(f.List()) != 2 {
 		t.Fatalf("List = %d cameras after remove, want 2", len(f.List()))
+	}
+}
+
+func TestScreenshotH264(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, err := f.Camera("front-door")
+	if err != nil {
+		t.Fatalf("Camera: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	img, err := cam.Screenshot(ctx)
+	if err != nil {
+		t.Fatalf("Screenshot: %v", err)
+	}
+	if b := img.Bounds(); b.Dx() != 320 || b.Dy() != 240 {
+		t.Errorf("bounds = %v, want 320x240", b)
+	}
+}
+
+func TestScreenshotAfterCloseIsNotReady(t *testing.T) {
+	f, err := Start(context.Background(), minimalSpec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cam, err := f.Camera("front-door")
+	if err != nil {
+		t.Fatalf("Camera: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := cam.Screenshot(context.Background()); !errors.Is(err, ErrNotReady) {
+		t.Errorf("err = %v, want ErrNotReady", err)
+	}
+}
+
+func TestScreenshotHonoursContext(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, err := f.Camera("front-door")
+	if err != nil {
+		t.Fatalf("Camera: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := cam.Screenshot(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+}
+
+// TestScreenshotRacesRemoveCamera runs under -race: capturing while the camera
+// is being removed must end in a frame or an error, never a panic or a hang.
+func TestScreenshotRacesRemoveCamera(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, err := f.Camera("front-door")
+	if err != nil {
+		t.Fatalf("Camera: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = cam.Screenshot(ctx)
+	}()
+	if err := f.RemoveCamera("front-door"); err != nil {
+		t.Fatalf("RemoveCamera: %v", err)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("Screenshot did not return after RemoveCamera")
 	}
 }
