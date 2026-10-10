@@ -40,10 +40,32 @@ Early:
   and H.265 is not yet. Sources outside that subset may fail with an error or
   decode incorrectly. Only the bundled fixture and similarly encoded files are
   tested.
-- **Not built yet:** device discovery (WS-Discovery), PTZ, Imaging, and every
-  fault's *effect*. The fault catalogue is defined and validated, and the seams
-  it will act through are in place, but no fault changes a byte on the wire. A
-  spec that names a fault is **refused**, not silently ignored.
+- **Works:** a web dashboard and `cmd/camfarm` binary. `go run ./cmd/camfarm --cameras 3` (or the
+  built `camfarm` binary) serves a fleet and a page at `http://127.0.0.1:8080/` that lists cameras
+  with copyable RTSP and ONVIF URLs, adds and removes cameras, takes on-demand snapshots, and
+  injects and clears faults. Changes appear live over Server-Sent Events. The JSON API is under
+  `/api/v1/` (`fleet`, `cameras`, `cameras/{id}`, `cameras/{id}/snapshot.jpg`,
+  `cameras/{id}/faults`, and the `events` stream). Seeds are decimal strings in the API. Flags:
+  `--spec`, `--seed`, `--cameras` (mutually exclusive with `--spec`), `--http-addr`,
+  `--listen-host`, `--rtsp-port`, `--onvif-port`; run with `-h` for details. **Security:** the
+  dashboard can start servers and, with file sources, make the process read local paths, and the
+  page shows cameras' Digest credentials. It listens on loopback by default and has *no*
+  authentication, token, Host-header check or CSRF protection, so a malicious web page can reach a
+  loopback API through DNS rebinding or CSRF. Do not expose it.
+- **Works:** one fault, `frame_drop`: a seeded fraction of access units is never encoded or sent,
+  so RTP sequence numbers stay contiguous and the missing frame appears only as a timestamp jump
+  (an encoder skipping frames, not network loss). It can be set in a spec, or injected into and
+  cleared from a running camera; `protectKeyframes` keeps random-access frames. Runtime injections
+  and clears are journaled, and the fleet replay line gets a ` journal=<n>:<12hex>` suffix hashing
+  that journal. Honest limit: which frame an interactive click lands on is recorded but cannot be
+  derived from the seed, because it depends on when the click arrived.
+- **Works:** Playwright end-to-end tests of the dashboard, behind the `e2e` build tag and run in
+  the `e2e` CI job. Locally, `go test -tags e2e ./internal/dashboard/` needs Chromium installed
+  for Playwright.
+- **Not built yet:** device discovery (WS-Discovery), PTZ, Imaging, and the *effect* of every fault
+  other than `frame_drop`. The rest of the fault catalogue is defined and validated, and the seams
+  it acts through are in place, but those faults change nothing on the wire. A spec that names an
+  unimplemented fault is **refused** (`ErrUnsupported`), not silently ignored.
 
 ## Use as a library
 

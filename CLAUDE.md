@@ -97,8 +97,8 @@ their APIs, since they may still be in flux:
    `Fleet.AddCamera`/`Fleet.RemoveCamera` (`docs/superpowers/specs/2026-09-13-dynamic-camera-lifecycle-design.md`)
    are the runtime half; the declarative `Spec` remains the source of truth for a fleet's initial
    construction, and both paths share the same per-camera validation so they cannot enforce
-   different rules for what a valid camera is. This does not resolve the dashboard or the binary
-   that will drive this API interactively — those are later slices built on top of it.
+   different rules for what a valid camera is. The dashboard and the `cmd/camfarm` binary now
+   drive this API interactively, built on top of it.
 
 ## Open architectural decisions
 
