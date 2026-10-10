@@ -182,3 +182,127 @@ func TestVirtualConcurrentStopAndAdvance(t *testing.T) {
 	default:
 	}
 }
+
+func TestVirtualAfterFiresOnAdvance(t *testing.T) {
+	v := NewVirtual(time.Unix(0, 0))
+	ch := v.After(50 * time.Millisecond)
+	select {
+	case <-ch:
+		t.Fatal("fired before advance")
+	default:
+	}
+	v.Advance(49 * time.Millisecond)
+	select {
+	case <-ch:
+		t.Fatal("fired early")
+	default:
+	}
+	v.Advance(time.Millisecond)
+	select {
+	case <-ch:
+	default:
+		t.Fatal("did not fire at deadline")
+	}
+	select {
+	case <-v.After(0):
+	default:
+		t.Fatal("zero duration must fire immediately")
+	}
+	select {
+	case <-v.After(-time.Second):
+	default:
+		t.Fatal("negative duration must fire immediately")
+	}
+}
+
+func TestVirtualAfterMultipleWaitersOneAdvance(t *testing.T) {
+	v := NewVirtual(time.Unix(0, 0))
+	a := v.After(10 * time.Millisecond)
+	b := v.After(20 * time.Millisecond)
+	late := v.After(500 * time.Millisecond)
+	v.Advance(30 * time.Millisecond)
+	for name, ch := range map[string]<-chan time.Time{"a": a, "b": b} {
+		select {
+		case <-ch:
+		default:
+			t.Fatalf("waiter %s did not fire", name)
+		}
+	}
+	select {
+	case <-late:
+		t.Fatal("late waiter fired early")
+	default:
+	}
+	v.Advance(470 * time.Millisecond)
+	select {
+	case <-late:
+	default:
+		t.Fatal("late waiter did not fire")
+	}
+}
+
+func TestVirtualAfterInterleavedWithTicker(t *testing.T) {
+	v := NewVirtual(time.Unix(0, 0))
+	tk := v.NewTicker(10 * time.Millisecond)
+	defer tk.Stop()
+	ch := v.After(15 * time.Millisecond)
+	v.Advance(10 * time.Millisecond)
+	select {
+	case <-tk.C():
+	default:
+		t.Fatal("ticker did not fire")
+	}
+	select {
+	case <-ch:
+		t.Fatal("waiter fired early")
+	default:
+	}
+	v.Advance(5 * time.Millisecond)
+	select {
+	case <-ch:
+	default:
+		t.Fatal("waiter did not fire")
+	}
+	v.Advance(5 * time.Millisecond)
+	select {
+	case <-tk.C():
+	default:
+		t.Fatal("ticker did not fire after waiter")
+	}
+}
+
+func TestRealAfterFires(t *testing.T) {
+	var c Clock = Real{}
+	select {
+	case <-c.After(time.Millisecond):
+	case <-time.After(2 * time.Second):
+		t.Fatal("real After never fired")
+	}
+}
+
+func TestVirtualAfterConcurrentWithAdvance(t *testing.T) {
+	v := NewVirtual(time.Unix(0, 0))
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				_ = v.After(time.Millisecond)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				v.Advance(time.Millisecond)
+			}
+		}()
+	}
+	wg.Wait()
+	v.Advance(time.Second)
+	select {
+	case <-v.After(0):
+	default:
+		t.Fatal("zero duration must fire immediately")
+	}
+}

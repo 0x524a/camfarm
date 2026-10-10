@@ -21,6 +21,9 @@ type Ticker interface {
 type Clock interface {
 	Now() time.Time
 	NewTicker(d time.Duration) Ticker
+	// After returns a channel, buffered to one, that receives the time once d
+	// has elapsed on this clock. A d of zero or less fires immediately.
+	After(d time.Duration) <-chan time.Time
 }
 
 // Real is the wall clock.
@@ -32,6 +35,9 @@ func (Real) Now() time.Time { return time.Now() }
 // NewTicker returns a ticker backed by time.Ticker.
 func (Real) NewTicker(d time.Duration) Ticker { return &realTicker{t: time.NewTicker(d)} }
 
+// After is time.After.
+func (Real) After(d time.Duration) <-chan time.Time { return time.After(d) }
+
 type realTicker struct{ t *time.Ticker }
 
 func (r *realTicker) C() <-chan time.Time { return r.t.C }
@@ -42,6 +48,14 @@ type Virtual struct {
 	mu      sync.Mutex
 	now     time.Time
 	tickers []*virtualTicker
+	waiters []waiter
+}
+
+// waiter is a pending After: ch receives the virtual time once the clock
+// reaches at.
+type waiter struct {
+	at time.Time
+	ch chan time.Time
 }
 
 // NewVirtual returns a Virtual clock reading start.
@@ -71,6 +85,20 @@ func (v *Virtual) NewTicker(d time.Duration) Ticker {
 	return tk
 }
 
+// After returns a channel that receives once Advance carries the clock to or
+// past now+d. A d of zero or less fires immediately.
+func (v *Virtual) After(d time.Duration) <-chan time.Time {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	ch := make(chan time.Time, 1)
+	if d <= 0 {
+		ch <- v.now
+		return ch
+	}
+	v.waiters = append(v.waiters, waiter{at: v.now.Add(d), ch: ch})
+	return ch
+}
+
 // Advance moves the clock forward and delivers every tick that falls due.
 //
 // Delivery is non-blocking into a one-slot buffer, matching time.Ticker: a
@@ -90,6 +118,18 @@ func (v *Virtual) Advance(d time.Duration) {
 		}
 	}
 	v.now = target
+
+	// Fire and drop due waiters. Each channel has a one-slot buffer and a
+	// single send, so the send never blocks.
+	kept := v.waiters[:0]
+	for _, w := range v.waiters {
+		if w.at.After(target) {
+			kept = append(kept, w)
+			continue
+		}
+		w.ch <- target
+	}
+	v.waiters = kept
 }
 
 // stop marks tk stopped, holding the clock's lock so that a concurrent
