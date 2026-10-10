@@ -2,11 +2,13 @@ package onvif
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
-	"runtime"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -178,10 +180,24 @@ func TestDiscoveryRemoveUnknownDoesNotPanic(t *testing.T) {
 	}
 }
 
-func TestDiscoveryCloseStopsResponderAndLeaksNothing(t *testing.T) {
-	http.DefaultClient.CloseIdleConnections()
-	baseline := runtime.NumGoroutine()
+// closed reports whether ch is closed, without blocking.
+func closed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
 
+// responderOf returns the server's current responder state (nil if none).
+func responderOf(srv *Server) *responderState {
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+	return srv.responder
+}
+
+func TestDiscoveryCloseStopsResponderAndReleasesSocket(t *testing.T) {
 	srv, err := New(Config{Host: "127.0.0.1", Cameras: []CameraConfig{discoCam("a", 1)},
 		Discovery: &DiscoveryConfig{ListenAddr: "127.0.0.1:0"}})
 	if err != nil {
@@ -190,6 +206,7 @@ func TestDiscoveryCloseStopsResponderAndLeaksNothing(t *testing.T) {
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
 	}
+	st := responderOf(srv)
 	addr := srv.DiscoveryAddr()
 	if got := probe(t, addr); len(got) != 1 {
 		t.Fatalf("before Close found %d, want 1", len(got))
@@ -198,19 +215,225 @@ func TestDiscoveryCloseStopsResponderAndLeaksNothing(t *testing.T) {
 	srv.Close()
 	srv.Close() // idempotent
 
+	// Scoped to this server's responder, not a process-wide goroutine count
+	// that other parallel tests would disturb.
+	if !closed(st.done) {
+		t.Error("responder goroutine still running after Close returned")
+	}
 	if srv.DiscoveryAddr() != nil {
 		t.Error("DiscoveryAddr non-nil after Close")
 	}
 	if got := probe(t, addr); len(got) != 0 {
 		t.Errorf("after Close found %d devices, want none", len(got))
 	}
-
+	// The socket is released: the same UDP port can be bound again.
 	deadline := time.Now().Add(3 * time.Second)
-	for runtime.NumGoroutine() > baseline && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond) // bounded settle for net/http teardown, not for correctness
+	for {
+		c, err := net.ListenUDP("udp", addr.(*net.UDPAddr))
+		if err == nil {
+			_ = c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("discovery port still bound after Close: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if n := runtime.NumGoroutine(); n > baseline {
-		t.Errorf("goroutines = %d, baseline %d: responder or server leaked", n, baseline)
+}
+
+func TestConcurrentCloseWaitsForStop(t *testing.T) {
+	srv, err := New(Config{Host: "127.0.0.1", Cameras: []CameraConfig{discoCam("a", 1)},
+		Discovery: &DiscoveryConfig{ListenAddr: "127.0.0.1:0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	st := responderOf(srv)
+
+	const n = 8
+	gate := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-gate
+			srv.Close()
+			// Every caller, not just the first, returns only once stopped.
+			if !closed(st.done) {
+				t.Error("Close returned before the responder stopped")
+			}
+			if srv.Addr() != nil || srv.DiscoveryAddr() != nil {
+				t.Error("server still reports addresses after Close returned")
+			}
+		}()
+	}
+	close(gate)
+	wg.Wait()
+}
+
+// freeUDPAddr returns a loopback UDP address that was free a moment ago.
+func freeUDPAddr(t *testing.T) string {
+	t.Helper()
+	c := localUDP(t)
+	addr := c.LocalAddr().String()
+	_ = c.Close()
+	return addr
+}
+
+func TestCloseDuringStartAbortsCleanly(t *testing.T) {
+	addr := freeUDPAddr(t)
+	srv, err := New(Config{Host: "127.0.0.1", Cameras: []CameraConfig{discoCam("a", 1)},
+		Discovery: &DiscoveryConfig{ListenAddr: addr}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeDone := make(chan struct{})
+	srv.startWindowHook = func() {
+		go func() { srv.Close(); close(closeDone) }()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			srv.mu.RLock()
+			aborted := srv.startAborted
+			srv.mu.RUnlock()
+			if aborted {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Error("Close never registered itself against the in-flight Start")
+	}
+
+	if err := srv.Start(); err == nil {
+		t.Fatal("Start raced by Close: want an error, got success")
+	}
+	select {
+	case <-closeDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return")
+	}
+	if srv.Addr() != nil || srv.DiscoveryAddr() != nil || responderOf(srv) != nil {
+		t.Error("aborted Start left state behind")
+	}
+	// No leak: the discovery port is free again, and the server restarts.
+	c, err := net.ListenUDP("udp", mustUDPAddr(t, addr))
+	if err != nil {
+		t.Fatalf("discovery port still bound after aborted Start: %v", err)
+	}
+	_ = c.Close()
+	srv.startWindowHook = nil
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start after an aborted Start: %v", err)
+	}
+	srv.Close()
+}
+
+func mustUDPAddr(t *testing.T, s string) *net.UDPAddr {
+	t.Helper()
+	a, err := net.ResolveUDPAddr("udp", s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// Start and Close racing without a hook: whichever order wins, the server ends
+// up fully stopped and nothing deadlocks (run under -race).
+func TestStartCloseRaceLeavesNothingRunning(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		srv, err := New(Config{Host: "127.0.0.1", Cameras: []CameraConfig{discoCam("a", 1)},
+			Discovery: &DiscoveryConfig{ListenAddr: "127.0.0.1:0"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); _ = srv.Start() }()
+		go func() { defer wg.Done(); srv.Close() }()
+		wg.Wait()
+		st := responderOf(srv)
+		srv.Close()
+		if st != nil && !closed(st.done) {
+			t.Fatal("responder still running after Close")
+		}
+		if srv.Addr() != nil || srv.DiscoveryAddr() != nil {
+			t.Fatal("server not fully stopped")
+		}
+	}
+}
+
+// stubRegistrar fails Register on demand and records calls.
+type stubRegistrar struct {
+	failRegister bool
+	registered   []string
+	unregistered []string
+}
+
+func (r *stubRegistrar) Register(d *discovery.Device) error {
+	if r.failRegister {
+		return errors.New("stub: register failed")
+	}
+	r.registered = append(r.registered, d.EndpointRef)
+	return nil
+}
+func (r *stubRegistrar) Unregister(ref string) { r.unregistered = append(r.unregistered, ref) }
+func (r *stubRegistrar) Addr() net.Addr        { return nil }
+
+func TestAddCameraRollsBackWhenRegisterFails(t *testing.T) {
+	srv := startTestServer(t, discoCam("a", 1))
+	stub := &stubRegistrar{failRegister: true}
+	doneCh := make(chan struct{})
+	close(doneCh)
+	srv.mu.Lock()
+	srv.responder = &responderState{resp: stub, cancel: func() {}, done: doneCh, errCh: make(chan error, 1)}
+	srv.mu.Unlock()
+	t.Cleanup(func() {
+		srv.mu.Lock()
+		srv.responder = nil // the stub has no real responder to stop
+		srv.mu.Unlock()
+	})
+
+	if err := srv.AddCamera(discoCam("b", 2)); err == nil {
+		t.Fatal("AddCamera with a failing Register: want error")
+	}
+	if _, ok := srv.cameraByID("b"); ok {
+		t.Error("failed AddCamera left the camera in the fleet")
+	}
+	if srv.Endpoint("b") != "" {
+		t.Error("failed AddCamera left an endpoint")
+	}
+	if len(stub.unregistered) != 0 {
+		t.Errorf("nothing was registered, yet Unregister was called: %v", stub.unregistered)
+	}
+
+	// The ID is reusable afterwards: no stale state blocks a retry.
+	stub.failRegister = false
+	if err := srv.AddCamera(discoCam("b", 2)); err != nil {
+		t.Fatalf("retry AddCamera: %v", err)
+	}
+	if len(stub.registered) != 1 {
+		t.Errorf("registered = %v, want exactly the retried camera", stub.registered)
+	}
+}
+
+func TestBaseURLEscapesZoneAndID(t *testing.T) {
+	zoned := &net.TCPAddr{IP: net.ParseIP("fe80::1"), Port: 8080, Zone: "eth0"}
+	if got, want := baseURL(zoned, "cam"), "http://[fe80::1%25eth0]:8080/onvif/cam"; got != want {
+		t.Errorf("zoned baseURL = %q, want %q", got, want)
+	}
+	plain := &net.TCPAddr{IP: net.IPv4(192, 0, 2, 7), Port: 80}
+	if got, want := baseURL(plain, "a b%c"), "http://192.0.2.7:80/onvif/a%20b%25c"; got != want {
+		t.Errorf("escaped baseURL = %q, want %q", got, want)
+	}
+	// The result must parse back to the same host and zone.
+	u, err := url.Parse(baseURL(zoned, "cam"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Hostname() != "fe80::1%eth0" {
+		t.Errorf("parsed hostname = %q, want fe80::1%%eth0", u.Hostname())
 	}
 }
 
@@ -276,8 +499,17 @@ func TestDiscoveryProbeTypeFiltering(t *testing.T) {
 	}
 }
 
+// quietWindow is how long expectAnnounce listens after the expected datagrams
+// for a stray one. A duplicate is sent back to back with the original, so a
+// short window is enough to catch it; a miss can only hide a bug, never raise
+// a false failure.
+const quietWindow = 250 * time.Millisecond
+
 // expectAnnounce reads datagrams from conn until every ref has been seen with
-// the given action URI, failing on timeout.
+// the given action URI, failing on timeout. It fails on a second datagram for
+// a ref already seen, on a datagram for any other ref or action, and on any
+// datagram arriving in the quiet window afterwards, so each phase must be
+// exactly one announcement per ref.
 func expectAnnounce(t *testing.T, conn *net.UDPConn, action string, refs ...string) {
 	t.Helper()
 	want := make(map[string]bool, len(refs))
@@ -295,11 +527,64 @@ func expectAnnounce(t *testing.T, conn *net.UDPConn, action string, refs ...stri
 		if !strings.Contains(msg, "<a:Action>"+action+"</a:Action>") {
 			t.Fatalf("expected %s, got: %s", action, msg)
 		}
-		for r := range want {
+		matched := false
+		for _, r := range refs {
 			if strings.Contains(msg, "<a:Address>"+r+"</a:Address>") {
+				if !want[r] {
+					t.Fatalf("duplicate %s for %s", action, r)
+				}
 				delete(want, r)
+				matched = true
 			}
 		}
+		if !matched {
+			t.Fatalf("%s for an unexpected ref: %s", action, msg)
+		}
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(quietWindow))
+	if n, _, err := conn.ReadFromUDP(buf); err == nil {
+		t.Fatalf("extra datagram after %s of %v: %s", action, refs, buf[:n])
+	}
+}
+
+// A camera added while Start is bringing the responder up must still be
+// announced exactly once: the responder's own startup Hello and Register's
+// Hello must not both cover it.
+func TestDiscoveryAddDuringStartAnnouncesOnce(t *testing.T) {
+	sink := localUDP(t)
+	refOf := func(n int64) string { return "urn:uuid:" + EndpointUUID(seed.Seed(n)) }
+
+	srv, err := New(Config{Host: "127.0.0.1", Cameras: []CameraConfig{discoCam("a", 1), discoCam("b", 2)},
+		Discovery: &DiscoveryConfig{ListenAddr: "127.0.0.1:0", AnnounceAddr: sink.LocalAddr().String()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addErr := make(chan error, 1)
+	srv.startWindowHook = func() {
+		// Fires inside the window, so AddCamera must wait it out.
+		go func() { addErr <- srv.AddCamera(discoCam("c", 3)) }()
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	select {
+	case err := <-addErr:
+		if err != nil {
+			t.Fatalf("AddCamera during Start: %v", err)
+		}
+	case <-time.After(readWindow):
+		t.Fatal("AddCamera never completed")
+	}
+
+	// Exactly one Hello each for the startup pair, then exactly one for c.
+	// The two phases cannot be told apart on the wire, so check the union.
+	expectAnnounce(t, sink, actionHelloURI, refOf(1), refOf(2), refOf(3))
+	if _, ok := srv.cameraByID("c"); !ok {
+		t.Fatal("camera c missing")
+	}
+	if got := probe(t, srv.DiscoveryAddr()); len(got) != 3 {
+		t.Errorf("found %d devices, want 3", len(got))
 	}
 }
 

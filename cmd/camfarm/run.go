@@ -145,12 +145,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 
 	_, _ = fmt.Fprintln(stderr, fleet.ReplayLine())
 	if a := fleet.DiscoveryAddr(); a != "" {
-		if d := spec.Listen.Discovery; d != nil && d.Mode == camfarm.DiscoveryMulticast {
-			// The bound socket is 0.0.0.0:3702; the group is what matters.
-			_, _ = fmt.Fprintln(stdout, "discovery: udp://239.255.255.250:3702 (multicast)")
-		} else {
-			_, _ = fmt.Fprintf(stdout, "discovery: udp://%s\n", a)
-		}
+		d := spec.Listen.Discovery
+		_, _ = fmt.Fprintln(stdout, discoveryLine(d != nil && d.Mode == camfarm.DiscoveryMulticast, a))
 	}
 	if host, _, err := net.SplitHostPort(ln.Addr().String()); err == nil {
 		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
@@ -196,6 +192,20 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 // into spec.Listen.Discovery. Empty values leave the spec alone, so a flag
 // overrides a spec file only when given. The wildcard and loopback host rules
 // are camfarm's own validation, applied at Start.
+// wsDiscoveryGroup is the WS-Discovery multicast group and port. onvif-go keeps
+// the same value in an unexported constant, so it cannot be imported.
+const wsDiscoveryGroup = "239.255.255.250:3702"
+
+// discoveryLine is the startup line naming where discovery listens. In
+// multicast mode the bound socket is 0.0.0.0:3702, but the group is what a
+// reader needs; in unicast mode it is the bound address.
+func discoveryLine(multicast bool, boundAddr string) string {
+	if multicast {
+		return "discovery: udp://" + wsDiscoveryGroup + " (multicast)"
+	}
+	return "discovery: udp://" + boundAddr
+}
+
 func applyDiscovery(spec *camfarm.Spec, mode, iface string) error {
 	const forms = `--discovery must be "multicast" or "unicast:HOST:PORT"`
 	switch {

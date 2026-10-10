@@ -126,6 +126,15 @@ func TestRunDiscoveryFlagErrors(t *testing.T) {
 	}
 }
 
+func TestDiscoveryLine(t *testing.T) {
+	if got, want := discoveryLine(true, "0.0.0.0:3702"), "discovery: udp://239.255.255.250:3702 (multicast)"; got != want {
+		t.Errorf("multicast line = %q, want %q", got, want)
+	}
+	if got, want := discoveryLine(false, "127.0.0.1:41234"), "discovery: udp://127.0.0.1:41234"; got != want {
+		t.Errorf("unicast line = %q, want %q", got, want)
+	}
+}
+
 func TestHelpMentionsDiscoveryCaveats(t *testing.T) {
 	var out, errb bytes.Buffer
 	_ = run(context.Background(), []string{"--help"}, &out, &errb)

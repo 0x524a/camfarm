@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/0x524a/camfarm/internal/fault"
 	"github.com/0x524a/camfarm/internal/media"
@@ -283,8 +284,11 @@ func validateCameraSpec(c CameraSpec, seen map[string]bool) (CameraSpec, error) 
 	if c.ID == "" {
 		return c, fmt.Errorf("%w: camera has an empty ID", ErrInvalidSpec)
 	}
-	if strings.ContainsAny(c.ID, "/?# ") {
-		return c, fmt.Errorf("%w: camera ID %q contains a character reserved in a URL path", ErrInvalidSpec, c.ID)
+	// The ID is embedded unescaped in RTSP paths and ONVIF URLs. '%' would
+	// read as an escape, and tabs or other control characters corrupt both
+	// the URL and the space-separated XAddrs list in WS-Discovery messages.
+	if strings.ContainsAny(c.ID, "/\\?#% ") || strings.IndexFunc(c.ID, unicode.IsControl) >= 0 {
+		return c, fmt.Errorf("%w: camera ID %q contains a character that is unsafe in a URL path", ErrInvalidSpec, c.ID)
 	}
 	if seen[c.ID] {
 		return c, fmt.Errorf("%w: %q", ErrDuplicateCamera, c.ID)

@@ -684,6 +684,10 @@ func TestSentinelErrors(t *testing.T) {
 	for name, cs := range map[string]CameraSpec{
 		"empty id":   {ID: ""},
 		"slash":      {ID: "a/b"},
+		"percent":    {ID: "a%20b"},
+		"tab":        {ID: "a\tb"},
+		"newline":    {ID: "a\nb"},
+		"backslash":  {ID: `a\b`},
 		"half auth":  {ID: "x", Auth: AuthSpec{Username: "u"}},
 		"bad source": {ID: "y", Source: SourceSpec{Kind: "nonsense"}},
 		"bad fault":  {ID: "z", Faults: []FaultSpec{{Kind: "nope", Rate: 1}}},
