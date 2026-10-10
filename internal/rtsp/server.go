@@ -676,8 +676,9 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 	// The teardown draw is taken on every PLAY, errored or not, so an rtsp_error
 	// cannot shift the teardown sequence; an errored PLAY discards the arming.
 	res := s.answerError(fault.MethodPlay, id, d)
-	// armMu spans the draw and the arming so a concurrent SetFaults (which swaps
-	// the engine and disarms under the same lock) cannot slip between them.
+	// armMu spans the teardown draw (ArmPlay) and the arming so a concurrent
+	// SetFaults (which swaps the engine and disarms under the same lock) cannot
+	// slip between them. The request-level Decide above runs before the lock.
 	s.armMu.Lock()
 	a := ctl.ArmPlay()
 	if res == nil && a != nil {
