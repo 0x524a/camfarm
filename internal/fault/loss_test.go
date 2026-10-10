@@ -180,3 +180,31 @@ func TestPacketLossDoesNotShiftFrameDrop(t *testing.T) {
 		t.Fatal("adding packet_loss moved frame_drop decisions")
 	}
 }
+
+// Burst mode draws exactly once per packet, so splitting the same packets into
+// differently sized frames yields the same hit sequence.
+func TestBurstModeConsumesOneDrawPerPacket(t *testing.T) {
+	spec := Spec{Kind: KindPacketLoss, Rate: 0.2, MeanBurst: 3}
+	const a, b = 3, 5
+	split, err := New(seed.Seed(5), []Spec{spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined, _ := New(seed.Seed(5), []Spec{spec})
+	for i := 0; i < 500; i++ {
+		var got []int
+		for _, d := range split.DecidePackets(0, a, false) {
+			got = append(got, d.Index)
+		}
+		for _, d := range split.DecidePackets(0, b, false) {
+			got = append(got, a+d.Index)
+		}
+		var want []int
+		for _, d := range joined.DecidePackets(0, a+b, false) {
+			want = append(want, d.Index)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("round %d: split frames hit %v, one frame hit %v", i, got, want)
+		}
+	}
+}

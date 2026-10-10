@@ -183,11 +183,11 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
     return el("button", { class: "copy secondary", type: "button", text: "Copy", "data-copy": value, "aria-label": "Copy " + what });
   }
 
-  function urlLine(label, value, cls) {
+  function urlLine(label, value, cls, copyLabel) {
     return el("div", { class: "row" }, [
       el("span", { text: label }),
       el("code", { class: cls, "data-testid": cls, text: value }),
-      copyButton(value, label + " URL")
+      copyButton(value, copyLabel || (label + " URL"))
     ]);
   }
 
@@ -298,7 +298,7 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
     var urls = el("td", {}, [
       urlLine("RTSP", c.rtspUrl, "cell-rtsp"),
       urlLine("ONVIF", c.onvifEndpoint, "cell-onvif"),
-      urlLine("UUID", c.onvifUuid, "cell-uuid")
+      urlLine("UUID", c.onvifUuid, "cell-uuid", "UUID")
     ]);
     if (c.username) {
       urls.appendChild(el("div", { class: "row" }, [el("span", { text: "Auth" }), el("code", { text: c.username + " / " + c.password })]));

@@ -66,7 +66,9 @@ type Stats struct {
 	FramesServed uint64
 	// LoopsCompleted counts completed passes over the source media.
 	LoopsCompleted uint64
-	// FaultsFired counts fault decisions that have fired for this camera.
+	// FaultsFired counts fault decisions that have fired for this camera. For
+	// packet_loss it counts frames that had loss, not packets; use FaultCounts
+	// for packet counts.
 	FaultsFired uint64
 	// FaultCounts tallies each fault kind's effects: frames dropped, packets
 	// or keyframes withheld (Applied) and decisions spared by
@@ -594,9 +596,10 @@ func (c *Camera) Faults() []FaultSpec {
 // same kind. The change takes effect at the camera's next frame boundary.
 // Only implemented kinds are accepted; the rest return ErrUnsupported.
 //
-// Each injection rebuilds the camera's fault engines from the camera seed, so
-// every fault's random stream restarts at its first draw rather than
-// continuing. A replay must restart streams at each journaled inject or clear.
+// Any inject or clear rebuilds all of the camera's fault engines from the
+// camera seed, so every fault's random stream restarts at its first draw and
+// keyframe_starvation's keyframe counter restarts too (the next keyframe counts
+// as the first and is delivered), including faults the call did not touch. A replay must restart streams at each journaled inject or clear.
 func (c *Camera) Inject(f FaultSpec) error {
 	if err := validateFault(f); err != nil {
 		return err

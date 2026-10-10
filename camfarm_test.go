@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -787,6 +788,48 @@ func TestStatsFaultCountsReportPerKindEffects(t *testing.T) {
 	waitUntil(t, "drops to be tallied", func() bool {
 		return cam.Stats().FaultCounts["frame_drop"].Applied >= 3
 	})
+}
+
+func TestStatsFaultCountsSuppressedIsPopulated(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, _ := f.Camera("front-door")
+	if err := cam.Inject(FaultSpec{Kind: "frame_drop", Rate: 1, ProtectKeyframes: true}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "a suppressed drop to be tallied", func() bool {
+		return cam.Stats().FaultCounts["frame_drop"].Suppressed >= 1
+	})
+}
+
+func TestValidateFaultOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		f    FaultSpec
+		want error
+	}{
+		{"NaN rate", FaultSpec{Kind: "frame_drop", Rate: math.NaN()}, ErrInvalidSpec},
+		{"NaN rate on unsupported kind", FaultSpec{Kind: "accept_then_silence", Rate: math.NaN()}, ErrInvalidSpec},
+		{"unsupported kind with bad param", FaultSpec{Kind: "accept_then_silence", Rate: 0.5, KeepEvery: -3}, ErrUnsupported},
+		{"unknown kind", FaultSpec{Kind: "nope", Rate: 0.5}, ErrInvalidSpec},
+		{"implemented kind, out-of-range param", FaultSpec{Kind: "keyframe_starvation", KeepEvery: 5000}, ErrInvalidSpec},
+	}
+	for _, c := range cases {
+		err := validateFault(c.f)
+		if !errors.Is(err, c.want) {
+			t.Errorf("%s: err = %v, want %v", c.name, err, c.want)
+		}
+		if c.want == ErrInvalidSpec && errors.Is(err, ErrUnsupported) {
+			t.Errorf("%s: wrongly classed as unsupported: %v", c.name, err)
+		}
+	}
+}
+
+func TestSpecRefusesRepeatedFaultKindPerCamera(t *testing.T) {
+	s := minimalSpec()
+	s.Cameras[0].Faults = []FaultSpec{{Kind: "frame_drop", Rate: 0.1}, {Kind: "frame_drop", Rate: 0.2}}
+	if _, err := Start(context.Background(), s); !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("err = %v, want ErrInvalidSpec", err)
+	}
 }
 
 func TestCameraONVIFUUIDIsStableAndDistinct(t *testing.T) {

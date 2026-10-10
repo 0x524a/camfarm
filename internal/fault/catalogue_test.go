@@ -6,6 +6,8 @@ import (
 	"math"
 	"strings"
 	"testing"
+
+	"github.com/0x524a/camfarm/internal/seed"
 )
 
 func TestCatalogueMatchesKnownKinds(t *testing.T) {
@@ -152,5 +154,35 @@ func TestValidate(t *testing.T) {
 				t.Fatalf("Validate = %v, want errors.Is %v", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestBoundsTextOnlyFormatsDeclaredBounds(t *testing.T) {
+	one := 1.0
+	if got := boundsText(Param{Min: &one}); got != "[1, no upper bound)" {
+		t.Errorf("min only: %q", got)
+	}
+	if got := boundsText(Param{Max: &one}); got != "(no lower bound, 1]" {
+		t.Errorf("max only: %q", got)
+	}
+	if got := boundsText(Param{Min: &one, Max: &one}); got != "[1, 1]" {
+		t.Errorf("both: %q", got)
+	}
+	if got := boundsText(Param{}); got == "" {
+		t.Error("neither: empty")
+	}
+}
+
+func TestValidateOutOfRangeReportsBounds(t *testing.T) {
+	err := Validate(Spec{Kind: KindPacketLoss, Rate: 0.1, MeanBurst: 2000})
+	if !errors.Is(err, ErrBadParam) || !strings.Contains(err.Error(), "[1, 1000]") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestNewRefusesRepeatedKind(t *testing.T) {
+	_, err := New(seed.Seed(1), []Spec{{Kind: KindFrameDrop, Rate: 0.1}, {Kind: KindFrameDrop, Rate: 0.2}})
+	if !errors.Is(err, ErrDuplicateKind) {
+		t.Fatalf("err = %v, want ErrDuplicateKind", err)
 	}
 }

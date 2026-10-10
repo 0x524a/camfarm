@@ -1,12 +1,8 @@
 // Package fault decides, deterministically, when a camera should misbehave.
 //
-// It decides only. In this version no decision changes a byte on the wire: the
-// seam exists so that the code paths carrying media and control responses are
-// written with an interception point from the start, because a seam added later
-// would not be reachable from paths built without one.
-//
-// Every decision is a pure function of the camera's seed and the frame counter.
-// Nothing here consults wall-clock time, goroutine order, or map iteration
+// It decides only; callers apply the effects. Every decision is a pure function
+// of the camera's seed and a position counter: the frame counter for frame-level
+// kinds, and the packet index (DecidePackets) for packet_loss. Nothing here consults wall-clock time, goroutine order, or map iteration
 // order.
 package fault
 
@@ -22,7 +18,7 @@ import (
 // architecture design, section 7.
 type Kind string
 
-// The catalogued faults. Only the decision half of each exists in this version.
+// The catalogued faults. See Implemented for which have an effect today.
 const (
 	// KindFrameDrop drops access units at a rate. Reproduces decoders and
 	// trackers that assume contiguous frames.
@@ -49,6 +45,8 @@ const (
 var (
 	ErrUnknownKind = errors.New("fault: unknown kind")
 	ErrBadRate     = errors.New("fault: rate must be in [0,1]")
+	// ErrDuplicateKind reports a kind named twice for one camera.
+	ErrDuplicateKind = errors.New("fault: kind repeated")
 )
 
 // knownKinds is the catalogue. Membership here means the kind can be named and
@@ -76,7 +74,8 @@ func Implemented(kind Kind) bool {
 // Spec configures one fault.
 type Spec struct {
 	Kind Kind
-	// Rate is the per-frame probability for rate-based kinds, in [0,1].
+	// Rate is the probability in [0,1] that the fault fires: per frame for
+	// frame_drop, per packet for packet_loss.
 	Rate float64
 	// ProtectKeyframes, for frame_drop, suppresses a drop that would remove a
 	// random-access access unit. The draw is still consumed, so the sequence
@@ -125,10 +124,17 @@ type entry struct {
 // byte-identical.
 func New(s seed.Seed, specs []Spec) (*Engine, error) {
 	e := &Engine{}
+	seen := map[Kind]bool{}
 	for _, sp := range specs {
 		if !knownKinds[sp.Kind] {
 			return nil, fmt.Errorf("%w: %q", ErrUnknownKind, sp.Kind)
 		}
+		if seen[sp.Kind] {
+			return nil, fmt.Errorf("%w: %q", ErrDuplicateKind, sp.Kind)
+		}
+		seen[sp.Kind] = true
+		// Validate skips parameter checks for unimplemented kinds, so the rate
+		// range is checked here too, to refuse a bad rate on any kind.
 		if sp.Rate < 0 || sp.Rate > 1 {
 			return nil, fmt.Errorf("%w: %v for %q", ErrBadRate, sp.Rate, sp.Kind)
 		}
@@ -209,7 +215,9 @@ type PacketDecision struct {
 // that was never encoded has no packets and consumes no draws.
 //
 // Exactly one draw is consumed per packet, unconditionally, so the sequence
-// depends only on the packet count so far, never on earlier outcomes.
+// depends only on the packet count so far, never on earlier outcomes. The first
+// parameter (the frame index) is unused: decisions are keyed on packets drawn,
+// not on frames.
 func (e *Engine) DecidePackets(_, count int, randomAccess bool) []PacketDecision {
 	var out []PacketDecision
 	for i := range e.entries {

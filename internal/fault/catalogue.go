@@ -77,7 +77,7 @@ func Catalogue() []KindInfo {
 			Clock:  "packet index within the encoded frames; one draw per packet",
 			Params: []Param{
 				lossRate,
-				{Name: "meanBurst", Type: ParamNumber, Min: f64(1), Max: f64(1000), Default: 0.0,
+				{Name: "meanBurst", Type: ParamNumber, Min: f64(1), Max: f64(1000),
 					Help: "Omit or 0 for independent loss. Above 1, loss comes in bursts of this mean length in packets (rate must then be below meanBurst/(1+meanBurst))."},
 				lossProtect,
 			},
@@ -128,6 +128,19 @@ func (s Spec) param(name string) (v float64, set bool) {
 	return 0, false
 }
 
+// boundsText formats only the bounds a parameter declares.
+func boundsText(p Param) string {
+	switch {
+	case p.Min != nil && p.Max != nil:
+		return fmt.Sprintf("[%v, %v]", *p.Min, *p.Max)
+	case p.Min != nil:
+		return fmt.Sprintf("[%v, no upper bound)", *p.Min)
+	case p.Max != nil:
+		return fmt.Sprintf("(no lower bound, %v]", *p.Max)
+	}
+	return "its range"
+}
+
 // Validate checks a spec against the catalogue. Unimplemented kinds are not
 // parameter-checked: they are refused as unsupported before parameters matter.
 func Validate(s Spec) error {
@@ -163,7 +176,7 @@ func Validate(s Spec) error {
 			if name == "rate" {
 				return fmt.Errorf("%w: %v for %q", ErrBadRate, v, s.Kind)
 			}
-			return fmt.Errorf("%w: %q = %v for %q is outside [%v, %v]", ErrBadParam, name, v, s.Kind, *p.Min, *p.Max)
+			return fmt.Errorf("%w: %q = %v for %q is outside %s", ErrBadParam, name, v, s.Kind, boundsText(p))
 		}
 	}
 	if s.Kind == KindPacketLoss && s.MeanBurst != 0 {

@@ -201,10 +201,15 @@ func validateCameraSpec(c CameraSpec, seen map[string]bool) (CameraSpec, error) 
 		}
 	}
 
+	kinds := map[string]bool{}
 	for _, f := range c.Faults {
 		if err := validateFault(f); err != nil {
 			return c, fmt.Errorf("camera %q: %w", c.ID, err)
 		}
+		if kinds[f.Kind] {
+			return c, fmt.Errorf("%w: camera %q repeats fault kind %q; inject replaces per kind, so a spec may name each once", ErrInvalidSpec, c.ID, f.Kind)
+		}
+		kinds[f.Kind] = true
 	}
 
 	if (c.Auth.Username == "") != (c.Auth.Password == "") {
