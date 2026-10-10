@@ -20,7 +20,7 @@ func TestCountersPerCamera(t *testing.T) {
 	if got := r.Counters("b"); got.FramesServed != 1 || got.LoopsCompleted != 0 || got.FaultsFired != 1 {
 		t.Errorf("camera b: %+v", got)
 	}
-	if got := r.Counters("unknown"); got != (Counters{}) {
+	if got := r.Counters("unknown"); got.FramesServed != 0 || got.LoopsCompleted != 0 || got.FaultsFired != 0 || len(got.ByKind) != 0 {
 		t.Errorf("unknown camera: %+v, want zero", got)
 	}
 }
@@ -124,5 +124,40 @@ func TestConcurrentUse(t *testing.T) {
 	wg.Wait()
 	if got := r.Counters("a").FramesServed; got != 800 {
 		t.Fatalf("FramesServed = %d, want 800", got)
+	}
+}
+
+func TestFaultTallyCountsPerKindPerCamera(t *testing.T) {
+	r := New(10)
+	r.FaultTally("a", "frame_drop", 2, 1)
+	r.FaultTally("a", "frame_drop", 3, 0)
+	r.FaultTally("a", "packet_loss", 7, 4)
+	r.FaultTally("b", "frame_drop", 1, 0)
+
+	got := r.Counters("a").ByKind
+	if got["frame_drop"] != (KindCount{Applied: 5, Suppressed: 1}) {
+		t.Errorf("a/frame_drop = %+v", got["frame_drop"])
+	}
+	if got["packet_loss"] != (KindCount{Applied: 7, Suppressed: 4}) {
+		t.Errorf("a/packet_loss = %+v", got["packet_loss"])
+	}
+	if r.Counters("b").ByKind["frame_drop"] != (KindCount{Applied: 1}) {
+		t.Errorf("b/frame_drop = %+v", r.Counters("b").ByKind["frame_drop"])
+	}
+	if r.Counters("a").FaultsFired != 0 {
+		t.Error("FaultTally must not change FaultsFired")
+	}
+}
+
+func TestCountersByKindIsNeverNilAndIsACopy(t *testing.T) {
+	r := New(10)
+	if r.Counters("nobody").ByKind == nil {
+		t.Fatal("ByKind is nil for an unknown camera")
+	}
+	r.FaultTally("a", "frame_drop", 1, 0)
+	snap := r.Counters("a")
+	snap.ByKind["frame_drop"] = KindCount{Applied: 999}
+	if r.Counters("a").ByKind["frame_drop"].Applied != 1 {
+		t.Fatal("mutating a snapshot changed the recorder")
 	}
 }
