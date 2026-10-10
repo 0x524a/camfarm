@@ -414,3 +414,35 @@ func TestE2EFleetChangeAppearsWithoutReloadOrPoll(t *testing.T) {
 	}
 	s.requireClean(t)
 }
+
+// Camera ids are user-supplied and validation accepts any id without '/?# '.
+// Ids that collide with Object.prototype names must render and be removable
+// like any other row, and must not stop the rest of the table updating.
+func TestE2EPrototypeNamedCameraIDsRenderAndRemove(t *testing.T) {
+	url, _ := e2eServer(t)
+	s := newSession(t)
+	s.open(t, url)
+	for _, id := range []string{"constructor", "__proto__", "toString"} {
+		if err := s.page.Locator("#add-id").Fill(id); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.page.Locator("#add-submit").Click(); err != nil {
+			t.Fatal(err)
+		}
+		if err := expect().Locator(s.row(id)).ToBeVisible(); err != nil {
+			t.Fatalf("camera %q did not appear: %v", id, err)
+		}
+	}
+	for _, id := range []string{"__proto__", "constructor", "toString"} {
+		if err := s.row(id).Locator(".btn-remove").Click(); err != nil {
+			t.Fatal(err)
+		}
+		if err := expect().Locator(s.row(id)).ToHaveCount(0); err != nil {
+			t.Fatalf("camera %q still shown after removal: %v", id, err)
+		}
+	}
+	if err := expect().Locator(s.row("front-door")).ToBeVisible(); err != nil {
+		t.Fatalf("the original camera disappeared: %v", err)
+	}
+	s.requireClean(t)
+}

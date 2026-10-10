@@ -148,6 +148,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	srv := &http.Server{
 		Handler:           dashboard.Handler(fleet, dashboard.Options{}),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second, // bounds slow request bodies; SSE is response-only
+		IdleTimeout:       60 * time.Second,
 		BaseContext:       func(net.Listener) context.Context { return bctx },
 	}
 	srv.RegisterOnShutdown(bcancel)

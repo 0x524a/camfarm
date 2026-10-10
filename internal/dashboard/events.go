@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/0x524a/camfarm"
 )
@@ -26,8 +27,7 @@ func (s *server) getFleet(w http.ResponseWriter, _ *http.Request) {
 // behind is dropped by the fleet and sees the stream end; it reconnects and
 // re-lists, which is why nothing is replayed.
 func (s *server) events(w http.ResponseWriter, r *http.Request) {
-	fl, ok := w.(http.Flusher)
-	if !ok {
+	if _, ok := w.(http.Flusher); !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
@@ -38,8 +38,21 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 	h.Set("Cache-Control", "no-store")
 	h.Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprint(w, ": connected\n\n")
-	fl.Flush()
+
+	// Each write gets its own deadline, so a client that stops reading while its
+	// connection stays open cannot pin this goroutine (and Shutdown) forever.
+	// A server-wide WriteTimeout would instead kill every healthy stream.
+	rc := http.NewResponseController(w)
+	send := func(format string, args ...any) bool {
+		_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+		if _, err := fmt.Fprintf(w, format, args...); err != nil {
+			return false
+		}
+		return rc.Flush() == nil
+	}
+	if !send(": connected\n\n") {
+		return
+	}
 
 	for {
 		select {
@@ -53,8 +66,12 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, b)
-			fl.Flush()
+			if !send("event: %s\ndata: %s\n\n", ev.Type, b) {
+				return
+			}
 		}
 	}
 }
+
+// sseWriteTimeout bounds one SSE write to a client.
+const sseWriteTimeout = 10 * time.Second
