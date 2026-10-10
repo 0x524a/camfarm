@@ -179,7 +179,7 @@ func (p *Pump) Step() error {
 
 	// The fault seam. Decisions are recorded; none of them changes what is
 	// written in this version.
-	for _, d := range p.faults.DecideFrame(p.frameCounter) {
+	for _, d := range p.faults.DecideFrame(p.frameCounter, au.RandomAccess) {
 		p.obs.Fault(p.id, d.FrameIndex, string(d.Kind), detailDecidedNotApplied)
 	}
 
