@@ -145,7 +145,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 
 	_, _ = fmt.Fprintln(stderr, fleet.ReplayLine())
 	if a := fleet.DiscoveryAddr(); a != "" {
-		_, _ = fmt.Fprintf(stdout, "discovery: udp://%s\n", a)
+		if d := spec.Listen.Discovery; d != nil && d.Mode == camfarm.DiscoveryMulticast {
+			// The bound socket is 0.0.0.0:3702; the group is what matters.
+			_, _ = fmt.Fprintln(stdout, "discovery: udp://239.255.255.250:3702 (multicast)")
+		} else {
+			_, _ = fmt.Fprintf(stdout, "discovery: udp://%s\n", a)
+		}
 	}
 	if host, _, err := net.SplitHostPort(ln.Addr().String()); err == nil {
 		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
@@ -199,12 +204,10 @@ func applyDiscovery(spec *camfarm.Spec, mode, iface string) error {
 		spec.Listen.Discovery = &camfarm.DiscoverySpec{Mode: camfarm.DiscoveryMulticast}
 	case strings.HasPrefix(mode, camfarm.DiscoveryUnicast+":"):
 		addr := strings.TrimPrefix(mode, camfarm.DiscoveryUnicast+":")
-		host, port, err := net.SplitHostPort(addr)
+		// An empty host binds all interfaces, as in the spec's addr field.
+		_, port, err := net.SplitHostPort(addr)
 		if err != nil {
 			return fmt.Errorf("invalid --discovery %q: %w; %s", mode, err, forms)
-		}
-		if host == "" {
-			return fmt.Errorf("invalid --discovery %q: missing host; %s", mode, forms)
 		}
 		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
 			return fmt.Errorf("invalid --discovery %q: port %q is not a number from 0 to 65535; %s", mode, port, forms)
