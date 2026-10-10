@@ -154,8 +154,9 @@ func TestLoopContinuesTimestamps(t *testing.T) {
 // A catalogued fault whose effect does not exist yet is decided and recorded,
 // and changes nothing on the wire.
 func TestUnimplementedFaultIsRecordedButNotApplied(t *testing.T) {
+	t.Skip("no unimplemented kind is frame-decided any more (keyframe_starvation now needs KeepEvery); the slice A plan replaces this test")
 	rec := obs.New(1000)
-	p, w := newTestPump(t, seed.Seed(5), []fault.Spec{{Kind: fault.KindKeyframeStarvation, Rate: 1}}, rec)
+	p, w := newTestPump(t, seed.Seed(5), []fault.Spec{{Kind: fault.KindTeardownMidSession, Rate: 1}}, rec)
 
 	const frames = 5
 	for i := 0; i < frames; i++ {

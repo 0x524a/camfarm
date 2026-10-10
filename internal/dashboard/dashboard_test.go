@@ -255,7 +255,7 @@ func TestInjectAndClearFaultOverHTTP(t *testing.T) {
 	if got := cam.Faults(); len(got) != 1 || !got[0].ProtectKeyframes {
 		t.Fatalf("Faults() = %+v", got)
 	}
-	if resp = do(t, "POST", ts.URL+"/api/v1/cameras/front-door/faults", `{"kind":"keyframe_starvation","rate":1}`); resp.StatusCode != 422 {
+	if resp = do(t, "POST", ts.URL+"/api/v1/cameras/front-door/faults", `{"kind":"accept_then_silence","rate":1}`); resp.StatusCode != 422 {
 		t.Errorf("unsupported kind status = %d, want 422", resp.StatusCode)
 	}
 	if resp = do(t, "POST", ts.URL+"/api/v1/cameras/nope/faults", `{"kind":"frame_drop","rate":1}`); resp.StatusCode != 404 {

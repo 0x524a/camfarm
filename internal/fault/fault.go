@@ -27,6 +27,10 @@ const (
 	// KindFrameDrop drops access units at a rate. Reproduces decoders and
 	// trackers that assume contiguous frames.
 	KindFrameDrop Kind = "frame_drop"
+	// KindPacketLoss withholds individual RTP packets of an encoded frame,
+	// leaving real sequence-number gaps with honest timestamps. Reproduces
+	// lossy links and receivers that mishandle gaps.
+	KindPacketLoss Kind = "packet_loss"
 	// KindKeyframeStarvation withholds IDRs, so a client joining mid-stream
 	// never gets one. The "works on camera restart, breaks on reconnect" bug.
 	KindKeyframeStarvation Kind = "keyframe_starvation"
@@ -51,6 +55,7 @@ var (
 // decided, not that its effect is implemented.
 var knownKinds = map[Kind]bool{
 	KindFrameDrop:          true,
+	KindPacketLoss:         true,
 	KindKeyframeStarvation: true,
 	KindTeardownMidSession: true,
 	KindAcceptThenSilence:  true,
@@ -63,7 +68,10 @@ func Known(kind Kind) bool { return knownKinds[kind] }
 
 // Implemented reports whether a kind's effect exists in this version. Only
 // implemented kinds are accepted by the public API; the rest stay refused.
-func Implemented(kind Kind) bool { return kind == KindFrameDrop }
+func Implemented(kind Kind) bool {
+	info, ok := Info(kind)
+	return ok && info.Implemented
+}
 
 // Spec configures one fault.
 type Spec struct {
@@ -74,6 +82,13 @@ type Spec struct {
 	// random-access access unit. The draw is still consumed, so the sequence
 	// does not depend on which frames happen to be keyframes.
 	ProtectKeyframes bool
+	// MeanBurst, for packet_loss, selects burst loss when greater than 1: the
+	// mean length, in packets, of a run of consecutive losses. Zero means
+	// independent loss.
+	MeanBurst float64
+	// KeepEvery, for keyframe_starvation, delivers only every Nth
+	// random-access access unit (the first is always delivered).
+	KeepEvery int
 }
 
 // Decision is a fault that fired.
@@ -109,6 +124,9 @@ func New(s seed.Seed, specs []Spec) (*Engine, error) {
 		}
 		if sp.Rate < 0 || sp.Rate > 1 {
 			return nil, fmt.Errorf("%w: %v for %q", ErrBadRate, sp.Rate, sp.Kind)
+		}
+		if err := Validate(sp); err != nil {
+			return nil, err
 		}
 		e.entries = append(e.entries, entry{
 			spec: sp,

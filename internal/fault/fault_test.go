@@ -89,7 +89,8 @@ func TestAddingAKindDoesNotShiftAnother(t *testing.T) {
 	base := []Spec{{Kind: KindFrameDrop, Rate: 0.4}}
 	extended := []Spec{
 		{Kind: KindFrameDrop, Rate: 0.4},
-		{Kind: KindKeyframeStarvation, Rate: 0.4},
+		{Kind: KindKeyframeStarvation, KeepEvery: 3},
+		{Kind: KindPacketLoss, Rate: 0.4},
 	}
 
 	dropsFrom := func(specs []Spec) []int {
@@ -228,10 +229,12 @@ func TestProtectKeyframesDoesNotChangeTheDrawSequence(t *testing.T) {
 }
 
 func TestImplemented(t *testing.T) {
-	if !Implemented(KindFrameDrop) {
-		t.Error("frame_drop should be implemented")
+	for _, k := range []Kind{KindFrameDrop, KindPacketLoss, KindKeyframeStarvation} {
+		if !Implemented(k) {
+			t.Errorf("%s should be implemented", k)
+		}
 	}
-	for _, k := range []Kind{KindKeyframeStarvation, KindTeardownMidSession, KindAcceptThenSilence, KindSDPCodecLie, KindSPSResolutionLie} {
+	for _, k := range []Kind{KindTeardownMidSession, KindAcceptThenSilence, KindSDPCodecLie, KindSPSResolutionLie} {
 		if Implemented(k) {
 			t.Errorf("%s should not be implemented yet", k)
 		}
@@ -241,6 +244,7 @@ func TestImplemented(t *testing.T) {
 func TestKnown(t *testing.T) {
 	for _, k := range []Kind{
 		KindFrameDrop,
+		KindPacketLoss,
 		KindKeyframeStarvation,
 		KindTeardownMidSession,
 		KindAcceptThenSilence,

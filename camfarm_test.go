@@ -114,14 +114,14 @@ func TestStatsReportSeedAndProgress(t *testing.T) {
 // refused rather than silently ignored.
 func TestFaultsAreRefusedNotIgnored(t *testing.T) {
 	s := minimalSpec()
-	s.Cameras[0].Faults = []FaultSpec{{Kind: "keyframe_starvation", Rate: 0.5}}
+	s.Cameras[0].Faults = []FaultSpec{{Kind: "accept_then_silence", Rate: 0.5}}
 
 	_, err := Start(context.Background(), s)
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("err = %v, want ErrUnsupported", err)
 	}
 	// The message must name the kind, so a caller knows what was refused.
-	if !strings.Contains(err.Error(), "keyframe_starvation") {
+	if !strings.Contains(err.Error(), "accept_then_silence") {
 		t.Errorf("err = %v, want it to name the fault kind", err)
 	}
 
@@ -387,7 +387,7 @@ func TestAddCameraDuplicateIDRefused(t *testing.T) {
 // get a camera that never misbehaves.
 func TestAddCameraFaultRefused(t *testing.T) {
 	f := StartT(t, minimalSpec())
-	_, err := f.AddCamera(CameraSpec{ID: "new-cam", Faults: []FaultSpec{{Kind: "keyframe_starvation", Rate: 0.5}}})
+	_, err := f.AddCamera(CameraSpec{ID: "new-cam", Faults: []FaultSpec{{Kind: "accept_then_silence", Rate: 0.5}}})
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("err = %v, want ErrUnsupported", err)
 	}
@@ -576,7 +576,7 @@ func TestScreenshotRacesRemoveCamera(t *testing.T) {
 func TestInjectUnimplementedKindIsUnsupported(t *testing.T) {
 	f := StartT(t, minimalSpec())
 	cam, _ := f.Camera("front-door")
-	err := cam.Inject(FaultSpec{Kind: "keyframe_starvation", Rate: 1})
+	err := cam.Inject(FaultSpec{Kind: "accept_then_silence", Rate: 1})
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("err = %v, want ErrUnsupported", err)
 	}
