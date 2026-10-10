@@ -234,7 +234,8 @@ read it, so they cannot drift:
    implemented status.
 
 The flat `FaultSpec` (root) and `fault.Spec` gain, all `omitempty`: `meanBurst`, `keepEvery`, `on`,
-`status`, `onlyRequest`, `afterFrames`, `mode`. Flat rather than per-kind nested structs, so the
+`status`, `onlyRequest`, `afterFrames`, `mode`, and for slice C `maxMs`, `holdFrames`,
+`reorderDepth`, `delayMs`, `driftPpm`. Flat rather than per-kind nested structs, so the
 journal, the replay hash and hand-written spec files stay simple.
 
 ### 3.1 Observability
@@ -315,8 +316,10 @@ Same standard as `frame_drop`: real wire, `-race`, fixed seeds.
   and releases exactly `holdFrames` frames at the seeded boundaries, with contiguous sequence numbers
   and honest timestamps; `pts_dts_mismatch` yields the exact timestamp sequence for each
   `reorderDepth` and the same set of timestamps; `pts_delayed` shifts the timestamp by `delayMs`,
-  grows it by `driftPpm` per frame interval, and a real client's sender-report mapping shows the
-  lag; the four compose without panics under `-race`.
+  grows it by `driftPpm` per frame interval, and a real client sees the lag in the RTCP sender
+  report's RTP timestamp (about `delayMs` behind a clean camera's), while its `PacketNTP`
+  wall-clock mapping does not show it (see 2.9, measured on the pinned `gortsplib`); the four
+  compose without panics under `-race`.
 - **Catalogue:** validation, `GET /api/v1/faults` and the README table agree; a parameter that does
   not apply to its kind is refused.
 - **Dashboard:** `httptest` for the catalogue endpoint and the mapped statuses; Playwright (the

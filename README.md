@@ -72,7 +72,10 @@ Early:
   today (TCP delivers everything it is given); genuine loss arrives with UDP serving; loss applies to every reader of the camera, not per
   reader; `keyframe_starvation` also withholds the in-band SPS/PPS that travel with the withheld
   keyframe, and with `keepEvery` above about 15 (a 1s GOP at the fixture's 15fps) the 15s snapshot
-  deadline is exceeded, so dashboard and ONVIF snapshots fail.
+  deadline is exceeded, so dashboard and ONVIF snapshots fail. For the frame-path kinds with a
+  `rate` (`frame_drop`, `packet_loss`, `burst_delivery`) an omitted `rate` means 0, so the fault
+  is installed but never fires: the catalogue's default rate only prefills the dashboard form and
+  is not applied server-side (unlike `rtsp_error`, below).
   Timing faults (`jitter`, `burst_delivery`, `pts_dts_mismatch`, `pts_delayed`) have their own
   limits:
   - **Arrival times are wall-clock and not reproducible; the delays, hold boundaries and
@@ -86,8 +89,13 @@ Early:
     encode, before the hold, so each frame's loss is drawn per frame regardless of whether the
     frame is later held. A frame removed by `frame_drop` or `keyframe_starvation` while a hold is
     open shortens the burst, so a release can be smaller than `holdFrames`.
-  - Any change to the camera's fault set while frames are held flushes them at the next frame.
-    Frames still held at shutdown are discarded.
+  - A change to the camera's frame-fault list while frames are held flushes them at the next
+    frame. A change to control-plane faults only (`rtsp_error`, `teardown`, `sdp_lie`), or
+    re-injecting an identical fault, does not touch the pump and does not flush. Frames still
+    held at shutdown are discarded.
+  - With `burst_delivery`, a `teardown` still counts held frames toward `afterFrames` (its
+    count fires per pump frame, held ones included), so a client torn down at `afterFrames` may
+    have received up to `holdFrames`-1 fewer frames: those were still in the hold buffer.
   - The `burst_delivery` tally counts held frames, not the flush frame that releases them.
   - RTP sequence numbers stay contiguous for all four timing kinds; only timing and timestamps
     change.
@@ -100,7 +108,10 @@ Early:
     missed slots and restarts its schedule from now instead of sending them as one burst; below
     that it catches up back-to-back.
   - `pts_dts_mismatch` reaches clients as out-of-order RTP timestamps (sequence numbers stay in
-    order).
+    order). Its windows are phased on the absolute frame counter, not on the frame it was injected
+    at, so injecting it at a frame that is not a window start, or clearing it mid-window, can give
+    two consecutive frames the same timestamp (with `reorderDepth` 1 injected at frame 5, frame 5
+    is stamped like frame 4).
   - `pts_delayed` is visible mainly in the RTCP sender report's own RTP timestamp. Measured on the
     pinned `gortsplib` v5.6.5, the server-side sender pairs the already-shifted RTP timestamp with
     the true write time, so a client that maps packets to wall-clock through the sender report

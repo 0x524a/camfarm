@@ -46,6 +46,11 @@ type KindInfo struct {
 
 func f64(v float64) *float64 { return &v }
 
+// rateParam is the common rate parameter. Its Default prefills the dashboard
+// form and nothing else: for the frame-path kinds (frame_drop, packet_loss,
+// burst_delivery) an omitted rate decodes to 0, so the fault is installed and
+// never fires. rtsp_error is the exception: it applies its default rate
+// server-side (see ControlEngine).
 func rateParam() Param {
 	return Param{Name: "rate", Type: ParamNumber, Min: f64(0), Max: f64(1), Default: 0.2,
 		Help: "Probability in [0,1] that the fault fires for each unit of its clock."}

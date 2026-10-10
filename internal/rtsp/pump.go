@@ -327,8 +327,12 @@ func (p *Pump) done() {
 // swap, frame faults (drop, starvation), encode, packet loss, timestamp faults,
 // burst hold or flush, then jitter. Per-frame draws are made unconditionally,
 // for dropped and held frames too, so each sequence depends only on how many
-// frames have passed. It advances the pump to the next access unit and writes
-// nothing, except a hold released by a fault-set swap.
+// frames have passed. One exception: an encode error returns before the frame
+// counter advances, after the timestamp, hold and frame draws (and counters
+// such as pts_delayed's drift clock) were taken, so the next slot re-plans the
+// same frame with a second set of draws. Validated fixtures do not make Encode
+// fail, so this is not reachable today. It advances the pump to the next access
+// unit and writes nothing, except a hold released by a fault-set swap.
 func (p *Pump) plan() (plannedFrame, error) {
 	if p.applyPendingFaults() && len(p.held) > 0 {
 		// A new fault set starts with no hold running, so a hold in progress

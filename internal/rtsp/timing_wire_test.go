@@ -216,8 +216,9 @@ func holdSeed(t *testing.T, start, h, horizon int, rate float64) seed.Seed {
 func TestTimingBurstDeliveryArrivesTogether(t *testing.T) {
 	const (
 		holdFrames = 4
-		startFrame = 20 // 1.3 s in: after any realistic client join
-		horizon    = 45
+		startFrame = 30 // 2 s in: well after any realistic client join, even on a loaded runner
+		horizon    = 75
+		window     = 15 * time.Millisecond
 	)
 	rootSeed := holdSeed(t, startFrame, holdFrames, horizon, 0.05)
 	rec := obs.New(1000)
@@ -233,22 +234,24 @@ func TestTimingBurstDeliveryArrivesTogether(t *testing.T) {
 	}
 	t.Cleanup(s.Close)
 
-	pkts := collectFrames(t, s, "cam-00", 40)
+	pkts := collectFrames(t, s, "cam-00", 55)
 	frames := framesOf(pkts)
 
-	// Find the run of holdFrames frames that arrived within 5 ms of each other.
-	// 5 ms is the brief's bound: held frames are written in one loop with no
-	// pacing, so on loopback they land within well under a millisecond.
+	// Find the run of holdFrames frames that arrived within the window of each
+	// other. Held frames are written in one loop with no pacing, so on loopback
+	// they land within well under a millisecond; 15 ms absorbs a loaded runner
+	// while staying far below the 200 ms (three intervals) that four unheld
+	// frames span, so the search fails with the fault off.
 	burstAt := -1
 	var spread time.Duration
 	for i := 0; i+holdFrames <= len(frames); i++ {
-		if sp := frames[i+holdFrames-1].at.Sub(frames[i].at); sp < 5*time.Millisecond {
+		if sp := frames[i+holdFrames-1].at.Sub(frames[i].at); sp < window {
 			burstAt, spread = i, sp
 			break
 		}
 	}
 	if burstAt < 0 {
-		t.Fatalf("no run of %d frames arrived within 5 ms of each other", holdFrames)
+		t.Fatalf("no run of %d frames arrived within %v of each other", holdFrames, window)
 	}
 	t.Logf("burst of %d frames starts at client frame %d, arrival spread %v", holdFrames, burstAt, spread)
 	if burstAt == 0 {

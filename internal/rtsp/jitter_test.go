@@ -427,3 +427,126 @@ func TestAfterFrameFiresAfterTheDelayedEmit(t *testing.T) {
 		}
 	}
 }
+
+// TestRunComposesBurstAndJitterUnderChurn drives run itself, on the virtual
+// clock, with burst_delivery, jitter and frame_drop while a second goroutine
+// swaps the fault set. The hand-off is lock-stepped (each swap is queued while
+// run is parked), so the run is deterministic while the swap still crosses
+// goroutines for the race detector. The last phase installs a hold with no
+// jitter, so when the run is cancelled frames are sitting in the hold buffer
+// and no frame is mid-wait: every planned frame is then exactly one of served,
+// dropped or held (discarded on cancel).
+func TestRunComposesBurstAndJitterUnderChurn(t *testing.T) {
+	burst := fault.Spec{Kind: fault.KindBurstDelivery, Rate: 0.3, HoldFrames: 6}
+	full := []fault.Spec{{Kind: fault.KindJitter, MaxMs: 200}, burst, {Kind: fault.KindFrameDrop, Rate: 0.1}}
+	sets := [][]fault.Spec{full, {burst}, nil, {{Kind: fault.KindJitter, MaxMs: 50}}, full}
+
+	ck := newSignalClock()
+	w := &clockRecorder{ck: ck}
+	rec := obs.New(10)
+	var completed, afterCancel atomic.Int64
+	var cancelled atomic.Bool
+	p, err := NewPump(PumpConfig{
+		CameraID: "cam", Media: regularMedia(t, 3000, 30), Medi: &description.Media{Type: description.MediaTypeVideo},
+		Writer: w, Seed: seed.Seed(9), Obs: rec, Faults: full,
+		AfterFrame: func() {
+			if cancelled.Load() {
+				afterCancel.Add(1)
+			}
+			completed.Add(1)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPump: %v", err)
+	}
+
+	req := make(chan []fault.Spec)
+	ack := make(chan error)
+	go func() {
+		for specs := range req {
+			ack <- p.SetFaults(specs, nil)
+		}
+	}()
+	defer close(req)
+	swap := func(specs []fault.Spec) {
+		t.Helper()
+		req <- specs
+		if err := <-ack; err != nil {
+			t.Fatalf("SetFaults: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { p.run(ctx, ck, nil); close(done) }()
+	<-ck.started
+
+	const steps = 4000 // 4 s, about 120 frames
+	for i := 1; i <= steps; i++ {
+		if i%97 == 0 {
+			swap(sets[(i/97)%len(sets)])
+		}
+		advanceSettled(t, ck, time.Millisecond)
+	}
+	// Final phase: hold everything, no jitter. 500 ms outlasts any 200 ms wait
+	// begun before the swap, so after it nothing is mid-wait and about 15 frames
+	// are held.
+	swap([]fault.Spec{{Kind: fault.KindBurstDelivery, Rate: 1, HoldFrames: 300}})
+	for i := 0; i < 500; i++ {
+		advanceSettled(t, ck, time.Millisecond)
+	}
+	cancelled.Store(true)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return after cancel")
+	}
+	written := len(w.snapshot())
+	ck.Advance(time.Hour)
+	if n := len(w.snapshot()); n != written {
+		t.Fatalf("%d packets written after cancel", n-written)
+	}
+	if n := afterCancel.Load(); n != 0 {
+		t.Fatalf("AfterFrame called %d times after cancel", n)
+	}
+
+	// run has returned, so the pump's fields are safe to read.
+	planned := p.frameCounter
+	c := rec.Counters("cam")
+	served := int(c.FramesServed)
+	dropped := int(c.ByKind[string(fault.KindFrameDrop)].Applied)
+	held := len(p.held)
+	if int(completed.Load()) != planned {
+		t.Fatalf("AfterFrame called %d times for %d planned frames", completed.Load(), planned)
+	}
+	if served+dropped+held != planned {
+		t.Fatalf("served %d + dropped %d + held %d != %d planned", served, dropped, held, planned)
+	}
+	if held == 0 {
+		t.Fatal("nothing held at cancel: the discard-on-cancel path was not exercised")
+	}
+	if dropped == 0 || c.ByKind[string(fault.KindJitter)].Applied == 0 || c.ByKind[string(fault.KindBurstDelivery)].Applied == 0 {
+		t.Fatalf("a fault never fired: %+v", c.ByKind)
+	}
+	if planned < 100 {
+		t.Fatalf("only %d frames planned in 4.5 s at 30 fps", planned)
+	}
+
+	// Order kept and nothing lost from the sequence: frame_drop removes frames
+	// before encode, so sequence numbers stay contiguous and timestamps only
+	// ever increase between frames.
+	ws := w.snapshot()
+	for i := 1; i < len(ws); i++ {
+		x, prev := ws[i], ws[i-1]
+		if x.seq != prev.seq+1 {
+			t.Fatalf("write %d: sequence %d after %d", i, x.seq, prev.seq)
+		}
+		if x.ts < prev.ts {
+			t.Fatalf("write %d: timestamp %d after %d (order lost)", i, x.ts, prev.ts)
+		}
+		if x.at.Before(prev.at) {
+			t.Fatalf("write %d at %v, before the previous write at %v", i, x.at, prev.at)
+		}
+	}
+}

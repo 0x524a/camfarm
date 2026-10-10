@@ -88,6 +88,12 @@ func (e *Engine) TimestampShift(frameIndex int, frameDur int64) int64 {
 		en := &e.entries[i]
 		switch en.spec.Kind {
 		case KindPTSDTSMismatch:
+			// The window phase keys on the absolute frame index, not on the frame
+			// the entry was installed at. Installing it at a frame that is not a
+			// window start, or removing it mid-window, can therefore give two
+			// consecutive frames equal timestamps: depth 1 installed at frame 5
+			// stamps frame 5 one frame early, like frame 4. Documented in the
+			// README rather than rekeyed.
 			w := en.spec.ReorderDepth + 1
 			if frameIndex%w == 0 {
 				shift += int64(w-1) * frameDur
