@@ -3,6 +3,61 @@ package fault
 // ticksPerMs is the pump's RTP clock rate (90 kHz) per millisecond.
 const ticksPerMs = 90
 
+// HoldDecision is burst_delivery's verdict for one frame.
+type HoldDecision int
+
+// The verdicts DecideHold returns.
+const (
+	// HoldNone: deliver the frame normally.
+	HoldNone HoldDecision = iota
+	// HoldHeld: withhold the frame; it is released with the burst.
+	HoldHeld
+	// HoldFlush: the last frame of a hold. Release everything held, then this
+	// frame, back-to-back.
+	HoldFlush
+)
+
+// HoldFrames returns the configured burst_delivery hold length, or zero when
+// the fault is not configured.
+func (e *Engine) HoldFrames() int {
+	for i := range e.entries {
+		if e.entries[i].spec.Kind == KindBurstDelivery {
+			return e.entries[i].spec.HoldFrames
+		}
+	}
+	return 0
+}
+
+// DecideHold returns burst_delivery's verdict for the frame. Call it exactly
+// once per frame, including frames another fault removes.
+//
+// One draw is consumed per frame, unconditionally and during a hold too, so the
+// sequence depends only on how many frames have passed, never on earlier
+// outcomes or on HoldFrames. When no hold is running, a draw below Rate starts
+// one of HoldFrames frames including this frame: the first HoldFrames-1 return
+// HoldHeld and the HoldFrames-th returns HoldFlush.
+func (e *Engine) DecideHold(_ int) HoldDecision {
+	for i := range e.entries {
+		en := &e.entries[i]
+		if en.spec.Kind != KindBurstDelivery {
+			continue
+		}
+		u := en.rnd.Float64()
+		if en.remaining == 0 {
+			if u >= en.spec.Rate {
+				return HoldNone
+			}
+			en.remaining = en.spec.HoldFrames
+		}
+		en.remaining--
+		if en.remaining == 0 {
+			return HoldFlush
+		}
+		return HoldHeld
+	}
+	return HoldNone
+}
+
 // TimestampKinds returns the configured timestamp faults, in configured order,
 // so a caller can attribute a non-zero TimestampShift.
 func (e *Engine) TimestampKinds() []Kind {

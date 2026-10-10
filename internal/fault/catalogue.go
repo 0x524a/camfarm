@@ -150,7 +150,7 @@ func Catalogue() []KindInfo {
 			},
 		},
 		{
-			Kind:   KindBurstDelivery,
+			Kind: KindBurstDelivery, Implemented: true,
 			Models: "Bursty uplink or encoder buffering: frames are held and then released back-to-back, which overflows NVR queues.",
 			Clock:  "frame counter; one draw per frame, unconditional",
 			Params: []Param{

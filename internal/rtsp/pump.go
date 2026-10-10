@@ -26,6 +26,8 @@ const (
 	detailPacketLossFmt    = "withheld %d of %d packets"
 	detailPacketSparedFmt  = "withheld %d of %d packets; spared %d keyframe packets"
 	detailTimestampFmt     = "timestamp shifted by %d ticks"
+	detailHeldFmt          = "held (%d of %d)"
+	detailReleasedFmt      = "released %d frames"
 )
 
 // faultSwap is a pending replacement of a pump's fault engine.
@@ -64,7 +66,8 @@ type PumpConfig struct {
 	Faults   []fault.Spec
 	Obs      *obs.Recorder
 	// AfterFrame, if set, is called at the end of every Step that completes,
-	// dropped frames included, so a consumer counts frames by pump step rather
+	// dropped frames and frames burst_delivery only holds (nothing written)
+	// included, so a consumer counts frames by pump step rather
 	// than by wall clock. An errored Step does not call it, so it does not count
 	// toward a teardown's afterFrames.
 	AfterFrame func()
@@ -92,6 +95,15 @@ type Pump struct {
 	// reaches in, and it is drained between frames.
 	swapMu  sync.Mutex
 	pending []faultSwap
+
+	// held is burst_delivery's buffer: one entry per held frame, each already
+	// stamped and loss-filtered, so a flush only writes. A hold is at most
+	// HoldFrames (validated <= 300) frames long and its last frame is not
+	// buffered, so memory is bounded by 299 frames' worth of packets per camera.
+	//
+	// Frames still here when the pump stops are discarded: they were never
+	// emitted, so never counted, and nothing writes them after run returns.
+	held [][]*rtp.Packet
 
 	initialSeq uint16
 	frameDur   int64
@@ -217,7 +229,9 @@ func (p *Pump) SetFaults(specs []fault.Spec, applied func(frameIndex int)) error
 	return nil
 }
 
-func (p *Pump) applyPendingFaults() {
+// applyPendingFaults installs queued fault sets and reports whether any was
+// installed.
+func (p *Pump) applyPendingFaults() bool {
 	p.swapMu.Lock()
 	swaps := p.pending
 	p.pending = nil
@@ -228,16 +242,59 @@ func (p *Pump) applyPendingFaults() {
 			s.applied(p.frameCounter)
 		}
 	}
+	return len(swaps) > 0
 }
 
-// Step writes exactly one access unit.
+// writeFrame writes one frame's packets.
+func (p *Pump) writeFrame(pkts []*rtp.Packet) error {
+	for _, pkt := range pkts {
+		if err := p.w.WritePacketRTP(p.medi, pkt); err != nil {
+			return fmt.Errorf("rtsp: writing RTP for %q: %w", p.id, err)
+		}
+	}
+	return nil
+}
+
+// flushHeld writes every held frame in order, then cur if curFrame, counting
+// each as served now that it is emitted. The buffer is emptied first, so a
+// write error cannot cause a frame to be written twice.
+func (p *Pump) flushHeld(cur []*rtp.Packet, curFrame bool) error {
+	frames := p.held
+	p.held = nil
+	n := len(frames)
+	if curFrame {
+		frames = append(frames, cur)
+		n++
+	}
+	for _, pkts := range frames {
+		if err := p.writeFrame(pkts); err != nil {
+			return err
+		}
+		p.obs.Frame(p.id)
+	}
+	p.obs.Fault(p.id, p.frameCounter, string(fault.KindBurstDelivery), fmt.Sprintf(detailReleasedFmt, n))
+	return nil
+}
+
+// Step writes exactly one access unit, or holds it for burst_delivery.
 func (p *Pump) Step() error {
-	p.applyPendingFaults()
+	if p.applyPendingFaults() && len(p.held) > 0 {
+		// A new fault set starts with no hold running, so a hold in progress
+		// cannot continue. Release its frames now, before this frame, rather than
+		// lose them or leave them for some later unrelated burst.
+		if err := p.flushHeld(nil, false); err != nil {
+			return err
+		}
+	}
 	au := p.aus[p.idx]
 
 	// Timestamp faults are consulted once per Step, before the drop check, so a
 	// frame that is removed still advances their counters.
 	shift := p.faults.TimestampShift(p.frameCounter, p.frameDur)
+
+	// burst_delivery likewise decides for every frame, dropped or not, so its
+	// draws stay frame-clocked.
+	hold := p.faults.DecideHold(p.frameCounter)
 
 	// The fault seam. frame_drop and keyframe_starvation remove the frame before
 	// it is encoded, so they consume no packet_loss draws.
@@ -259,6 +316,7 @@ func (p *Pump) Step() error {
 		}
 	}
 
+	var out []*rtp.Packet
 	if !drop {
 		pkts, err := p.enc.Encode(au.NALUs)
 		if err != nil {
@@ -302,11 +360,33 @@ func (p *Pump) Step() error {
 				continue
 			}
 			pkt.Timestamp = ts
-			if err := p.w.WritePacketRTP(p.medi, pkt); err != nil {
-				return fmt.Errorf("rtsp: writing RTP for %q: %w", p.id, err)
-			}
+			out = append(out, pkt)
 		}
-		p.obs.Frame(p.id)
+	}
+
+	// burst_delivery: held frames are already stamped and loss-filtered, so only
+	// their delivery moves. obs.Frame counts a frame when it is emitted, which
+	// for a held frame is the flush. A dropped frame has nothing to hold, but its
+	// decision still advances the hold.
+	switch hold {
+	case fault.HoldHeld:
+		if !drop {
+			p.held = append(p.held, out)
+			p.obs.Fault(p.id, p.frameCounter, string(fault.KindBurstDelivery),
+				fmt.Sprintf(detailHeldFmt, len(p.held), p.faults.HoldFrames()))
+			p.obs.FaultTally(p.id, string(fault.KindBurstDelivery), 1, 0)
+		}
+	case fault.HoldFlush:
+		if err := p.flushHeld(out, !drop); err != nil {
+			return err
+		}
+	default:
+		if !drop {
+			if err := p.writeFrame(out); err != nil {
+				return err
+			}
+			p.obs.Frame(p.id)
+		}
 	}
 
 	p.frameCounter++

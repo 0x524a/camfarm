@@ -163,6 +163,9 @@ type entry struct {
 	// calls counts TimestampShift calls since this entry was installed; it is
 	// pts_delayed's drift clock.
 	calls int
+	// remaining is burst_delivery's hold state: zero when not holding, else the
+	// frames left in the hold, counting the current one.
+	remaining int
 }
 
 // New returns an Engine for one camera. Each kind draws from its own generator,
