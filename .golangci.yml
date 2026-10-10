@@ -1,0 +1,46 @@
+# Deliberately small. Each linter here maps to a class of real bug; the set is
+# not "everything on". Add one only with a reason.
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+  settings:
+    staticcheck:
+      checks:
+        # Correctness checks only. The ST (style) and QF (quick-fix) families
+        # are opinion, not defects, and are left off on purpose.
+        - SA*
+  exclusions:
+    rules:
+      # Close errors on read-side resources (response bodies, listeners, files
+      # opened for reading, accepted conns) carry no actionable information.
+      - linters: [errcheck]
+        text: 'Error return value of .*\.Close` is not checked'
+      # Response body write after WriteHeader: a failed write means the client
+      # went away and there is nothing useful left to do about it.
+      - linters: [errcheck]
+        path: internal/onvif/envelope\.go
+        text: 'Error return value of `fmt\.Fprintf` is not checked'
+      # The farm pins mediacommon v2 and these deprecated symbols are the ones
+      # its media code is written against; migrating is a separate change, not
+      # a lint fix.
+      - linters: [staticcheck]
+        path: internal/media/
+        text: 'SA1019'
+      # Start's ctx handling is deliberately nil-tolerant in this test; do not
+      # edit a test to satisfy a linter.
+      - linters: [staticcheck]
+        path: _test\.go
+        text: 'SA1012'
+      # Validation intentionally refuses on the first catalogued fault: no
+      # fault effects are implemented yet, so the loop body always returns.
+      # This will stop being true as fault effects land.
+      - linters: [staticcheck]
+        path: ^spec\.go$
+        text: 'SA4004'
