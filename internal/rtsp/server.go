@@ -89,6 +89,12 @@ type Server struct {
 	rootCtx context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
+
+	// Test-only seams, nil in production, set before Start. They let tests
+	// install behaviour in the finaliser and PLAY hooks without any production
+	// fault depending on them.
+	testOnResponse func(*gortsplib.ServerConn, *base.Response)
+	testOnPlay     func(*gortsplib.ServerHandlerOnPlayCtx)
 }
 
 // newFormat builds the gortsplib format describing a camera's codec.
@@ -634,6 +640,9 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 	if _, _, ok := s.lookup(ctx.Path); !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil
 	}
+	if s.testOnPlay != nil {
+		s.testOnPlay(ctx)
+	}
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }
 
@@ -644,4 +653,8 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 // receives the same live response immediately before it is marshalled, which is
 // the only place those headers can be rewritten. No fault rewrites anything in
 // this version; the hook exists so the phase-2 faults have somewhere to live.
-func (s *Server) OnResponse(_ *gortsplib.ServerConn, _ *base.Response) {}
+func (s *Server) OnResponse(c *gortsplib.ServerConn, res *base.Response) {
+	if s.testOnResponse != nil {
+		s.testOnResponse(c, res)
+	}
+}
