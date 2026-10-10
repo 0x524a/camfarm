@@ -15,7 +15,7 @@
 - `CGO_ENABLED=0` must keep building: no cgo dependency of any kind. `hi264`, `hi265` and their `mp4ff` dependency are pure Go and MIT.
 - Determinism is the product: nothing in this slice introduces randomness or wall-clock-dependent decisions. The only wait is "until the next random-access access unit", bounded by one loop of the fixture.
 - Tests use real sockets and real decoding: a real `internal/rtsp.Server`, a real `gortsplib` dial, real `hi264`/`hi265` decode. No mocks of the RTSP wire.
-- Both codecs (H.264 and H.265) are exercised end to end wherever the spec says "both codecs".
+- H.264 only for this run (user decision): H.265 is deferred (Task 2). A stream with no H.264 video yields `ErrNoSupportedVideo`.
 - Reuse the existing error taxonomy (`ErrNotReady`); context errors are returned unwrapped so `errors.Is(err, context.DeadlineExceeded)` / `context.Canceled` work. Do not add new exported sentinel errors to the root package.
 - `go test -race ./...` must pass, including a race of `Camera.Screenshot` against `Fleet.RemoveCamera`.
 - Prefer a small set of faithfully simulated behaviours: no keyframe priming or GOP cache, no resolution/format negotiation, no retry, no caching or rate limiting (all deferred by the spec).
@@ -341,7 +341,7 @@ git commit -m "Add internal/screenshot: capture one decoded H.264 frame from a l
 
 ---
 
-### Task 2: H.265 path
+### Task 2: H.265 path (DEFERRED by user decision — H.264 only for now; skip when executing, kept for a later slice)
 
 **Files:**
 - Modify: `internal/screenshot/convert.go`
@@ -474,7 +474,7 @@ git commit -m "Add H.265 support to screenshot capture"
 - Modify: `camfarm_test.go` (add `"time"` to imports; append tests)
 
 **Interfaces:**
-- Consumes: `screenshot.Capture` (Task 1/2); existing `Camera.RTSPURL()`, `ErrNotReady`, `StartT`, `h265FixtureBytes`, `minimalSpec`.
+- Consumes: `screenshot.Capture` (Task 1/2); existing `Camera.RTSPURL()`, `ErrNotReady`, `StartT`, `minimalSpec`.
 - Produces: `func (c *Camera) Screenshot(ctx context.Context) (image.Image, error)`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -497,28 +497,6 @@ func TestScreenshotH264(t *testing.T) {
 	}
 	if b := img.Bounds(); b.Dx() != 320 || b.Dy() != 240 {
 		t.Errorf("bounds = %v, want 320x240", b)
-	}
-}
-
-func TestScreenshotH265(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "h265.ts")
-	if err := os.WriteFile(path, h265FixtureBytes(t), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	f := StartT(t, Spec{Seed: 9, Cameras: []CameraSpec{{ID: "hevc", Source: SourceSpec{Kind: SourceFile, Path: path}}}})
-	cam, err := f.Camera("hevc")
-	if err != nil {
-		t.Fatalf("Camera: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	img, err := cam.Screenshot(ctx)
-	if err != nil {
-		t.Fatalf("Screenshot: %v", err)
-	}
-	if img.Bounds().Empty() {
-		t.Errorf("empty image: %v", img.Bounds())
 	}
 }
 
@@ -922,7 +900,7 @@ In `README.md`'s Status list, insert after the `Fleet.AddCamera` bullet (before 
   `/onvif/{id}/snapshot` (behind Digest auth when credentialed), which
   `GetSnapshotUri` advertises. It dials the real RTSP wire, so it waits for the
   stream's next keyframe (at most one loop of the source). The pure-Go decoders
-  cover intra pictures (H.264 IDR, H.265 IDR/CRA) only; the bundled fixtures
+  cover intra pictures (H.264 IDR and P_Skip) only, and H.264 is the only codec supported so far; the bundled fixtures
   and similarly encoded files decode, and a source using features outside that
   subset fails with an error rather than a wrong picture.
 ```
