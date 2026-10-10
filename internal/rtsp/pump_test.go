@@ -151,33 +151,6 @@ func TestLoopContinuesTimestamps(t *testing.T) {
 	}
 }
 
-// A catalogued fault whose effect does not exist yet is decided and recorded,
-// and changes nothing on the wire.
-func TestUnimplementedFaultIsRecordedButNotApplied(t *testing.T) {
-	t.Skip("no unimplemented kind is frame-decided any more (keyframe_starvation now needs KeepEvery); the slice A plan replaces this test")
-	rec := obs.New(1000)
-	p, w := newTestPump(t, seed.Seed(5), []fault.Spec{{Kind: fault.KindTeardownMidSession, Rate: 1}}, rec)
-
-	const frames = 5
-	for i := 0; i < frames; i++ {
-		if err := p.Step(); err != nil {
-			t.Fatalf("Step: %v", err)
-		}
-	}
-	if got := rec.Counters("cam").FaultsFired; got != frames {
-		t.Fatalf("FaultsFired = %d, want %d", got, frames)
-	}
-	if got := rec.Counters("cam").FramesServed; got != frames {
-		t.Fatalf("FramesServed = %d, want %d -- an unimplemented fault must not drop anything", got, frames)
-	}
-	if len(w.pkts) == 0 {
-		t.Fatal("no packets written")
-	}
-	if ev := rec.Events(); ev[0].Detail != detailDecidedNotApplied {
-		t.Errorf("detail = %q, want %q", ev[0].Detail, detailDecidedNotApplied)
-	}
-}
-
 func TestFrameDropAtRateOneWritesNothingButAdvances(t *testing.T) {
 	rec := obs.New(1000)
 	p, w := newTestPump(t, seed.Seed(5), []fault.Spec{{Kind: fault.KindFrameDrop, Rate: 1}}, rec)
