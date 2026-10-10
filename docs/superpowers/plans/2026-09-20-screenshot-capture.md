@@ -4,7 +4,7 @@
 
 **Goal:** Let a caller grab one decoded frame from a running camera, from Go (`Camera.Screenshot`) and over ONVIF HTTP (`GET /onvif/{id}/snapshot`, advertised by `GetSnapshotUri`).
 
-**Architecture:** A leaf package `internal/screenshot` exposes `Capture(ctx, rtspURL) (image.Image, error)`. It dials the live RTSP wire like any client, waits for the next random-access access unit, decodes it with pure-Go decoders (`hi264`, `hi265`), and returns an `image.Image`. `Camera.Screenshot` feeds it the camera's own RTSP URL; the ONVIF server feeds it the camera's configured RTSP URL and PNG-encodes the result behind the existing Digest auth.
+**Architecture:** A leaf package `internal/screenshot` exposes `Capture(ctx, rtspURL) (image.Image, error)`. It dials the live RTSP wire like any client, waits for the next random-access access unit, decodes it with pure-Go decoders (`hi264`, `hi265`), and returns an `image.Image`. `Camera.Screenshot` feeds it the camera's own RTSP URL; the ONVIF server feeds it the camera's configured RTSP URL and JPEG-encodes the result behind the existing Digest auth.
 
 **Tech Stack:** Go 1.26, `gortsplib/v5` client and `rtph264`/`rtph265` depacketisers (already required), `mediacommon/v2` `IsRandomAccess` (already required), new pure-Go MIT deps `github.com/Eyevinn/hi264 v0.10.0` and `github.com/Eyevinn/hi265 v0.5.0`.
 
@@ -629,7 +629,7 @@ git commit -m "Add Camera.Screenshot"
 
 **Interfaces:**
 - Consumes: `screenshot.Capture`; existing `camera`, `digestAuth.verify/challenge`, `Server.Endpoint`, `Server.log`, `parsePath`, `handle`, `testMedia`, `startTestServer`, `soapContentType`.
-- Produces: `GET {endpoint}/snapshot` → `image/png`; 404 unknown camera, 401 when credentialed and unauthenticated, 405 non-GET, 500 on capture failure. `rewriteSnapshotURI(resp any, snapshotURL string)`. `GetSnapshotUri` now answers with `{Endpoint(id)}/snapshot` instead of a fault.
+- Produces: `GET {endpoint}/snapshot` → `image/jpeg`; 404 unknown camera, 401 when credentialed and unauthenticated, 405 non-GET, 500 on capture failure. `rewriteSnapshotURI(resp any, snapshotURL string)`. `GetSnapshotUri` now answers with `{Endpoint(id)}/snapshot` instead of a fault.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -640,7 +640,7 @@ package onvif
 
 import (
 	"bytes"
-	"image/png"
+	"image/jpeg"
 	"io"
 	"net/http"
 	"strings"
@@ -674,7 +674,7 @@ func startRealRTSP(t *testing.T) (*media.Media, string) {
 	return m, rs.URL("cam")
 }
 
-func TestSnapshotEndpointServesPNG(t *testing.T) {
+func TestSnapshotEndpointServesJPEG(t *testing.T) {
 	m, url := startRealRTSP(t)
 	srv := startTestServer(t, CameraConfig{ID: "cam", Media: m, RTSPURL: url, Seed: seed.Seed(1)})
 
@@ -686,12 +686,12 @@ func TestSnapshotEndpointServesPNG(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "image/png" {
-		t.Errorf("Content-Type = %q, want image/png", ct)
+	if ct := resp.Header.Get("Content-Type"); ct != "image/jpeg" {
+		t.Errorf("Content-Type = %q, want image/jpeg", ct)
 	}
-	img, err := png.Decode(resp.Body)
+	img, err := jpeg.Decode(resp.Body)
 	if err != nil {
-		t.Fatalf("body is not a PNG: %v", err)
+		t.Fatalf("body is not a JPEG: %v", err)
 	}
 	if b := img.Bounds(); b.Dx() != 320 || b.Dy() != 240 {
 		t.Errorf("bounds = %v, want 320x240", b)
@@ -816,7 +816,7 @@ func rewriteSnapshotURI(resp any, snapshotURL string) {
 
 In `internal/onvif/server.go`:
 
-1. Imports: add `"bytes"` (before `"fmt"`), `"image/png"` (before `"net/http"`), and `"github.com/0x524a/camfarm/internal/screenshot"` (after the `media` import).
+1. Imports: add `"bytes"` (before `"fmt"`), `"image/jpeg"` (before `"net/http"`), and `"github.com/0x524a/camfarm/internal/screenshot"` (after the `media` import).
 2. `camera` struct becomes:
 
 ```go
@@ -859,7 +859,7 @@ and directly after the `rewriteXAddr(...)` call add `rewriteSnapshotURI(resp, s.
 6. Append:
 
 ```go
-// handleSnapshot serves one PNG frame of the camera's live RTSP stream. It is
+// handleSnapshot serves one JPEG frame of the camera's live RTSP stream. It is
 // the HTTP endpoint GetSnapshotUri advertises, gated behind the same Digest
 // auth as the SOAP services.
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request, cam *camera) {
@@ -879,12 +879,12 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request, cam *cam
 		return
 	}
 	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
 		s.log.Warn("snapshot encode failed", "camera", cam.id, "err", err)
 		http.Error(w, "snapshot encode failed", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Type", "image/jpeg")
 	_, _ = w.Write(buf.Bytes())
 }
 ```
@@ -918,14 +918,13 @@ In `README.md`'s Status list, insert after the `Fleet.AddCamera` bullet (before 
 
 ```markdown
 - **Works:** screenshots — `Camera.Screenshot(ctx)` returns one decoded frame
-  from a camera's live RTSP stream, and each camera serves it as a PNG at
+  from a camera's live RTSP stream, and each camera serves it as a JPEG at
   `/onvif/{id}/snapshot` (behind Digest auth when credentialed), which
   `GetSnapshotUri` advertises. It dials the real RTSP wire, so it waits for the
   stream's next keyframe (at most one loop of the source). The pure-Go decoders
   cover intra pictures (H.264 IDR, H.265 IDR/CRA) only; the bundled fixtures
   and similarly encoded files decode, and a source using features outside that
-  subset fails with an error rather than a wrong picture. ONVIF clients that
-  expect JPEG snapshots will get PNG.
+  subset fails with an error rather than a wrong picture.
 ```
 
 Also confirm the "Scope / what this does not do" section still states the not-conformant disclaimer unchanged; do not edit it.
@@ -954,7 +953,7 @@ git commit -m "Document screenshot capture and its decoder limits"
 
 ## Self-review
 
-- **Spec coverage:** `Capture` leaf with live wire and SDP-driven codec (Tasks 1-2); `Camera.Screenshot`, `ErrNotReady`, ctx errors unwrapped, removal propagates as-is, `-race` against `RemoveCamera` (Task 3); ONVIF `Snapshot.Enabled`, Resolution, `rtspURL`, `/snapshot` route, Digest gating, PNG, 404/500, `GetSnapshotUri` URI rewrite (Task 4); docs and honest limits (Task 5). Deferred items (priming, GOP cache, negotiation, retry, caching, dashboard) have no tasks, as the spec directs.
+- **Spec coverage:** `Capture` leaf with live wire and SDP-driven codec (Tasks 1-2); `Camera.Screenshot`, `ErrNotReady`, ctx errors unwrapped, removal propagates as-is, `-race` against `RemoveCamera` (Task 3); ONVIF `Snapshot.Enabled`, Resolution, `rtspURL`, `/snapshot` route, Digest gating, JPEG, 404/500, `GetSnapshotUri` URI rewrite (Task 4); docs and honest limits (Task 5). Deferred items (priming, GOP cache, negotiation, retry, caching, dashboard) have no tasks, as the spec directs.
 - **Placeholder scan:** none; every code step is complete. The only prose-described edits are mechanical import and one-line replacements with exact text given.
 - **Type consistency:** `Capture(ctx, rtspURL) (image.Image, error)` is used identically in Tasks 3 and 4; `rewriteSnapshotURI(resp any, snapshotURL string)` matches its test and call site; `camera.rtspURL` set in `buildCamera` and read in `handleSnapshot`; `withParamSets(nalus, sets...)` signature is identical in Tasks 1 and 2.
 - **Verified:** all code in this plan was run end to end in a scratch copy of the repository: the full suite passes under `-race`, `CGO_ENABLED=0 go build ./...` succeeds, and the existing `onvif_test.go` snapshot row was the only existing test that needed changing.
