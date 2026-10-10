@@ -30,8 +30,15 @@ var dashLine = regexp.MustCompile(`dashboard: (http://\S+)/`)
 // that cancels it and returns run's error, and the captured stderr.
 func start(t *testing.T, args ...string) (url string, stop func() error, stderr *syncBuf) {
 	t.Helper()
+	url, stop, _, stderr = startOut(t, args...)
+	return url, stop, stderr
+}
+
+// startOut is start that also returns the captured stdout.
+func startOut(t *testing.T, args ...string) (url string, stop func() error, stdout, stderr *syncBuf) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	stdout, stderr := &syncBuf{}, &syncBuf{}
+	stdout, stderr = &syncBuf{}, &syncBuf{}
 	errc := make(chan error, 1)
 	go func() { errc <- run(ctx, args, stdout, stderr) }()
 
@@ -60,7 +67,7 @@ func start(t *testing.T, args ...string) (url string, stop func() error, stderr 
 		return result
 	}
 	t.Cleanup(func() { _ = stop() })
-	return url, stop, stderr
+	return url, stop, stdout, stderr
 }
 
 func TestRunServesTheDashboardAndShutsDownCleanly(t *testing.T) {
