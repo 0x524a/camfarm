@@ -123,18 +123,30 @@ func TestErroredPlayDoesNotShiftTheTeardownSequence(t *testing.T) {
 	}
 	c.Close()
 
+	// wantTorn[i] is how many of PLAYs 2..i+1 the reference tears down.
+	wantTorn := make([]int, plays)
+	for i := 1; i < plays; i++ {
+		wantTorn[i] = wantTorn[i-1]
+		if want[i] {
+			wantTorn[i]++
+		}
+	}
 	for i := 1; i < plays; i++ {
 		pc := playClient(t, s.URL("cam-00"), func() {})
 		before := rec.Counters("cam-00").FramesServed
 		awaitCond(t, "frames", func() bool { return rec.Counters("cam-00").FramesServed >= before+8 })
-		torn := false
-		select {
-		case <-pc.Done():
-			torn = true
-		case <-time.After(50 * time.Millisecond):
+		// The teardown tally is bumped synchronously when the fault fires, so
+		// whether this PLAY was torn down is read from it, not from how long the
+		// client takes to notice.
+		if got := rec.Counters("cam-00").ByKind[string(fault.KindTeardown)].Applied; got != uint64(wantTorn[i]) {
+			t.Fatalf("PLAY %d: teardowns so far = %d, want %d (reference %v)", i+1, got, wantTorn[i], want)
 		}
-		if torn != want[i] {
-			t.Fatalf("PLAY %d torn down = %v, want %v (reference %v)", i+1, torn, want[i], want)
+		if want[i] {
+			select {
+			case <-pc.Done():
+			case <-time.After(10 * time.Second):
+				t.Fatalf("PLAY %d was torn down per the tally, but the client never noticed", i+1)
+			}
 		}
 		pc.c.Close()
 	}

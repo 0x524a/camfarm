@@ -196,7 +196,9 @@ func TestFrameDropKeepsSequenceContiguousAndJumpsTimestamps(t *testing.T) {
 
 	dropped := map[int]bool{}
 	for _, ev := range rec.Events() {
-		dropped[ev.FrameIndex] = true
+		if ev.Kind == string(fault.KindFrameDrop) {
+			dropped[ev.FrameIndex] = true
+		}
 	}
 	if len(dropped) == 0 || len(dropped) == steps {
 		t.Fatalf("seed gave %d drops of %d frames; pick a seed that mixes both", len(dropped), steps)
@@ -301,6 +303,47 @@ func TestProtectKeyframesKeepsRandomAccessFrames(t *testing.T) {
 	}
 }
 
+// SetFaults may be called from any goroutine while another steps the pump. Under
+// -race this pins that the queue is synchronised, and every swap is reported
+// exactly once, in order, at a non-decreasing frame index.
+func TestSetFaultsConcurrentWithStepIsRaceFree(t *testing.T) {
+	p, _ := newTestPump(t, seed.Seed(6), nil, obs.New(1000))
+	const swaps = 50
+	var applied []int
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < swaps; i++ {
+			rate := float64(i%2) * 0.5
+			if err := p.SetFaults([]fault.Spec{{Kind: fault.KindFrameDrop, Rate: rate}}, func(f int) { applied = append(applied, f) }); err != nil {
+				t.Errorf("SetFaults: %v", err)
+				return
+			}
+		}
+	}()
+	for running := true; running; {
+		select {
+		case <-done:
+			running = false
+		default:
+		}
+		if err := p.Step(); err != nil {
+			t.Fatalf("Step: %v", err)
+		}
+	}
+	if err := p.Step(); err != nil { // applies anything queued after the last loop Step
+		t.Fatalf("Step: %v", err)
+	}
+	if len(applied) != swaps {
+		t.Fatalf("%d swaps applied, want %d", len(applied), swaps)
+	}
+	for i := 1; i < len(applied); i++ {
+		if applied[i] < applied[i-1] {
+			t.Fatalf("swap frame indices go backwards: %v", applied)
+		}
+	}
+}
+
 func TestSetFaultsSwapsInAtTheNextFrameBoundary(t *testing.T) {
 	rec := obs.New(1000)
 	p, w := newTestPump(t, seed.Seed(5), nil, rec)
@@ -371,7 +414,9 @@ func TestFrameDropTimestampDeltaIsExactFrameIntervals(t *testing.T) {
 	}
 	dropped := map[int]bool{}
 	for _, ev := range rec.Events() {
-		dropped[ev.FrameIndex] = true
+		if ev.Kind == string(fault.KindFrameDrop) {
+			dropped[ev.FrameIndex] = true
+		}
 	}
 	if len(dropped) == 0 || len(dropped) == steps {
 		t.Fatalf("seed gave %d drops of %d frames; pick a seed that mixes both", len(dropped), steps)
