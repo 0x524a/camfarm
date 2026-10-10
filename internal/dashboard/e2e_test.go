@@ -297,7 +297,7 @@ func TestE2EUnimplementedFaultKindsAreDisabled(t *testing.T) {
 	url, _ := e2eServer(t)
 	s := newSession(t)
 	s.open(t, url)
-	for _, kind := range []string{"teardown_mid_session", "accept_then_silence"} {
+	for _, kind := range []string{"accept_then_silence"} {
 		opt := s.page.Locator(fmt.Sprintf(`tr[data-id="front-door"] .fault-kind option[value=%q]`, kind))
 		if err := expect().Locator(opt).ToBeDisabled(); err != nil {
 			t.Fatalf("unimplemented fault kind %s is selectable: %v", kind, err)

@@ -88,10 +88,10 @@ Kept in step with the catalogue in `internal/fault` by a test that fails if this
 | `frame_drop` | yes | Encoder skipping frames: a frame is never encoded, so RTP sequence numbers stay contiguous and the loss shows only as a timestamp jump. |
 | `packet_loss` | yes | Lossy path: packets of an encoded frame are withheld, leaving real sequence-number gaps with honest timestamps. |
 | `keyframe_starvation` | yes | Long-GOP camera: only every Nth keyframe is sent, so a client joining mid-stream cannot start decoding. |
-| `teardown_mid_session` | no | Camera that drops live sessions; exercises reconnect logic and resource leaks. |
+| `rtsp_error` | no | Flaky camera that answers 5xx or 454 to some DESCRIBE, SETUP or PLAY requests. |
+| `teardown` | no | Camera that drops live sessions; TCP reset when mode is reset. |
+| `sdp_lie` | no | SDP that misdescribes the stream: wrong codec, wrong parameter sets, wrong geometry or wrong Content-Base. |
 | `accept_then_silence` | no | Camera that accepts the TCP connection and never answers. |
-| `sdp_codec_lie` | no | SDP that advertises one codec while the stream carries another. |
-| `sps_resolution_lie` | no | SDP and SPS that advertise a geometry the frames do not match. |
 <!-- fault-table:end -->
 
 ## Use as a library

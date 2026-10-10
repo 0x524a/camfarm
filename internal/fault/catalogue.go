@@ -10,11 +10,12 @@ import (
 // dashboard form generated from the catalogue.
 type ParamType string
 
-// The parameter types. An enum type arrives with the first kind that needs it.
+// The parameter types. An enum parameter holds one string from Param.Options.
 const (
 	ParamNumber  ParamType = "number"
 	ParamInteger ParamType = "integer"
 	ParamBoolean ParamType = "boolean"
+	ParamEnum    ParamType = "enum"
 )
 
 // ErrBadParam reports a parameter that is missing, out of range, or does not
@@ -28,6 +29,7 @@ type Param struct {
 	Type     ParamType `json:"type"`
 	Min      *float64  `json:"min,omitempty"`
 	Max      *float64  `json:"max,omitempty"`
+	Options  []string  `json:"options,omitempty"` // allowed values of an enum parameter
 	Default  any       `json:"default,omitempty"`
 	Required bool      `json:"required"`
 	Help     string    `json:"help"`
@@ -47,6 +49,15 @@ func f64(v float64) *float64 { return &v }
 func rateParam() Param {
 	return Param{Name: "rate", Type: ParamNumber, Min: f64(0), Max: f64(1), Default: 0.2,
 		Help: "Probability in [0,1] that the fault fires for each unit of its clock."}
+}
+
+// onceRate is a rate parameter that defaults to 1: the fault fires every time
+// unless told otherwise.
+func onceRate(help string) Param {
+	p := rateParam()
+	p.Default = 1.0
+	p.Help = help
+	return p
 }
 
 func protectParam() Param {
@@ -91,10 +102,42 @@ func Catalogue() []KindInfo {
 					Help: "Deliver every Nth keyframe; the first is always delivered, the rest are never encoded."},
 			},
 		},
-		{Kind: KindTeardownMidSession, Models: "Camera that drops live sessions; exercises reconnect logic and resource leaks.", Params: []Param{}},
+		{
+			Kind: KindRTSPError, Models: "Flaky camera that answers 5xx or 454 to some DESCRIBE, SETUP or PLAY requests.",
+			Clock: "per-method request counter; one draw per matching request",
+			Params: []Param{
+				{Name: "on", Type: ParamEnum, Options: []string{"describe", "setup", "play", "all"}, Default: "describe", Required: true,
+					Help: "Which RTSP method the fault answers with an error; all covers every method."},
+				{Name: "status", Type: ParamInteger, Min: f64(400), Max: f64(599), Default: 503.0,
+					Help: "RTSP status code of the error reply."},
+				rate,
+				{Name: "onlyRequest", Type: ParamInteger, Min: f64(1), Max: f64(1000000), Default: 0.0,
+					Help: "Fail only the Nth matching request (ignores rate). 0 or omitted means unset."},
+			},
+		},
+		{
+			Kind: KindTeardown, Models: "Camera that drops live sessions; TCP reset when mode is reset.",
+			Clock: "frames since the reader joined; one draw per PLAY",
+			Params: []Param{
+				{Name: "afterFrames", Type: ParamInteger, Min: f64(1), Max: f64(100000), Default: 30.0, Required: true,
+					Help: "Frames delivered to a reader before its session is torn down."},
+				{Name: "mode", Type: ParamEnum, Options: []string{"close", "reset"}, Default: "close",
+					Help: "close ends the session cleanly; reset aborts the TCP connection."},
+				onceRate("Probability in [0,1] that a PLAY is torn down."),
+			},
+		},
+		{
+			Kind: KindSDPLie, Models: "SDP that misdescribes the stream: wrong codec, wrong parameter sets, wrong geometry or wrong Content-Base.",
+			Clock: "per-camera DESCRIBE counter; one draw per DESCRIBE",
+			Params: []Param{
+				{Name: "mode", Type: ParamEnum, Options: []string{"codec", "sprop", "resolution", "contentBase"}, Default: "codec", Required: true,
+					Help: "Which part of the SDP lies."},
+				onceRate("Probability in [0,1] that a DESCRIBE gets the lying SDP."),
+				{Name: "onlyRequest", Type: ParamInteger, Min: f64(1), Max: f64(1000000), Default: 0.0,
+					Help: "Lie only on the Nth DESCRIBE (ignores rate). 0 or omitted means unset."},
+			},
+		},
 		{Kind: KindAcceptThenSilence, Models: "Camera that accepts the TCP connection and never answers.", Params: []Param{}},
-		{Kind: KindSDPCodecLie, Models: "SDP that advertises one codec while the stream carries another.", Params: []Param{}},
-		{Kind: KindSPSResolutionLie, Models: "SDP and SPS that advertise a geometry the frames do not match.", Params: []Param{}},
 	}
 }
 
@@ -110,7 +153,7 @@ func Info(kind Kind) (KindInfo, bool) {
 
 // paramNames fixes the order parameters are checked in, so the first error
 // reported is reproducible.
-var paramNames = []string{"rate", "protectKeyframes", "meanBurst", "keepEvery"}
+var paramNames = []string{"rate", "protectKeyframes", "meanBurst", "keepEvery", "on", "status", "onlyRequest", "afterFrames", "mode"}
 
 // param reads a Spec field by its public name. A parameter counts as set when
 // non-zero, which matches the omitempty behaviour of the JSON form.
@@ -124,8 +167,36 @@ func (s Spec) param(name string) (v float64, set bool) {
 		return s.MeanBurst, s.MeanBurst != 0
 	case "keepEvery":
 		return float64(s.KeepEvery), s.KeepEvery != 0
+	case "status":
+		return float64(s.Status), s.Status != 0
+	case "onlyRequest":
+		return float64(s.OnlyRequest), s.OnlyRequest != 0
+	case "afterFrames":
+		return float64(s.AfterFrames), s.AfterFrames != 0
 	}
 	return 0, false
+}
+
+// enumParam reads an enum-valued Spec field by its public name. isEnum reports
+// whether name is an enum field at all; set whether it is non-empty.
+func (s Spec) enumParam(name string) (v string, set, isEnum bool) {
+	switch name {
+	case "on":
+		return s.On, s.On != "", true
+	case "mode":
+		return s.Mode, s.Mode != "", true
+	}
+	return "", false, false
+}
+
+// checkEnum reports whether v is one of p's options.
+func checkEnum(p Param, v string) error {
+	for _, o := range p.Options {
+		if o == v {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %q must be one of %v, got %q", ErrBadParam, p.Name, p.Options, v)
 }
 
 // boundsText formats only the bounds a parameter declares.
@@ -151,13 +222,34 @@ func Validate(s Spec) error {
 	if !info.Implemented {
 		return nil
 	}
+	return checkParams(info, s)
+}
+
+// checkParams validates s's parameters against info, whether or not the kind
+// is implemented. It is separate from Validate so the checks, including enum
+// membership, can be exercised on a KindInfo the tests construct.
+func checkParams(info KindInfo, s Spec) error {
 	declared := map[string]Param{}
 	for _, p := range info.Params {
 		declared[p.Name] = p
 	}
 	for _, name := range paramNames {
-		v, set := s.param(name)
 		p, applies := declared[name]
+		if ev, eset, isEnum := s.enumParam(name); isEnum {
+			switch {
+			case !applies && eset:
+				return fmt.Errorf("%w: %q does not apply to %q", ErrBadParam, name, s.Kind)
+			case !applies:
+			case !eset && p.Required:
+				return fmt.Errorf("%w: %q requires %q", ErrBadParam, s.Kind, name)
+			case eset:
+				if err := checkEnum(p, ev); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		v, set := s.param(name)
 		switch {
 		case !applies && set:
 			return fmt.Errorf("%w: %q does not apply to %q", ErrBadParam, name, s.Kind)

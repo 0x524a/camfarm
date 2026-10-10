@@ -42,7 +42,7 @@ func TestCatalogueOrderAndImplementedFlags(t *testing.T) {
 		}
 	}
 	want := []Kind{KindFrameDrop, KindPacketLoss, KindKeyframeStarvation,
-		KindTeardownMidSession, KindAcceptThenSilence, KindSDPCodecLie, KindSPSResolutionLie}
+		KindRTSPError, KindTeardown, KindSDPLie, KindAcceptThenSilence}
 	if len(kinds) != len(want) {
 		t.Fatalf("catalogue kinds = %v, want %v", kinds, want)
 	}
@@ -56,7 +56,7 @@ func TestCatalogueOrderAndImplementedFlags(t *testing.T) {
 			t.Errorf("%q should be implemented", k)
 		}
 	}
-	for _, k := range []Kind{KindTeardownMidSession, KindAcceptThenSilence, KindSDPCodecLie, KindSPSResolutionLie} {
+	for _, k := range []Kind{KindRTSPError, KindTeardown, KindSDPLie, KindAcceptThenSilence} {
 		if impl[k] {
 			t.Errorf("%q should not be implemented yet", k)
 		}
@@ -139,7 +139,7 @@ func TestValidate(t *testing.T) {
 		{"keyframe_starvation rate does not apply", Spec{Kind: KindKeyframeStarvation, KeepEvery: 3, Rate: 0.5}, ErrBadParam},
 		{"keyframe_starvation protectKeyframes does not apply", Spec{Kind: KindKeyframeStarvation, KeepEvery: 3, ProtectKeyframes: true}, ErrBadParam},
 		{"unknown kind", Spec{Kind: "nope"}, ErrUnknownKind},
-		{"unimplemented kinds skip param checks", Spec{Kind: KindSDPCodecLie, Rate: 0.5, KeepEvery: 7}, nil},
+		{"unimplemented kinds skip param checks", Spec{Kind: KindAcceptThenSilence, Rate: 0.5, KeepEvery: 7}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

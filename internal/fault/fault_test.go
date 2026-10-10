@@ -176,7 +176,7 @@ func TestRejectsUnknownKindAndBadRate(t *testing.T) {
 // rate 1 fires on every frame, so if the switch ever started treating this
 // kind as rate-based, this test would catch it immediately.
 func TestNonFrameScopedKindNeverDecides(t *testing.T) {
-	e, err := New(seed.Seed(1), []Spec{{Kind: KindTeardownMidSession, Rate: 1}})
+	e, err := New(seed.Seed(1), []Spec{{Kind: KindAcceptThenSilence, Rate: 1}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestImplemented(t *testing.T) {
 			t.Errorf("%s should be implemented", k)
 		}
 	}
-	for _, k := range []Kind{KindTeardownMidSession, KindAcceptThenSilence, KindSDPCodecLie, KindSPSResolutionLie} {
+	for _, k := range []Kind{KindRTSPError, KindTeardown, KindSDPLie, KindAcceptThenSilence} {
 		if Implemented(k) {
 			t.Errorf("%s should not be implemented yet", k)
 		}
@@ -246,10 +246,10 @@ func TestKnown(t *testing.T) {
 		KindFrameDrop,
 		KindPacketLoss,
 		KindKeyframeStarvation,
-		KindTeardownMidSession,
+		KindRTSPError,
+		KindTeardown,
+		KindSDPLie,
 		KindAcceptThenSilence,
-		KindSDPCodecLie,
-		KindSPSResolutionLie,
 	} {
 		if !Known(k) {
 			t.Errorf("Known(%q) = false, want true", k)
