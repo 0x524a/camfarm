@@ -56,7 +56,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs.Usage = func() { fmt.Fprint(stderr, usage); fs.PrintDefaults() }
 	specPath := fs.String("spec", "", "path to a JSON fleet spec")
 	seedFlag := fs.Uint64("seed", 0, "root seed (drawn at random and printed when omitted)")
-	cameras := fs.Int("cameras", 1, "number of cameras cam-1..N on the bundled fixture (ignored with --spec)")
+	cameras := fs.Int("cameras", 1, "number of cameras cam-1..N on the bundled fixture (cannot be combined with --spec)")
 	httpAddr := fs.String("http-addr", "127.0.0.1:8080", "dashboard listen address")
 	listenHost := fs.String("listen-host", "", "host the RTSP and ONVIF listeners bind (default 127.0.0.1)")
 	rtspPort := fs.Int("rtsp-port", 0, "RTSP port (0 picks a free one)")
