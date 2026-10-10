@@ -186,3 +186,16 @@ func TestNewRefusesRepeatedKind(t *testing.T) {
 		t.Fatalf("err = %v, want ErrDuplicateKind", err)
 	}
 }
+
+func TestSpecParamUnknownNameIsUnset(t *testing.T) {
+	if v, set := (Spec{Rate: 0.5}).param("nope"); v != 0 || set {
+		t.Fatalf("param(nope) = %v, %v; want 0, false", v, set)
+	}
+}
+
+func TestNewReturnsValidationErrors(t *testing.T) {
+	_, err := New(seed.Seed(1), []Spec{{Kind: KindKeyframeStarvation}})
+	if !errors.Is(err, ErrBadParam) {
+		t.Fatalf("New with keepEvery missing = %v, want ErrBadParam", err)
+	}
+}
