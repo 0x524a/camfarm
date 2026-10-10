@@ -116,7 +116,7 @@ func Catalogue() []KindInfo {
 			},
 		},
 		{
-			Kind: KindTeardown, Models: "Camera that drops live sessions; TCP reset when mode is reset.",
+			Kind: KindTeardown, Implemented: true, Models: "Camera that drops live sessions; TCP reset when mode is reset.",
 			Clock: "frames since the reader joined; one draw per PLAY",
 			Params: []Param{
 				{Name: "afterFrames", Type: ParamInteger, Min: f64(1), Max: f64(100000), Default: 30.0, Required: true,

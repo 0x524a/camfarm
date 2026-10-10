@@ -95,6 +95,11 @@ type Server struct {
 	cams    map[string]*camera
 	order   []string
 	readers map[*gortsplib.ServerSession]string
+
+	// armMu guards armed, the sessions a teardown fault will end. It is never
+	// held while closing a session or connection, and never together with mu.
+	armMu   sync.Mutex
+	armed   map[*gortsplib.ServerSession]*armed
 	rootCtx context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -151,6 +156,7 @@ func New(cfg Config) (*Server, error) {
 		ck:      cfg.Clock,
 		cams:    make(map[string]*camera, len(cfg.Cameras)),
 		readers: make(map[*gortsplib.ServerSession]string),
+		armed:   make(map[*gortsplib.ServerSession]*armed),
 	}
 	if s.log == nil {
 		s.log = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -206,13 +212,14 @@ func (s *Server) buildPumps() (pumps map[string]*Pump, failedID string, err erro
 	for _, id := range s.order {
 		cam := s.cams[id]
 		pump, err := NewPump(PumpConfig{
-			CameraID: cam.id,
-			Media:    cam.cfg.Media,
-			Medi:     cam.medi,
-			Writer:   cam.stream,
-			Seed:     cam.cfg.Seed,
-			Faults:   mediaFaults(cam.cfg.Faults),
-			Obs:      s.cfg.Obs,
+			CameraID:   cam.id,
+			Media:      cam.cfg.Media,
+			Medi:       cam.medi,
+			Writer:     cam.stream,
+			Seed:       cam.cfg.Seed,
+			Faults:     mediaFaults(cam.cfg.Faults),
+			Obs:        s.cfg.Obs,
+			AfterFrame: func() { s.afterFrame(id) },
 		})
 		if err != nil {
 			return nil, id, err
@@ -427,13 +434,14 @@ func (s *Server) AddCamera(cc CameraConfig) error {
 	}
 
 	pump, err := NewPump(PumpConfig{
-		CameraID: cc.ID,
-		Media:    cc.Media,
-		Medi:     medi,
-		Writer:   stream,
-		Seed:     cc.Seed,
-		Faults:   mediaFaults(cc.Faults),
-		Obs:      s.cfg.Obs,
+		CameraID:   cc.ID,
+		Media:      cc.Media,
+		Medi:       medi,
+		Writer:     stream,
+		Seed:       cc.Seed,
+		Faults:     mediaFaults(cc.Faults),
+		Obs:        s.cfg.Obs,
+		AfterFrame: func() { s.afterFrame(cc.ID) },
 	})
 	if err != nil {
 		stream.Close()
@@ -615,8 +623,9 @@ func (s *Server) OnConnClose(ctx *gortsplib.ServerHandlerOnConnCloseCtx) {
 // OnSessionClose drops the session's reader registration.
 func (s *Server) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.readers, ctx.Session)
+	s.mu.Unlock()
+	s.disarm(ctx.Session)
 }
 
 // OnDescribe answers DESCRIBE by path.
@@ -657,6 +666,9 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 	}
 	if s.testOnPlay != nil {
 		s.testOnPlay(ctx)
+	}
+	if a := ctl.ArmPlay(); a != nil {
+		s.arm(id, ctx.Session, ctx.Conn, a)
 	}
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }

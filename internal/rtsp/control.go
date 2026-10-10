@@ -2,9 +2,11 @@ package rtsp
 
 import (
 	"fmt"
+	"net"
 	"slices"
 	"sort"
 
+	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
 
 	"github.com/0x524a/camfarm/internal/fault"
@@ -141,4 +143,69 @@ func (s *Server) answerError(m fault.Method, camID string, d fault.ControlDecisi
 		}
 	}
 	return res
+}
+
+// armed is a session a teardown fault will end once remaining more frames have
+// been stepped for its camera.
+type armed struct {
+	camID     string
+	sess      *gortsplib.ServerSession
+	conn      *gortsplib.ServerConn
+	remaining int
+	mode      string
+}
+
+// arm registers a freshly playing session for teardown.
+func (s *Server) arm(camID string, sess *gortsplib.ServerSession, conn *gortsplib.ServerConn, a *fault.Arming) {
+	s.armMu.Lock()
+	s.armed[sess] = &armed{camID: camID, sess: sess, conn: conn, remaining: a.AfterFrames, mode: a.Mode}
+	s.armMu.Unlock()
+}
+
+// disarm forgets a session; called when the session closes.
+func (s *Server) disarm(sess *gortsplib.ServerSession) {
+	s.armMu.Lock()
+	delete(s.armed, sess)
+	s.armMu.Unlock()
+}
+
+// afterFrame is the pump hook: it counts one stepped frame against every armed
+// session of the camera and ends those that reach zero. Counting is by pump
+// step, never wall clock, so a seed and a frame count fix the outcome.
+func (s *Server) afterFrame(camID string) {
+	var due []*armed
+	s.armMu.Lock()
+	for sess, a := range s.armed {
+		if a.camID != camID {
+			continue
+		}
+		a.remaining--
+		if a.remaining <= 0 {
+			due = append(due, a)
+			delete(s.armed, sess)
+		}
+	}
+	s.armMu.Unlock()
+
+	// armMu is released before closing: closing triggers OnSessionClose, which
+	// takes it.
+	for _, a := range due {
+		s.cfg.Obs.Fault(camID, 0, string(fault.KindTeardown), "session torn down ("+a.mode+")")
+		s.cfg.Obs.FaultTally(camID, string(fault.KindTeardown), 1, 0)
+		s.tearDown(a)
+	}
+}
+
+// tearDown ends a session. Every call is safe on a session or connection that
+// is already gone.
+func (s *Server) tearDown(a *armed) {
+	nc := a.conn.NetConn()
+	if a.mode == "reset" {
+		if tc, ok := nc.(*net.TCPConn); ok {
+			_ = tc.SetLinger(0) // close sends RST rather than FIN
+		}
+		_ = nc.Close()
+		return
+	}
+	a.sess.Close()
 }

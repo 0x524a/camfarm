@@ -674,3 +674,26 @@ func TestFrameDropTallyCountsAppliedAndSuppressed(t *testing.T) {
 		t.Fatalf("tally = %+v over %d frames; want applied+suppressed == frames, both non-zero", tally, steps)
 	}
 }
+
+func TestAfterFrameIsCalledOncePerStepIncludingDroppedFrames(t *testing.T) {
+	for _, faults := range [][]fault.Spec{nil, {{Kind: fault.KindFrameDrop, Rate: 1}}} {
+		calls := 0
+		w := &recorder{}
+		p, err := NewPump(PumpConfig{
+			CameraID: "cam", Media: testMedia(t), Medi: &description.Media{Type: description.MediaTypeVideo},
+			Writer: w, Seed: seed.Seed(1), Faults: faults, Obs: obs.New(10),
+			AfterFrame: func() { calls++ },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 7; i++ {
+			if err := p.Step(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if calls != 7 {
+			t.Fatalf("faults %v: AfterFrame called %d times over 7 steps", faults, calls)
+		}
+	}
+}

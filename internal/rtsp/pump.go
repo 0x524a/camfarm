@@ -62,6 +62,10 @@ type PumpConfig struct {
 	Seed     seed.Seed
 	Faults   []fault.Spec
 	Obs      *obs.Recorder
+	// AfterFrame, if set, is called at the end of every Step that completes,
+	// dropped frames included, so a consumer counts frames by pump step rather
+	// than by wall clock.
+	AfterFrame func()
 }
 
 // Pump paces one camera's media onto its stream.
@@ -76,6 +80,8 @@ type Pump struct {
 	aus    []media.AccessUnit
 	obs    *obs.Recorder
 	faults *fault.Engine
+
+	afterFrame func()
 
 	faultSeed seed.Seed
 
@@ -175,6 +181,7 @@ func NewPump(cfg PumpConfig) (*Pump, error) {
 		enc:        enc,
 		aus:        cfg.Media.AUs,
 		obs:        cfg.Obs,
+		afterFrame: cfg.AfterFrame,
 		faults:     eng,
 		faultSeed:  faultSeed,
 		initialSeq: initialSeq,
@@ -299,6 +306,9 @@ func (p *Pump) Step() error {
 		p.idx = 0
 		p.loops++
 		p.obs.Loop(p.id)
+	}
+	if p.afterFrame != nil {
+		p.afterFrame()
 	}
 	return nil
 }
