@@ -112,7 +112,7 @@ func Catalogue() []KindInfo {
 					Help: "RTSP status code of the error reply."},
 				rate,
 				{Name: "onlyRequest", Type: ParamInteger, Min: f64(1), Max: f64(1000000), Default: 0.0,
-					Help: "Fail only the Nth matching request (ignores rate). 0 or omitted means unset."},
+					Help: "Fail only the Nth matching request (ignores rate); with on all, requests of every method share one count. 0 or omitted means unset."},
 			},
 		},
 		{

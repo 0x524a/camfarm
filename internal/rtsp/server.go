@@ -514,6 +514,9 @@ func (s *Server) RemoveCamera(id string) error {
 	cancel()
 	<-done
 	stream.Close()
+	// Drop after the pump is gone, so no stale entry can hit a camera re-added
+	// under the same ID.
+	s.disarmCamera(id)
 
 	s.log.Info("camera removed", "camera", id)
 	return nil
@@ -669,11 +672,15 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 	if !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil
 	}
-	if res := s.answerError(fault.MethodPlay, id, ctl.Decide(fault.MethodPlay)); res != nil {
+	d := ctl.Decide(fault.MethodPlay)
+	// The teardown draw is taken on every PLAY, errored or not, so an rtsp_error
+	// cannot shift the teardown sequence; an errored PLAY discards the arming.
+	a := ctl.ArmPlay()
+	if res := s.answerError(fault.MethodPlay, id, d); res != nil {
 		return res, nil
 	}
-	if a := ctl.ArmPlay(); a != nil {
-		s.arm(id, ctx.Session, ctx.Conn, a)
+	if a != nil {
+		s.arm(id, ctx.Session, ctx.Conn, a, d.Request)
 	}
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }

@@ -75,14 +75,27 @@ Early:
   Control-plane faults have their own limits:
   - `rtsp_error`, `sdp_lie` and `teardown` are deterministic for a **single client** only: their
     request counters and draws are per camera and shared across connections, so concurrent
-    clients interleave non-deterministically.
+    clients interleave non-deterministically. `Camera.Screenshot` and the dashboard Snapshot
+    are RTSP clients too and consume control draws, so the single-client claim excludes using
+    them concurrently with a test client.
+  - The **request index** (the `clock: request` journal index and the event-log index of
+    `rtsp_error` and `teardown`) counts DESCRIBE, SETUP and PLAY requests to that camera since
+    its creation, including requests answered with an injected error, and excluding OPTIONS and
+    TEARDOWN.
+  - Omitted parameters: an `rtsp_error` without `status` answers 503, and without `rate` and
+    `onlyRequest` uses the catalogue default rate 0.2 (so a rate of 0 cannot be requested; use a
+    tiny rate such as 1e-9 to mean "never"). `sdp_lie` and `teardown` treat an omitted rate as 1
+    (always); to not inject them, clear the fault or use a tiny rate. With `on: all`,
+    `onlyRequest` counts requests of every method on one counter.
   - A control-plane fault takes effect on the **next request**, not on a frame boundary. Journal
     entries carry a `clock` of `request` or `frame`. For a set containing both classes the
     request-clock entry is journaled at once and the frame-clock entry at the next frame
     boundary, in that order. Only classes whose specs changed are journaled and restarted;
     re-injecting an identical fault is a no-op, so to restart its seeded sequence, clear and then
     inject. There is still no per-kind clear: clearing removes every fault.
-  - `teardown` counts pump frames, not wall-clock time (frames removed by `frame_drop` or
+  - `teardown` counts pump frames, not wall-clock time; the decision to tear down at frame N is
+    deterministic, but the number of frames the client actually received can be `afterFrames`-1
+    depending on scheduling (frames removed by `frame_drop` or
     `keyframe_starvation` still count), and a frame that fails to encode or write
     does not count. Its `reset` mode reaches the connection through `ServerConn.NetConn()`, which
     is outside `gortsplib`'s documented API, and is pinned by a test so a library upgrade that
@@ -92,7 +105,7 @@ Early:
     (the honest `fmtp` stays); `sprop` replaces the parameter sets; `resolution` substitutes one
     of two embedded SPS constants (`mediacommon` has no SPS writer); `contentBase` replaces the
     host with `wrong.invalid` and keeps the path. `a=control` lines are never altered. A lie is
-    counted in the fault tally and journal only when the rewrite actually changed the response.
+    counted in the fault tally and the obs event log (the fleet journal holds only inject, clear, add and remove) only when the rewrite actually changed the response.
 - **Works:** Playwright end-to-end tests of the dashboard, behind the `e2e` build tag and run in
   the `e2e` CI job. Locally, `go test -tags e2e ./internal/dashboard/` needs Chromium installed
   for Playwright.

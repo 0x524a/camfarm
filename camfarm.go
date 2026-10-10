@@ -593,7 +593,8 @@ func (c *Camera) Faults() []FaultSpec {
 }
 
 // Inject adds a fault to a running camera, replacing any active fault of the
-// same kind. The change takes effect at the camera's next frame boundary.
+// same kind. A per-frame kind takes effect at the camera's next frame boundary,
+// a control-plane kind (rtsp_error, sdp_lie, teardown) on the next request.
 // Only implemented kinds are accepted; the rest return ErrUnsupported.
 //
 // Faults come in two classes, per-frame (the pump) and per-request (the control

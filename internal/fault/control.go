@@ -18,6 +18,12 @@ const (
 	MethodPlay     Method = "play"
 )
 
+// Catalogue defaults for an rtsp_error whose status or rate was omitted.
+const (
+	defaultErrorStatus = 503
+	defaultErrorRate   = 0.2
+)
+
 // ErrorDecision is an rtsp_error that fired: reply with Status.
 type ErrorDecision struct{ Status int }
 
@@ -72,19 +78,36 @@ func NewControlEngine(s seed.Seed) *ControlEngine {
 // kind name, exactly as New seeds it, and fresh counters, so a newly injected
 // fault always starts the same sequence. The request total is not reset.
 func (e *ControlEngine) Set(specs []Spec) error {
+	_, err := e.SetAt(specs)
+	return err
+}
+
+// SetAt is Set that also returns the request total at the instant of the swap,
+// read under the same lock, so a journal index cannot straddle a concurrent
+// Decide.
+func (e *ControlEngine) SetAt(specs []Spec) (int, error) {
 	next := map[Kind]*ctlEntry{}
 	for _, sp := range specs {
 		if !isControlKind(sp.Kind) {
 			continue
 		}
 		if _, dup := next[sp.Kind]; dup {
-			return fmt.Errorf("%w: %q", ErrDuplicateKind, sp.Kind)
+			return 0, fmt.Errorf("%w: %q", ErrDuplicateKind, sp.Kind)
 		}
 		if sp.Rate < 0 || sp.Rate > 1 {
-			return fmt.Errorf("%w: %v for %q", ErrBadRate, sp.Rate, sp.Kind)
+			return 0, fmt.Errorf("%w: %v for %q", ErrBadRate, sp.Rate, sp.Kind)
 		}
 		if err := Validate(sp); err != nil {
-			return err
+			return 0, err
+		}
+		if sp.Kind == KindRTSPError {
+			// Omitted parameters take the catalogue defaults, for every caller.
+			if sp.Status == 0 {
+				sp.Status = defaultErrorStatus
+			}
+			if sp.Rate == 0 && sp.OnlyRequest == 0 {
+				sp.Rate = defaultErrorRate
+			}
 		}
 		next[sp.Kind] = &ctlEntry{
 			spec: sp,
@@ -93,9 +116,9 @@ func (e *ControlEngine) Set(specs []Spec) error {
 		}
 	}
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.specs = next
-	e.mu.Unlock()
-	return nil
+	return e.total, nil
 }
 
 // IsControl reports whether a kind is decided per RTSP request by a
@@ -159,10 +182,16 @@ func (e *ControlEngine) Decide(m Method) ControlDecision {
 // fires counts one matching request and draws once, then decides: OnlyRequest
 // fires on exactly that matching request and ignores rate.
 func (en *ctlEntry) fires(m Method, rate float64) bool {
-	en.seen[m]++
+	// "on: all" counts every method on one counter, so "the Nth matching
+	// request" fires once; a single method keeps its own.
+	key := m
+	if en.spec.On == "all" {
+		key = "all"
+	}
+	en.seen[key]++
 	u := en.rnd.Float64()
 	if en.spec.OnlyRequest > 0 {
-		return en.seen[m] == en.spec.OnlyRequest
+		return en.seen[key] == en.spec.OnlyRequest
 	}
 	return u < rate
 }

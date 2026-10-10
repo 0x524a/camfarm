@@ -38,7 +38,7 @@ func TestRTSPErrorOtherMethodsDoNotAdvanceTheCounter(t *testing.T) {
 	}
 }
 
-func TestRTSPErrorRateZeroNeverFiresAndSeedIsReproducible(t *testing.T) {
+func TestRTSPErrorTinyRateNeverFiresAndSeedIsReproducible(t *testing.T) {
 	run := func() []bool {
 		e := fault.NewControlEngine(seed.Seed(7))
 		_ = e.Set([]fault.Spec{{Kind: fault.KindRTSPError, On: "all", Status: 503, Rate: 0.5}})
@@ -62,10 +62,10 @@ func TestRTSPErrorRateZeroNeverFiresAndSeedIsReproducible(t *testing.T) {
 		t.Fatalf("rate 0.5 fired %d of %d", fired, len(first))
 	}
 	e := fault.NewControlEngine(seed.Seed(7))
-	_ = e.Set([]fault.Spec{{Kind: fault.KindRTSPError, On: "all", Status: 503}})
+	_ = e.Set([]fault.Spec{{Kind: fault.KindRTSPError, On: "all", Status: 503, Rate: 1e-9}})
 	for i := 0; i < 100; i++ {
 		if e.Decide(fault.MethodPlay).Error != nil {
-			t.Fatal("rate 0 fired")
+			t.Fatal("tiny rate fired")
 		}
 	}
 }

@@ -112,15 +112,31 @@ func (s *Server) SetFaults(id string, specs []fault.Spec, applied func(index int
 		cam.media = media
 	}
 	if controlChanged {
-		if err := cam.ctl.Set(control); err != nil {
+		at, err := cam.ctl.SetAt(control)
+		if err != nil {
 			return err // unreachable: validated above
+		}
+		if teardownSpec(cam.control) != teardownSpec(control) {
+			// A session armed by a teardown that was removed or changed must not
+			// be ended by it.
+			s.disarmCamera(id)
 		}
 		cam.control = control
 		if applied != nil {
-			applied(cam.ctl.Requests(), clockRequest)
+			applied(at, clockRequest)
 		}
 	}
 	return nil
+}
+
+// teardownSpec returns the teardown spec in specs, or the zero Spec.
+func teardownSpec(specs []fault.Spec) fault.Spec {
+	for _, sp := range specs {
+		if sp.Kind == fault.KindTeardown {
+			return sp
+		}
+	}
+	return fault.Spec{}
 }
 
 // answerError turns a fired rtsp_error into the response to send, recording it.
@@ -154,12 +170,24 @@ type armed struct {
 	conn      *gortsplib.ServerConn
 	remaining int
 	mode      string
+	request   int // the request index of the PLAY that armed it
 }
 
 // arm registers a freshly playing session for teardown.
-func (s *Server) arm(camID string, sess *gortsplib.ServerSession, conn *gortsplib.ServerConn, a *fault.Arming) {
+func (s *Server) arm(camID string, sess *gortsplib.ServerSession, conn *gortsplib.ServerConn, a *fault.Arming, request int) {
 	s.armMu.Lock()
-	s.armed[sess] = &armed{camID: camID, sess: sess, conn: conn, remaining: a.AfterFrames, mode: a.Mode}
+	s.armed[sess] = &armed{camID: camID, sess: sess, conn: conn, remaining: a.AfterFrames, mode: a.Mode, request: request}
+	s.armMu.Unlock()
+}
+
+// disarmCamera forgets every session armed for a camera.
+func (s *Server) disarmCamera(camID string) {
+	s.armMu.Lock()
+	for sess, a := range s.armed {
+		if a.camID == camID {
+			delete(s.armed, sess)
+		}
+	}
 	s.armMu.Unlock()
 }
 
@@ -191,7 +219,7 @@ func (s *Server) afterFrame(camID string) {
 	// armMu is released before closing: closing triggers OnSessionClose, which
 	// takes it.
 	for _, a := range due {
-		s.cfg.Obs.Fault(camID, 0, string(fault.KindTeardown), "session torn down ("+a.mode+")")
+		s.cfg.Obs.Fault(camID, a.request, string(fault.KindTeardown), "session torn down ("+a.mode+")")
 		s.cfg.Obs.FaultTally(camID, string(fault.KindTeardown), 1, 0)
 		s.tearDown(a)
 	}
