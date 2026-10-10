@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
@@ -23,6 +24,17 @@ import (
 // camera that is lying on purpose and a camera that is broken being
 // indistinguishable would make this tool useless.
 const detailDecidedNotApplied = "decided; effect not implemented in this version"
+
+const (
+	detailFrameDropApplied = "applied: access unit not encoded or sent"
+	detailSuppressed       = "decided; suppressed by protect_keyframes"
+)
+
+// faultSwap is a pending replacement of a pump's fault engine.
+type faultSwap struct {
+	eng     *fault.Engine
+	applied func(frameIndex int)
+}
 
 // packetWriter is the narrow slice of ServerStream the pump needs.
 //
@@ -67,6 +79,14 @@ type Pump struct {
 	aus    []media.AccessUnit
 	obs    *obs.Recorder
 	faults *fault.Engine
+
+	faultSeed seed.Seed
+
+	// swapMu guards pending. Everything else on a Pump is owned by the one
+	// goroutine that calls Step; this queue is the only way another goroutine
+	// reaches in, and it is drained between frames.
+	swapMu  sync.Mutex
+	pending []faultSwap
 
 	initialSeq uint16
 	frameDur   int64
@@ -129,7 +149,8 @@ func NewPump(cfg PumpConfig) (*Pump, error) {
 		return nil, errors.New("rtsp: pump media has no access units")
 	}
 
-	eng, err := fault.New(cfg.Seed.Stream("fault"), cfg.Faults)
+	faultSeed := cfg.Seed.Stream("fault")
+	eng, err := fault.New(faultSeed, cfg.Faults)
 	if err != nil {
 		return nil, err
 	}
@@ -158,6 +179,7 @@ func NewPump(cfg PumpConfig) (*Pump, error) {
 		aus:        cfg.Media.AUs,
 		obs:        cfg.Obs,
 		faults:     eng,
+		faultSeed:  faultSeed,
 		initialSeq: initialSeq,
 		frameDur:   cfg.Media.FrameDuration(),
 	}, nil
@@ -173,30 +195,71 @@ func (p *Pump) Loops() uint64 { return p.loops }
 // InitialSequenceNumber returns the seed-derived first RTP sequence number.
 func (p *Pump) InitialSequenceNumber() uint16 { return p.initialSeq }
 
+// SetFaults replaces this camera's fault set. The specs are validated now; the
+// swap itself happens at the start of the next Step, so no frame is
+// half-affected. applied, if non-nil, is called from the stepping goroutine
+// with the frame index the new set takes effect on. Several calls between two
+// frames apply in order.
+func (p *Pump) SetFaults(specs []fault.Spec, applied func(frameIndex int)) error {
+	eng, err := fault.New(p.faultSeed, specs)
+	if err != nil {
+		return err
+	}
+	p.swapMu.Lock()
+	p.pending = append(p.pending, faultSwap{eng: eng, applied: applied})
+	p.swapMu.Unlock()
+	return nil
+}
+
+func (p *Pump) applyPendingFaults() {
+	p.swapMu.Lock()
+	swaps := p.pending
+	p.pending = nil
+	p.swapMu.Unlock()
+	for _, s := range swaps {
+		p.faults = s.eng
+		if s.applied != nil {
+			s.applied(p.frameCounter)
+		}
+	}
+}
+
 // Step writes exactly one access unit.
 func (p *Pump) Step() error {
+	p.applyPendingFaults()
 	au := p.aus[p.idx]
 
-	// The fault seam. Decisions are recorded; none of them changes what is
-	// written in this version.
+	// The fault seam. frame_drop is applied here; kinds whose effect does not
+	// exist yet are recorded as decided and change nothing.
+	drop := false
 	for _, d := range p.faults.DecideFrame(p.frameCounter, au.RandomAccess) {
-		p.obs.Fault(p.id, d.FrameIndex, string(d.Kind), detailDecidedNotApplied)
-	}
-
-	pkts, err := p.enc.Encode(au.NALUs)
-	if err != nil {
-		return fmt.Errorf("rtsp: encoding access unit %d of %q: %w", p.idx, p.id, err)
-	}
-
-	ts := uint32(p.tsOffset + au.DTS)
-	for _, pkt := range pkts {
-		pkt.Timestamp = ts
-		if err := p.w.WritePacketRTP(p.medi, pkt); err != nil {
-			return fmt.Errorf("rtsp: writing RTP for %q: %w", p.id, err)
+		switch {
+		case d.Suppressed:
+			p.obs.Fault(p.id, d.FrameIndex, string(d.Kind), detailSuppressed)
+		case d.Kind == fault.KindFrameDrop:
+			p.obs.Fault(p.id, d.FrameIndex, string(d.Kind), detailFrameDropApplied)
+			drop = true
+		default:
+			p.obs.Fault(p.id, d.FrameIndex, string(d.Kind), detailDecidedNotApplied)
 		}
 	}
 
-	p.obs.Frame(p.id)
+	if !drop {
+		pkts, err := p.enc.Encode(au.NALUs)
+		if err != nil {
+			return fmt.Errorf("rtsp: encoding access unit %d of %q: %w", p.idx, p.id, err)
+		}
+
+		ts := uint32(p.tsOffset + au.DTS)
+		for _, pkt := range pkts {
+			pkt.Timestamp = ts
+			if err := p.w.WritePacketRTP(p.medi, pkt); err != nil {
+				return fmt.Errorf("rtsp: writing RTP for %q: %w", p.id, err)
+			}
+		}
+		p.obs.Frame(p.id)
+	}
+
 	p.frameCounter++
 	p.idx++
 
