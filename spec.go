@@ -75,6 +75,17 @@ type FaultSpec struct {
 	MeanBurst float64 `json:"meanBurst,omitempty"`
 	// KeepEvery, for keyframe_starvation, delivers every Nth keyframe.
 	KeepEvery int `json:"keepEvery,omitempty"`
+	// On, for rtsp_error, names the failing method: describe, setup, play or all.
+	On string `json:"on,omitempty"`
+	// Status, for rtsp_error, is the RTSP status code of the reply.
+	Status int `json:"status,omitempty"`
+	// OnlyRequest, for rtsp_error and sdp_lie, fires on the Nth matching request only.
+	OnlyRequest int `json:"onlyRequest,omitempty"`
+	// AfterFrames, for teardown, is the frames delivered before teardown.
+	AfterFrames int `json:"afterFrames,omitempty"`
+	// Mode selects a variant of teardown (close, reset) or sdp_lie (codec,
+	// sprop, resolution, contentBase).
+	Mode string `json:"mode,omitempty"`
 }
 
 // ListenSpec describes what the fleet binds.
@@ -230,7 +241,8 @@ func toFaultSpecs(in []FaultSpec) []fault.Spec {
 
 func toFaultSpec(f FaultSpec) fault.Spec {
 	return fault.Spec{Kind: fault.Kind(f.Kind), Rate: f.Rate, ProtectKeyframes: f.ProtectKeyframes,
-		MeanBurst: f.MeanBurst, KeepEvery: f.KeepEvery}
+		MeanBurst: f.MeanBurst, KeepEvery: f.KeepEvery,
+		On: f.On, Status: f.Status, OnlyRequest: f.OnlyRequest, AfterFrames: f.AfterFrames, Mode: f.Mode}
 }
 
 // validateFault is the one place a fault is checked, shared by spec

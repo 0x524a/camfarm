@@ -249,7 +249,7 @@ func TestSetResetsStreamsAndEngineIsRaceFree(t *testing.T) {
 **Interfaces:**
 - Consumes: `ControlEngine` (Task 2), `fault.KindRTSPError` flipped to `Implemented: true` in this task.
 - Produces:
-  - `Server.SetFaults(id, specs, applied func(index int, clock string))`; signature change from `applied func(frameIndex int)`. Media kinds go to the pump (applied with `"frame"`), control kinds to `cam.ctl` (applied immediately with `"request"` and `ctl.Requests()`). A set with both calls `applied` once per class present, in the order frame, request; `camfarm` publishes one change-feed event and journal entry per call. (Ruling R5: one entry per class keeps `Clock` unambiguous.)
+  - `Server.SetFaults(id, specs, applied func(index int, clock string))`; signature change from `applied func(frameIndex int)`. Media kinds go to the pump (applied with `"frame"`), control kinds to `cam.ctl` (applied immediately with `"request"` and `ctl.Requests()`). A set with both calls `applied` once per class present, in the order frame, request; `camfarm` publishes one change-feed event and journal entry per call. (Ruling R5: one entry per class keeps `Clock` unambiguous.) *Superseded:* the shipped order is request then frame (effect order), and only classes whose specs changed are applied, not every class present.
   - `JournalEntry.Clock string` (`frame` or `request`, `omitempty`); `Event` gains none.
   - Public `FaultSpec` fields `On string \`json:"on,omitempty"\``, `Status int`, `OnlyRequest int`, `AfterFrames int`, `Mode string`, all `omitempty`.
   - `Server` helper `(s *Server) answerError(m fault.Method, camID string, d fault.ControlDecision) *base.Response`.

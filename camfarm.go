@@ -593,13 +593,18 @@ func (c *Camera) Faults() []FaultSpec {
 }
 
 // Inject adds a fault to a running camera, replacing any active fault of the
-// same kind. The change takes effect at the camera's next frame boundary.
+// same kind. A per-frame kind takes effect at the camera's next frame boundary,
+// a control-plane kind (rtsp_error, sdp_lie, teardown) on the next request.
 // Only implemented kinds are accepted; the rest return ErrUnsupported.
 //
-// Any inject or clear rebuilds all of the camera's fault engines from the
-// camera seed, so every fault's random stream restarts at its first draw and
-// keyframe_starvation's keyframe counter restarts too (the next keyframe counts
-// as the first and is delivered), including faults the call did not touch. A replay must restart streams at each journaled inject or clear.
+// Faults come in two classes, per-frame (the pump) and per-request (the control
+// engine). An inject or clear rebuilds the engine of every class whose fault
+// list changed, from the camera seed, so that class's random streams restart at
+// their first draw and keyframe_starvation's keyframe counter restarts too (the
+// next keyframe counts as the first and is delivered). A class whose list did
+// not change is left alone, and injecting a fault identical to the active one
+// is a no-op that journals nothing. A replay must restart a class's streams at
+// each journaled inject or clear of that class (see JournalEntry.Clock).
 func (c *Camera) Inject(f FaultSpec) error {
 	if err := validateFault(f); err != nil {
 		return err
@@ -613,7 +618,7 @@ func (c *Camera) Inject(f FaultSpec) error {
 		}
 	}
 	next = append(next, f)
-	err := c.swapFaults(next, func(frame int) { c.noteFaultsApplied("inject", f, frame) })
+	err := c.swapFaults(next, func(i int, clock string) { c.noteFaultsApplied("inject", f, i, clock) })
 	if err == nil {
 		c.faults = next
 	}
@@ -632,7 +637,7 @@ func (c *Camera) Clear() error {
 	if len(c.faults) == 0 {
 		return nil
 	}
-	err := c.swapFaults(nil, func(frame int) { c.noteFaultsApplied("clear", FaultSpec{}, frame) })
+	err := c.swapFaults(nil, func(i int, clock string) { c.noteFaultsApplied("clear", FaultSpec{}, i, clock) })
 	if err == nil {
 		c.faults = nil
 	}
@@ -640,7 +645,7 @@ func (c *Camera) Clear() error {
 }
 
 // swapFaults hands a new fault set to the camera's pump. Caller holds c.mu.
-func (c *Camera) swapFaults(next []FaultSpec, applied func(int)) error {
+func (c *Camera) swapFaults(next []FaultSpec, applied func(int, string)) error {
 	if c.removed.Load() {
 		return fmt.Errorf("%w: %q", ErrUnknownCamera, c.id)
 	}
@@ -653,12 +658,13 @@ func (c *Camera) swapFaults(next []FaultSpec, applied func(int)) error {
 	return nil
 }
 
-// noteFaultsApplied is called when a fault change takes effect at a frame
-// boundary. It runs on the pump goroutine and publishes to the fleet's change
-// feed and journal; it takes neither c.mu nor Fleet.mu, and Inject never waits
-// on it.
-func (c *Camera) noteFaultsApplied(action string, f FaultSpec, frameIndex int) {
-	c.fleet.noteFault(action, c.id, f, frameIndex)
+// noteFaultsApplied is called when a fault change takes effect, at a frame
+// boundary (clock "frame", on the pump goroutine) or on the next request (clock
+// "request", possibly synchronously from Inject). It publishes to the fleet's
+// change feed and journal; it takes neither c.mu nor Fleet.mu, and Inject never
+// waits on it.
+func (c *Camera) noteFaultsApplied(action string, f FaultSpec, index int, clock string) {
+	c.fleet.noteFault(action, c.id, f, index, clock)
 }
 
 // ONVIFUUID is the camera's ONVIF endpoint UUID. It is deterministic from the

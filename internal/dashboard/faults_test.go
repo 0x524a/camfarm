@@ -3,7 +3,10 @@ package dashboard
 import (
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"testing"
+
+	"github.com/0x524a/camfarm"
 )
 
 func TestFaultCatalogueEndpoint(t *testing.T) {
@@ -17,9 +20,10 @@ func TestFaultCatalogueEndpoint(t *testing.T) {
 		Implemented bool   `json:"implemented"`
 		Models      string `json:"models"`
 		Params      []struct {
-			Name     string `json:"name"`
-			Type     string `json:"type"`
-			Required bool   `json:"required"`
+			Name     string   `json:"name"`
+			Type     string   `json:"type"`
+			Required bool     `json:"required"`
+			Options  []string `json:"options"`
 		} `json:"params"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&cat); err != nil {
@@ -52,6 +56,56 @@ func TestFaultCatalogueEndpoint(t *testing.T) {
 	}
 	if cat[byKind["accept_then_silence"]].Implemented {
 		t.Error("accept_then_silence should not be implemented")
+	}
+	for _, k := range []string{"rtsp_error", "teardown", "sdp_lie"} {
+		i, ok := byKind[k]
+		if !ok {
+			t.Fatalf("catalogue lacks %q", k)
+		}
+		if !cat[i].Implemented {
+			t.Errorf("%s should be implemented", k)
+		}
+	}
+	var got []string
+	for _, p := range cat[byKind["sdp_lie"]].Params {
+		if p.Name == "mode" {
+			got = p.Options
+		}
+	}
+	if want := []string{"codec", "sprop", "resolution", "contentBase"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("sdp_lie mode options = %v, want %v", got, want)
+	}
+}
+
+func TestInjectRoundTripsEnumAndIntegerFaultFields(t *testing.T) {
+	ts, f := newServer(t, Options{})
+	resp := do(t, "POST", ts.URL+"/api/v1/cameras/front-door/faults",
+		`{"kind":"rtsp_error","on":"setup","status":454,"onlyRequest":2,"rate":1}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("inject status = %d", resp.StatusCode)
+	}
+	cam, _ := f.Camera("front-door")
+	got := cam.Faults()
+	if len(got) != 1 || got[0].On != "setup" || got[0].Status != 454 || got[0].OnlyRequest != 2 {
+		t.Fatalf("faults = %+v", got)
+	}
+	if resp := do(t, "POST", ts.URL+"/api/v1/cameras/front-door/faults", `{"kind":"teardown","afterFrames":5,"mode":"reset"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("teardown inject status = %d", resp.StatusCode)
+	}
+	var out []struct {
+		Faults []camfarm.FaultSpec `json:"faults"`
+	}
+	if err := json.NewDecoder(do(t, "GET", ts.URL+"/api/v1/cameras", "").Body).Decode(&out); err != nil || len(out) != 1 {
+		t.Fatalf("decode: %v %d", err, len(out))
+	}
+	var td *camfarm.FaultSpec
+	for i := range out[0].Faults {
+		if out[0].Faults[i].Kind == "teardown" {
+			td = &out[0].Faults[i]
+		}
+	}
+	if td == nil || td.AfterFrames != 5 || td.Mode != "reset" {
+		t.Fatalf("camera JSON faults = %+v", out[0].Faults)
 	}
 }
 

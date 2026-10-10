@@ -693,7 +693,7 @@ func TestSetFaultsStopsAndResumesDeliveryToARealClient(t *testing.T) {
 	waitFor("packets to flow", func() bool { return pkts.Load() > 0 })
 
 	applied := make(chan int, 1)
-	if err := s.SetFaults("cam-00", []fault.Spec{{Kind: fault.KindFrameDrop, Rate: 1}}, func(f int) { applied <- f }); err != nil {
+	if err := s.SetFaults("cam-00", []fault.Spec{{Kind: fault.KindFrameDrop, Rate: 1}}, func(f int, _ string) { applied <- f }); err != nil {
 		t.Fatalf("SetFaults: %v", err)
 	}
 	select {

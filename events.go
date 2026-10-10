@@ -28,6 +28,9 @@ type Event struct {
 	Fault  *FaultSpec `json:"fault,omitempty"`
 	// FrameIndex is the frame a fault change took effect on; -1 for add/remove.
 	FrameIndex int `json:"frameIndex"`
+	// Clock names what FrameIndex counts: "frame" or "request". Empty for
+	// add/remove.
+	Clock string `json:"clock,omitempty"`
 }
 
 // JournalEntry records one runtime change. Start-time cameras and faults are
@@ -40,6 +43,9 @@ type JournalEntry struct {
 	// FrameIndex is when a fault change landed. It depends on when the change
 	// was requested, which is the limit of replaying an interactive run.
 	FrameIndex int `json:"frameIndex"`
+	// Clock says whether FrameIndex counts frames (per-frame faults) or RTSP
+	// requests (control-plane faults). Part of the replay hash.
+	Clock string `json:"clock,omitempty"`
 }
 
 const subscriberBuffer = 64
@@ -90,7 +96,7 @@ func (f *Fleet) publish(ev Event) {
 			fs = *ev.Fault
 		}
 		e.journal = append(e.journal, JournalEntry{
-			Seq: ev.Seq, Action: action, Camera: ev.Camera, Fault: fs, FrameIndex: ev.FrameIndex,
+			Seq: ev.Seq, Action: action, Camera: ev.Camera, Fault: fs, FrameIndex: ev.FrameIndex, Clock: ev.Clock,
 		})
 	}
 
@@ -165,9 +171,10 @@ func (f *Fleet) journalSuffix() string {
 	return fmt.Sprintf(" journal=%d:%s", len(j), hex.EncodeToString(sum[:])[:12])
 }
 
-// noteFault records a fault change that took effect on frame.
-func (f *Fleet) noteFault(action, camera string, spec FaultSpec, frame int) {
-	ev := Event{Camera: camera, FrameIndex: frame}
+// noteFault records a fault change that took effect at index on the given
+// clock ("frame" or "request").
+func (f *Fleet) noteFault(action, camera string, spec FaultSpec, index int, clock string) {
+	ev := Event{Camera: camera, FrameIndex: index, Clock: clock}
 	if action == "inject" {
 		ev.Type = EventFaultInjected
 		ev.Fault = &spec

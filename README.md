@@ -54,8 +54,9 @@ Early:
   page shows cameras' Digest credentials. It listens on loopback by default and has *no*
   authentication, token, Host-header check or CSRF protection, so a malicious web page can reach a
   loopback API through DNS rebinding or CSRF. Do not expose it.
-- **Works:** three fault effects, each tied to a real field bug (table below): `frame_drop`,
-  `packet_loss` and `keyframe_starvation`. A fault comes from a spec or is injected into and
+- **Works:** six fault effects, each tied to a real field bug (table below): `frame_drop`,
+  `packet_loss`, `keyframe_starvation`, and the control-plane faults `rtsp_error`, `teardown` and
+  `sdp_lie`. A fault comes from a spec or is injected into and
   cleared from a running camera (`Camera.Inject`, the dashboard, `POST /api/v1/cameras/{id}/faults`).
   Runtime injections and clears are journaled, and the fleet replay line gets a
   ` journal=<n>:<12hex>` suffix hashing that journal. Per-kind effect counts are in
@@ -71,6 +72,40 @@ Early:
   reader; `keyframe_starvation` also withholds the in-band SPS/PPS that travel with the withheld
   keyframe, and with `keepEvery` above about 15 (a 1s GOP at the fixture's 15fps) the 15s snapshot
   deadline is exceeded, so dashboard and ONVIF snapshots fail.
+  Control-plane faults have their own limits:
+  - `rtsp_error`, `sdp_lie` and `teardown` are deterministic for a **single client** only: their
+    request counters and draws are per camera and shared across connections, so concurrent
+    clients interleave non-deterministically. `Camera.Screenshot` and the dashboard Snapshot
+    are RTSP clients too and consume control draws, so the single-client claim excludes using
+    them concurrently with a test client.
+  - The **request index** (the `clock: request` journal index and the event-log index of
+    `rtsp_error` and `teardown`) counts DESCRIBE, SETUP and PLAY requests to that camera since
+    its creation, including requests answered with an injected error, and excluding OPTIONS and
+    TEARDOWN.
+  - Omitted parameters: an `rtsp_error` without `status` answers 503, and without `rate` and
+    `onlyRequest` uses the catalogue default rate 0.2 (so a rate of 0 cannot be requested; use a
+    tiny rate such as 1e-9 to mean "never"). `sdp_lie` and `teardown` treat an omitted rate as 1
+    (always); to not inject them, clear the fault or use a tiny rate. With `on: all`,
+    `onlyRequest` counts requests of every method on one counter.
+  - A control-plane fault takes effect on the **next request**, not on a frame boundary. Journal
+    entries carry a `clock` of `request` or `frame`. For a set containing both classes the
+    request-clock entry is journaled at once and the frame-clock entry at the next frame
+    boundary, in that order. Only classes whose specs changed are journaled and restarted;
+    re-injecting an identical fault is a no-op, so to restart its seeded sequence, clear and then
+    inject. There is still no per-kind clear: clearing removes every fault.
+  - `teardown` counts pump frames, not wall-clock time; the decision to tear down at frame N is
+    deterministic, but the number of frames the client actually received can be `afterFrames`-1
+    depending on scheduling (frames removed by `frame_drop` or
+    `keyframe_starvation` still count), and a frame that fails to encode or write
+    does not count. Its `reset` mode reaches the connection through `ServerConn.NetConn()`, which
+    is outside `gortsplib`'s documented API, and is pinned by a test so a library upgrade that
+    breaks it fails loudly. On a connection that is not a `*net.TCPConn` it closes the connection
+    without an RST.
+  - `sdp_lie` rewrites only the DESCRIBE response. Mode `codec` changes only the `a=rtpmap` line
+    (the honest `fmtp` stays); `sprop` replaces the parameter sets; `resolution` substitutes one
+    of two embedded SPS constants (`mediacommon` has no SPS writer); `contentBase` replaces the
+    host with `wrong.invalid` and keeps the path. `a=control` lines are never altered. A lie is
+    counted in the fault tally and the obs event log (the fleet journal holds only inject, clear, add and remove) only when the rewrite actually changed the response.
 - **Works:** Playwright end-to-end tests of the dashboard, behind the `e2e` build tag and run in
   the `e2e` CI job. Locally, `go test -tags e2e ./internal/dashboard/` needs Chromium installed
   for Playwright.
@@ -88,10 +123,10 @@ Kept in step with the catalogue in `internal/fault` by a test that fails if this
 | `frame_drop` | yes | Encoder skipping frames: a frame is never encoded, so RTP sequence numbers stay contiguous and the loss shows only as a timestamp jump. |
 | `packet_loss` | yes | Lossy path: packets of an encoded frame are withheld, leaving real sequence-number gaps with honest timestamps. |
 | `keyframe_starvation` | yes | Long-GOP camera: only every Nth keyframe is sent, so a client joining mid-stream cannot start decoding. |
-| `teardown_mid_session` | no | Camera that drops live sessions; exercises reconnect logic and resource leaks. |
+| `rtsp_error` | yes | Flaky camera that answers 5xx or 454 to some DESCRIBE, SETUP or PLAY requests. |
+| `teardown` | yes | Camera that drops live sessions; TCP reset when mode is reset. |
+| `sdp_lie` | yes | SDP that misdescribes the stream: wrong codec, wrong parameter sets, wrong geometry or wrong Content-Base. |
 | `accept_then_silence` | no | Camera that accepts the TCP connection and never answers. |
-| `sdp_codec_lie` | no | SDP that advertises one codec while the stream carries another. |
-| `sps_resolution_lie` | no | SDP and SPS that advertise a geometry the frames do not match. |
 <!-- fault-table:end -->
 
 ## Use as a library

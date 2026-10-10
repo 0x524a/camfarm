@@ -73,6 +73,15 @@ type camera struct {
 	done   chan struct{}
 	// pump is the camera's stepping loop, kept so SetFaults can reach it.
 	pump *Pump
+	// ctl decides the camera's control-plane faults. Set under s.mu before the
+	// camera is visible to a handler; internally synchronised thereafter.
+	ctl *fault.ControlEngine
+	// setMu guards media and control, the spec lists currently installed in
+	// the pump and the control engine, so SetFaults can skip a class that did
+	// not change.
+	setMu   sync.Mutex
+	media   []fault.Spec
+	control []fault.Spec
 }
 
 // Server serves a fleet of synthetic RTSP cameras.
@@ -86,6 +95,17 @@ type Server struct {
 	cams    map[string]*camera
 	order   []string
 	readers map[*gortsplib.ServerSession]string
+
+	// armMu guards armed, the sessions a teardown fault will end. It is never
+	// held while closing a session or connection, and never together with mu.
+	armMu sync.Mutex
+	armed map[*gortsplib.ServerSession]*armed
+
+	// lieMu guards pendingLie, the sdp_lie decisions taken in OnDescribe and not
+	// yet delivered by OnResponse. It is a leaf lock, never held with mu or armMu.
+	lieMu      sync.Mutex
+	pendingLie map[*gortsplib.ServerConn]lieInfo
+
 	rootCtx context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -136,6 +156,9 @@ func New(cfg Config) (*Server, error) {
 		ck:      cfg.Clock,
 		cams:    make(map[string]*camera, len(cfg.Cameras)),
 		readers: make(map[*gortsplib.ServerSession]string),
+		armed:   make(map[*gortsplib.ServerSession]*armed),
+
+		pendingLie: make(map[*gortsplib.ServerConn]lieInfo),
 	}
 	if s.log == nil {
 		s.log = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -191,17 +214,24 @@ func (s *Server) buildPumps() (pumps map[string]*Pump, failedID string, err erro
 	for _, id := range s.order {
 		cam := s.cams[id]
 		pump, err := NewPump(PumpConfig{
-			CameraID: cam.id,
-			Media:    cam.cfg.Media,
-			Medi:     cam.medi,
-			Writer:   cam.stream,
-			Seed:     cam.cfg.Seed,
-			Faults:   cam.cfg.Faults,
-			Obs:      s.cfg.Obs,
+			CameraID:   cam.id,
+			Media:      cam.cfg.Media,
+			Medi:       cam.medi,
+			Writer:     cam.stream,
+			Seed:       cam.cfg.Seed,
+			Faults:     mediaFaults(cam.cfg.Faults),
+			Obs:        s.cfg.Obs,
+			AfterFrame: func() { s.afterFrame(id) },
 		})
 		if err != nil {
 			return nil, id, err
 		}
+		ctl, err := newControl(cam.cfg)
+		if err != nil {
+			return nil, id, err
+		}
+		cam.ctl = ctl
+		cam.media, cam.control = splitFaults(cam.cfg.Faults)
 		pumps[id] = pump
 	}
 	return pumps, "", nil
@@ -406,23 +436,31 @@ func (s *Server) AddCamera(cc CameraConfig) error {
 	}
 
 	pump, err := NewPump(PumpConfig{
-		CameraID: cc.ID,
-		Media:    cc.Media,
-		Medi:     medi,
-		Writer:   stream,
-		Seed:     cc.Seed,
-		Faults:   cc.Faults,
-		Obs:      s.cfg.Obs,
+		CameraID:   cc.ID,
+		Media:      cc.Media,
+		Medi:       medi,
+		Writer:     stream,
+		Seed:       cc.Seed,
+		Faults:     mediaFaults(cc.Faults),
+		Obs:        s.cfg.Obs,
+		AfterFrame: func() { s.afterFrame(cc.ID) },
 	})
 	if err != nil {
 		stream.Close()
 		s.mu.Unlock()
 		return fmt.Errorf("rtsp: building pump for %q: %w", cc.ID, err)
 	}
+	ctl, err := newControl(cc)
+	if err != nil {
+		stream.Close()
+		s.mu.Unlock()
+		return fmt.Errorf("rtsp: building control faults for %q: %w", cc.ID, err)
+	}
 
 	camCtx, camCancel := context.WithCancel(s.rootCtx)
 	done := make(chan struct{})
-	cam := &camera{id: cc.ID, cfg: cc, stream: stream, medi: medi, forma: forma, cancel: camCancel, done: done, pump: pump}
+	cam := &camera{id: cc.ID, cfg: cc, stream: stream, medi: medi, forma: forma, cancel: camCancel, done: done, pump: pump, ctl: ctl}
+	cam.media, cam.control = splitFaults(cc.Faults)
 	s.cams[cc.ID] = cam
 	s.order = append(s.order, cc.ID)
 
@@ -476,26 +514,12 @@ func (s *Server) RemoveCamera(id string) error {
 	cancel()
 	<-done
 	stream.Close()
+	// Drop after the pump is gone, so no stale entry can hit a camera re-added
+	// under the same ID.
+	s.disarmCamera(id)
 
 	s.log.Info("camera removed", "camera", id)
 	return nil
-}
-
-// SetFaults replaces a camera's fault set on a running server. The swap takes
-// effect at the camera's next frame boundary; applied, if non-nil, receives the
-// frame index it took effect on.
-func (s *Server) SetFaults(id string, specs []fault.Spec, applied func(frameIndex int)) error {
-	s.mu.RLock()
-	started := s.srv != nil
-	cam, ok := s.cams[id]
-	s.mu.RUnlock()
-	if !started {
-		return ErrNotStarted
-	}
-	if !ok || cam.pump == nil {
-		return fmt.Errorf("rtsp: unknown camera %q", id)
-	}
-	return cam.pump.SetFaults(specs, applied)
 }
 
 // Addr returns the bound address, or nil before a successful Start.
@@ -577,7 +601,7 @@ func (s *Server) streamStatsErr(id string) (packets, bytes uint64, err error) {
 // *camera after lookup returns would be reading that field with no lock
 // held at all, racing those writes. Handing back copies read under the lock
 // closes that window.
-func (s *Server) lookup(path string) (id string, stream *gortsplib.ServerStream, ok bool) {
+func (s *Server) lookup(path string) (id string, stream *gortsplib.ServerStream, ctl *fault.ControlEngine, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	cam, ok := s.cams[strings.Trim(path, "/")]
@@ -586,9 +610,9 @@ func (s *Server) lookup(path string) (id string, stream *gortsplib.ServerStream,
 	// it as found would make a handler answer StatusOK with a nil stream, which
 	// gortsplib rejects with a panic; treat it as not found instead.
 	if !ok || cam.stream == nil {
-		return "", nil, false
+		return "", nil, nil, false
 	}
-	return cam.id, cam.stream, true
+	return cam.id, cam.stream, cam.ctl, true
 }
 
 // --- gortsplib handlers ---
@@ -596,32 +620,45 @@ func (s *Server) lookup(path string) (id string, stream *gortsplib.ServerStream,
 // gortsplib's ServerHandler is `any`; a server implements whichever of the
 // optional interfaces it needs.
 
-// OnConnClose logs connection teardown.
+// OnConnClose logs connection teardown and forgets a lie that was never
+// delivered because the connection ended first.
 func (s *Server) OnConnClose(ctx *gortsplib.ServerHandlerOnConnCloseCtx) {
+	s.dropLie(ctx.Conn)
 	s.log.Debug("connection closed", "err", ctx.Error)
 }
 
 // OnSessionClose drops the session's reader registration.
 func (s *Server) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.readers, ctx.Session)
+	s.mu.Unlock()
+	s.disarm(ctx.Session)
 }
 
 // OnDescribe answers DESCRIBE by path.
 func (s *Server) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error) {
-	_, stream, ok := s.lookup(ctx.Path)
+	id, stream, ctl, ok := s.lookup(ctx.Path)
 	if !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
+	}
+	d := ctl.Decide(fault.MethodDescribe)
+	if res := s.answerError(fault.MethodDescribe, id, d); res != nil {
+		return res, nil, nil // Decide never returns a lie alongside an error
+	}
+	if d.Lie != nil {
+		s.noteLie(ctx.Conn, id, d)
 	}
 	return &base.Response{StatusCode: base.StatusOK}, stream, nil
 }
 
 // OnSetup answers SETUP by path and registers the session as a reader.
 func (s *Server) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response, *gortsplib.ServerStream, error) {
-	id, stream, ok := s.lookup(ctx.Path)
+	id, stream, ctl, ok := s.lookup(ctx.Path)
 	if !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
+	}
+	if res := s.answerError(fault.MethodSetup, id, ctl.Decide(fault.MethodSetup)); res != nil {
+		return res, nil, nil
 	}
 	s.mu.Lock()
 	s.readers[ctx.Session] = id
@@ -631,8 +668,19 @@ func (s *Server) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response
 
 // OnPlay answers PLAY.
 func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
-	if _, _, ok := s.lookup(ctx.Path); !ok {
+	id, _, ctl, ok := s.lookup(ctx.Path)
+	if !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil
+	}
+	d := ctl.Decide(fault.MethodPlay)
+	// The teardown draw is taken on every PLAY, errored or not, so an rtsp_error
+	// cannot shift the teardown sequence; an errored PLAY discards the arming.
+	a := ctl.ArmPlay()
+	if res := s.answerError(fault.MethodPlay, id, d); res != nil {
+		return res, nil
+	}
+	if a != nil {
+		s.arm(id, ctx.Session, ctx.Conn, a, d.Request)
 	}
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }
@@ -642,6 +690,8 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 // gortsplib sets Content-Base, Content-Type, CSeq, RTP-Info and the SDP body
 // after a handler returns, so a handler cannot lie about them. This hook
 // receives the same live response immediately before it is marshalled, which is
-// the only place those headers can be rewritten. No fault rewrites anything in
-// this version; the hook exists so the phase-2 faults have somewhere to live.
-func (s *Server) OnResponse(_ *gortsplib.ServerConn, _ *base.Response) {}
+// the only place those headers can be rewritten. It delivers an sdp_lie decided
+// in OnDescribe for this connection.
+func (s *Server) OnResponse(c *gortsplib.ServerConn, res *base.Response) {
+	s.applyLie(c, res)
+}

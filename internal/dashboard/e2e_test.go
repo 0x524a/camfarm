@@ -297,7 +297,7 @@ func TestE2EUnimplementedFaultKindsAreDisabled(t *testing.T) {
 	url, _ := e2eServer(t)
 	s := newSession(t)
 	s.open(t, url)
-	for _, kind := range []string{"teardown_mid_session", "accept_then_silence"} {
+	for _, kind := range []string{"accept_then_silence"} {
 		opt := s.page.Locator(fmt.Sprintf(`tr[data-id="front-door"] .fault-kind option[value=%q]`, kind))
 		if err := expect().Locator(opt).ToBeDisabled(); err != nil {
 			t.Fatalf("unimplemented fault kind %s is selectable: %v", kind, err)
@@ -529,4 +529,71 @@ func TestE2EApplyAndClearPacketLossAndKeyframeStarvation(t *testing.T) {
 		t.Fatalf("faults not cleared: %v", err)
 	}
 	s.requireClean(t)
+}
+
+func TestE2EEnumParameterAppliesRtspError(t *testing.T) {
+	url, f := e2eServer(t)
+	s := newSession(t)
+	s.open(t, url)
+	row := s.row("front-door")
+	cam, _ := f.Camera("front-door")
+
+	selectKind(t, row.Locator(".fault-kind"), "rtsp_error")
+	on := row.Locator(`select.fault-param[data-param="on"]`)
+	if err := expect().Locator(on).ToHaveValue("describe"); err != nil {
+		t.Fatalf("enum default not preselected: %v", err)
+	}
+	if err := expect().Locator(on.Locator("option")).ToHaveCount(4); err != nil {
+		t.Fatalf("enum options: %v", err)
+	}
+	if _, err := on.SelectOption(playwright.SelectOptionValues{Values: &[]string{"setup"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := row.Locator(`.fault-param[data-param="status"]`).Fill("454"); err != nil {
+		t.Fatal(err)
+	}
+	if err := row.Locator(`.fault-param[data-param="rate"]`).Fill("1"); err != nil {
+		t.Fatal(err)
+	}
+	// onlyRequest is optional with an unset default: it must stay empty and be omitted.
+	if err := expect().Locator(row.Locator(`.fault-param[data-param="onlyRequest"]`)).ToHaveValue(""); err != nil {
+		t.Fatalf("onlyRequest should default to empty: %v", err)
+	}
+	if err := row.Locator(".btn-fault").Click(); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(row.Locator(".fault-active")).ToContainText("rtsp_error"); err != nil {
+		t.Fatalf("rtsp_error not shown as active: %v", err)
+	}
+	// The active-fault line carries the new parameters as key=value.
+	for _, want := range []string{"on=setup", "status=454"} {
+		if err := expect().Locator(row.Locator(".fault-active")).ToContainText(want); err != nil {
+			t.Fatalf("active-fault line lacks %q: %v", want, err)
+		}
+	}
+	got := cam.Faults()
+	if len(got) != 1 || got[0].On != "setup" || got[0].Status != 454 || got[0].OnlyRequest != 0 {
+		t.Fatalf("camera faults = %+v", got)
+	}
+	if err := row.Locator(".btn-clear-fault").Click(); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(row.Locator(".fault-active")).ToContainText("none"); err != nil {
+		t.Fatalf("faults not cleared: %v", err)
+	}
+	s.requireClean(t)
+}
+
+func TestE2EEnumSelectKindsRenderInBothColourSchemes(t *testing.T) {
+	url, _ := e2eServer(t)
+	for _, scheme := range []*playwright.ColorScheme{playwright.ColorSchemeLight, playwright.ColorSchemeDark} {
+		s := newSession(t, playwright.BrowserNewContextOptions{ColorScheme: scheme})
+		s.open(t, url)
+		row := s.row("front-door")
+		selectKind(t, row.Locator(".fault-kind"), "sdp_lie")
+		if err := expect().Locator(row.Locator(`select.fault-param[data-param="mode"]`)).ToHaveValue("codec"); err != nil {
+			t.Fatalf("%v: %v", scheme, err)
+		}
+		s.requireClean(t)
+	}
 }

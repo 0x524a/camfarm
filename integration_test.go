@@ -81,7 +81,7 @@ func TestFFprobeDecodesEveryCamera(t *testing.T) {
 			t.Errorf("%s: ffprobe decoded codec %q, want %q", st.ID, s.CodecName, want)
 		}
 		// The decoded geometry must match what the fleet advertised. A mismatch
-		// here would be the sps_resolution_lie fault firing by accident, which
+		// here would be the sdp_lie fault firing by accident, which
 		// is exactly the failure mode this project exists to make deliberate.
 		if s.Width != st.Width || s.Height != st.Height {
 			t.Errorf("%s: ffprobe decoded %dx%d but the fleet advertised %dx%d",

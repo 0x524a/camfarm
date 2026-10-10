@@ -30,15 +30,16 @@ const (
 	// KindKeyframeStarvation withholds IDRs, so a client joining mid-stream
 	// never gets one. The "works on camera restart, breaks on reconnect" bug.
 	KindKeyframeStarvation Kind = "keyframe_starvation"
-	// KindTeardownMidSession closes a live session. Reproduces reconnect logic
-	// and resource leaks.
-	KindTeardownMidSession Kind = "teardown_mid_session"
+	// KindRTSPError answers some DESCRIBE, SETUP or PLAY requests with an RTSP
+	// error status. Reproduces flaky cameras and retry logic.
+	KindRTSPError Kind = "rtsp_error"
+	// KindTeardown closes a live session after a number of frames. Reproduces
+	// reconnect logic and resource leaks.
+	KindTeardown Kind = "teardown"
+	// KindSDPLie makes DESCRIBE misdescribe the stream.
+	KindSDPLie Kind = "sdp_lie"
 	// KindAcceptThenSilence accepts the TCP connection and never answers.
 	KindAcceptThenSilence Kind = "accept_then_silence"
-	// KindSDPCodecLie advertises one codec and sends another.
-	KindSDPCodecLie Kind = "sdp_codec_lie"
-	// KindSPSResolutionLie advertises a geometry the frames do not match.
-	KindSPSResolutionLie Kind = "sps_resolution_lie"
 )
 
 // Errors reported by New.
@@ -55,10 +56,10 @@ var knownKinds = map[Kind]bool{
 	KindFrameDrop:          true,
 	KindPacketLoss:         true,
 	KindKeyframeStarvation: true,
-	KindTeardownMidSession: true,
+	KindRTSPError:          true,
+	KindTeardown:           true,
+	KindSDPLie:             true,
 	KindAcceptThenSilence:  true,
-	KindSDPCodecLie:        true,
-	KindSPSResolutionLie:   true,
 }
 
 // Known reports whether kind is catalogued.
@@ -88,6 +89,20 @@ type Spec struct {
 	// KeepEvery, for keyframe_starvation, delivers only every Nth
 	// random-access access unit (the first is always delivered).
 	KeepEvery int
+	// On, for rtsp_error, names the method that fails: describe, setup, play
+	// or all.
+	On string
+	// Status, for rtsp_error, is the RTSP status code of the error reply.
+	Status int
+	// OnlyRequest, for rtsp_error and sdp_lie, fires on exactly the Nth
+	// matching request and ignores Rate. Zero means unset.
+	OnlyRequest int
+	// AfterFrames, for teardown, is the number of frames delivered before the
+	// session is torn down.
+	AfterFrames int
+	// Mode selects a variant: close or reset for teardown; codec, sprop,
+	// resolution or contentBase for sdp_lie.
+	Mode string
 }
 
 // Decision is a fault that fired.

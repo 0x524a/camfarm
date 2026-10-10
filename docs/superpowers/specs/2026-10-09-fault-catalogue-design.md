@@ -1,6 +1,6 @@
 # Fault catalogue: media-path and control-plane faults — design
 
-Date: 2026-10-09 (slice C added 2026-10-10). Status: slices A and B approved; slice C pending review. Not yet implemented.
+Date: 2026-10-09 (slice C added 2026-10-10). Status: slices A and B implemented; slice C pending review, not yet implemented.
 
 This is the design for the next three slices after slice 3 (dashboard, binary and the first fault
 effect, `frame_drop`). It depends on slice 3 being merged: it reuses the pump's fault seam,
@@ -55,7 +55,7 @@ until their effect exists.
 
 - Each kind draws from its own stream, `seed.Stream(kind)`, derived from the camera seed, exactly
   as `fault.New` does today. A newly injected fault therefore always starts the same sequence for
-  the same camera.
+  the same camera. (Re-injecting an identical fault is a no-op and does not restart it; clear, then inject.)
 - Draws are **unconditional**: the number of draws consumed depends only on the clock (frames,
   packets, requests), never on earlier outcomes, so the sequence cannot shift because of a
   neighbour's decision.
@@ -244,9 +244,12 @@ on `gortsplib` connection goroutines, so they get a separate per-camera engine:
   It bumps the counter, performs the unconditional draw for each active matching kind, and returns
   a decision.
 - `Server.SetFaults` routes media kinds to the pump and control-plane kinds to this engine; the
-  "applied" callback carries the clock value (frame or request number) into the journal.
+  "applied" callback carries the clock value (frame or request number) into the journal. For a set
+  with both classes the request-class entry is journaled first (synchronously), then the
+  frame-class entry at the next frame boundary (effect order); only changed classes are applied.
 - The server keeps the `ServerSession` and connection of each reader so `teardown` can close them
-  without reaching into `gortsplib` internals beyond the documented `Close` and `NetConn`.
+  without reaching into `gortsplib` internals beyond `Close` and, for `reset` mode, `NetConn()`, which is
+  outside the documented API (see 2.4).
 - Lock discipline: the engine's mutex is never held across a call into `gortsplib` or the pump,
   and the fleet lock order (`Fleet.mu` before `events.mu`) is unchanged.
 
