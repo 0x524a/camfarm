@@ -219,6 +219,13 @@ func (p *Pump) InitialSequenceNumber() uint16 { return p.initialSeq }
 // half-affected. applied, if non-nil, is called from the stepping goroutine
 // with the frame index the new set takes effect on. Several calls between two
 // frames apply in order.
+//
+// The new engine is built from the camera's fault seed, so every random stream
+// in the set restarts at its first draw on each swap, including for kinds the
+// swap did not change (except an unchanged pts_delayed, whose drift clock
+// carries over, see fault.Engine.Inherit). A caller that journals a swap must
+// therefore log the frame index it applied at. applied is not called if the
+// pump stops before the next frame.
 func (p *Pump) SetFaults(specs []fault.Spec, applied func(frameIndex int)) error {
 	eng, err := fault.New(p.faultSeed, specs)
 	if err != nil {

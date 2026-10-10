@@ -97,6 +97,8 @@ Early:
     count fires per pump frame, held ones included), so a client torn down at `afterFrames` may
     have received up to `holdFrames`-1 fewer frames: those were still in the hold buffer.
   - The `burst_delivery` tally counts held frames, not the flush frame that releases them.
+  - With `burst_delivery` and `jitter` together, a held frame's deadline is that of the last frame
+    of its hold plus that frame's jitter, so the held frames leave together at that time.
   - RTP sequence numbers stay contiguous for all four timing kinds; only timing and timestamps
     change.
   - `jitter` delays are relative to each frame's nominal slot (`start + k × interval`, an

@@ -73,6 +73,10 @@ An engine created by a later `Inject` seeds each kind from the camera seed by ki
 `fault.New` does today, so injecting the same fault into the same camera always starts the same
 sequence.
 
+*Later ruling:* injecting a fault identical to the one already active is a no-op (no restart, no
+journal entry), and only the fault classes (per-frame, per-request) whose list actually changed
+restart their streams. To restart a seeded sequence deliberately, `Clear` and then `Inject`.
+
 ## 2. Library additions
 
 - **Change feed.** `Fleet.Subscribe(ctx) <-chan Event`, where `Event` carries a type

@@ -148,6 +148,9 @@ func TestFaultTallyCountsPerKindPerCamera(t *testing.T) {
 	if r.Counters("a").FaultsFired != 0 {
 		t.Error("FaultTally must not change FaultsFired")
 	}
+	if n := len(r.Events()); n != 0 {
+		t.Errorf("FaultTally logged %d events, want none", n)
+	}
 }
 
 func TestCountersByKindIsNeverNilAndIsACopy(t *testing.T) {

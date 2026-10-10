@@ -78,7 +78,10 @@ func sameSpecs(a, b []fault.Spec) bool {
 // requests decided so far) synchronously, before SetFaults returns, because a
 // control change is effective immediately; and with ("frame", frame index) from
 // the pump goroutine at the frame boundary. When both change, request is
-// therefore reported first, which is the order the effects land in.
+// therefore reported first, which is the order the effects land in. The "frame"
+// call may never come: it is dropped if the camera is removed or the server
+// closes before the pump reaches the next frame, so a caller must not wait on it
+// unconditionally.
 func (s *Server) SetFaults(id string, specs []fault.Spec, applied func(index int, clock string)) error {
 	s.mu.RLock()
 	started := s.srv != nil
@@ -114,15 +117,22 @@ func (s *Server) SetFaults(id string, specs []fault.Spec, applied func(index int
 		cam.media = media
 	}
 	if controlChanged {
+		// armMu is held across the engine swap and the disarm, and OnPlay holds
+		// it across ArmPlay and arm, so no session can be armed by the old
+		// teardown spec after the swap, and none armed before it survives the
+		// disarm.
+		s.armMu.Lock()
 		at, err := cam.ctl.SetAt(control)
 		if err != nil {
+			s.armMu.Unlock()
 			return err // unreachable: validated above
 		}
 		if teardownSpec(cam.control) != teardownSpec(control) {
 			// A session armed by a teardown that was removed or changed must not
 			// be ended by it.
-			s.disarmCamera(id)
+			s.disarmCameraLocked(id)
 		}
+		s.armMu.Unlock()
 		cam.control = control
 		if applied != nil {
 			applied(at, clockRequest)
@@ -175,22 +185,26 @@ type armed struct {
 	request   int // the request index of the PLAY that armed it
 }
 
-// arm registers a freshly playing session for teardown.
-func (s *Server) arm(camID string, sess *gortsplib.ServerSession, conn *gortsplib.ServerConn, a *fault.Arming, request int) {
-	s.armMu.Lock()
+// armLocked registers a freshly playing session for teardown. The caller holds
+// armMu.
+func (s *Server) armLocked(camID string, sess *gortsplib.ServerSession, conn *gortsplib.ServerConn, a *fault.Arming, request int) {
 	s.armed[sess] = &armed{camID: camID, sess: sess, conn: conn, remaining: a.AfterFrames, mode: a.Mode, request: request}
-	s.armMu.Unlock()
 }
 
 // disarmCamera forgets every session armed for a camera.
 func (s *Server) disarmCamera(camID string) {
 	s.armMu.Lock()
+	s.disarmCameraLocked(camID)
+	s.armMu.Unlock()
+}
+
+// disarmCameraLocked is disarmCamera for a caller that holds armMu.
+func (s *Server) disarmCameraLocked(camID string) {
 	for sess, a := range s.armed {
 		if a.camID == camID {
 			delete(s.armed, sess)
 		}
 	}
-	s.armMu.Unlock()
 }
 
 // disarm forgets a session; called when the session closes.

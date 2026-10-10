@@ -74,6 +74,12 @@ type events struct {
 
 func (e *events) init() { e.subs = make(map[*subscriber]struct{}) }
 
+// journalActions maps the event types that are journaled to their action name.
+var journalActions = map[EventType]string{
+	EventCameraAdded: "add", EventCameraRemoved: "remove",
+	EventFaultInjected: "inject", EventFaultCleared: "clear",
+}
+
 // publish assigns the next sequence number, records the event in the journal
 // and delivers it to subscribers without ever blocking: a subscriber whose
 // buffer is full is dropped and its channel closed, so a stalled dashboard
@@ -86,10 +92,7 @@ func (f *Fleet) publish(ev Event) {
 	e.seq++
 	ev.Seq = e.seq
 
-	action := map[EventType]string{
-		EventCameraAdded: "add", EventCameraRemoved: "remove",
-		EventFaultInjected: "inject", EventFaultCleared: "clear",
-	}[ev.Type]
+	action := journalActions[ev.Type]
 	if action != "" {
 		var fs FaultSpec
 		if ev.Fault != nil {

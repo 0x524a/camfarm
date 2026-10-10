@@ -604,16 +604,16 @@ func openStream(t *testing.T, url string) (next func() string, cancel context.Ca
 	return next, cancel
 }
 
+// awaitEvent reads lines until an event of the given type whose data line, which
+// must be the very next line, names the camera.
 func awaitEvent(t *testing.T, next func() string, typ, camera string) {
 	t.Helper()
-	var sawEvent, sawData bool
-	for !(sawEvent && sawData) {
-		l := next()
-		switch {
-		case l == "event: "+typ:
-			sawEvent = true
-		case strings.HasPrefix(l, "data: ") && strings.Contains(l, `"camera":"`+camera+`"`):
-			sawData = true
+	for {
+		if next() != "event: "+typ {
+			continue
+		}
+		if l := next(); strings.HasPrefix(l, "data: ") && strings.Contains(l, `"camera":"`+camera+`"`) {
+			return
 		}
 	}
 }
