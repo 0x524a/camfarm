@@ -234,7 +234,7 @@ func TestImplemented(t *testing.T) {
 			t.Errorf("%s should be implemented", k)
 		}
 	}
-	for _, k := range []Kind{KindAcceptThenSilence} {
+	for _, k := range []Kind{KindJitter, KindBurstDelivery, KindPTSDTSMismatch, KindPTSDelayed, KindAcceptThenSilence} {
 		if Implemented(k) {
 			t.Errorf("%s should not be implemented yet", k)
 		}
@@ -249,6 +249,10 @@ func TestKnown(t *testing.T) {
 		KindRTSPError,
 		KindTeardown,
 		KindSDPLie,
+		KindJitter,
+		KindBurstDelivery,
+		KindPTSDTSMismatch,
+		KindPTSDelayed,
 		KindAcceptThenSilence,
 	} {
 		if !Known(k) {

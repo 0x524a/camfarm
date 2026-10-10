@@ -38,6 +38,17 @@ const (
 	KindTeardown Kind = "teardown"
 	// KindSDPLie makes DESCRIBE misdescribe the stream.
 	KindSDPLie Kind = "sdp_lie"
+	// KindJitter delays each frame by a seeded random time, keeping order.
+	// Reproduces jitter-buffer sizing bugs.
+	KindJitter Kind = "jitter"
+	// KindBurstDelivery holds frames and releases them back-to-back.
+	// Reproduces NVR queue overflow on bursty uplinks.
+	KindBurstDelivery Kind = "burst_delivery"
+	// KindPTSDTSMismatch emits RTP timestamps out of order, as a B-frame
+	// camera stamping presentation time does.
+	KindPTSDTSMismatch Kind = "pts_dts_mismatch"
+	// KindPTSDelayed makes timestamps lag capture, constantly or by drift.
+	KindPTSDelayed Kind = "pts_delayed"
 	// KindAcceptThenSilence accepts the TCP connection and never answers.
 	KindAcceptThenSilence Kind = "accept_then_silence"
 )
@@ -59,6 +70,10 @@ var knownKinds = map[Kind]bool{
 	KindRTSPError:          true,
 	KindTeardown:           true,
 	KindSDPLie:             true,
+	KindJitter:             true,
+	KindBurstDelivery:      true,
+	KindPTSDTSMismatch:     true,
+	KindPTSDelayed:         true,
 	KindAcceptThenSilence:  true,
 }
 
@@ -103,6 +118,19 @@ type Spec struct {
 	// Mode selects a variant: close or reset for teardown; codec, sprop,
 	// resolution or contentBase for sdp_lie.
 	Mode string
+	// MaxMs, for jitter, is the upper bound in milliseconds of a frame's
+	// random delay.
+	MaxMs int
+	// HoldFrames, for burst_delivery, is how many frames are held before the
+	// burst is released.
+	HoldFrames int
+	// ReorderDepth, for pts_dts_mismatch, is the B-frame depth: how far
+	// timestamps run out of order.
+	ReorderDepth int
+	// DelayMs, for pts_delayed, is a constant timestamp lag in milliseconds.
+	DelayMs int
+	// DriftPpm, for pts_delayed, is a timestamp drift in parts per million.
+	DriftPpm int
 }
 
 // Decision is a fault that fired.

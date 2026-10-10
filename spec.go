@@ -86,6 +86,16 @@ type FaultSpec struct {
 	// Mode selects a variant of teardown (close, reset) or sdp_lie (codec,
 	// sprop, resolution, contentBase).
 	Mode string `json:"mode,omitempty"`
+	// MaxMs, for jitter, bounds each frame's random delay in milliseconds.
+	MaxMs int `json:"maxMs,omitempty"`
+	// HoldFrames, for burst_delivery, is the frames held before a burst.
+	HoldFrames int `json:"holdFrames,omitempty"`
+	// ReorderDepth, for pts_dts_mismatch, is how far timestamps run out of order.
+	ReorderDepth int `json:"reorderDepth,omitempty"`
+	// DelayMs, for pts_delayed, is a constant timestamp lag in milliseconds.
+	DelayMs int `json:"delayMs,omitempty"`
+	// DriftPpm, for pts_delayed, is a timestamp drift in parts per million.
+	DriftPpm int `json:"driftPpm,omitempty"`
 }
 
 // ListenSpec describes what the fleet binds.
@@ -242,7 +252,8 @@ func toFaultSpecs(in []FaultSpec) []fault.Spec {
 func toFaultSpec(f FaultSpec) fault.Spec {
 	return fault.Spec{Kind: fault.Kind(f.Kind), Rate: f.Rate, ProtectKeyframes: f.ProtectKeyframes,
 		MeanBurst: f.MeanBurst, KeepEvery: f.KeepEvery,
-		On: f.On, Status: f.Status, OnlyRequest: f.OnlyRequest, AfterFrames: f.AfterFrames, Mode: f.Mode}
+		On: f.On, Status: f.Status, OnlyRequest: f.OnlyRequest, AfterFrames: f.AfterFrames, Mode: f.Mode,
+		MaxMs: f.MaxMs, HoldFrames: f.HoldFrames, ReorderDepth: f.ReorderDepth, DelayMs: f.DelayMs, DriftPpm: f.DriftPpm}
 }
 
 // validateFault is the one place a fault is checked, shared by spec
