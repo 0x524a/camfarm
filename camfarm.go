@@ -98,6 +98,10 @@ type Fleet struct {
 	// dynamically added camera's seed is a pure function of call order.
 	nextIndex int
 	stopWatch func()
+
+	// ev is the change feed and runtime journal. Its own lock; the only lock
+	// order is mu then ev.mu.
+	ev events
 }
 
 // Camera is one camera in a running fleet.
@@ -135,6 +139,7 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 		cameras:  make(map[string]*Camera, len(valid.Cameras)),
 		sources:  make(map[SourceSpec]*media.Media),
 	}
+	f.ev.init()
 
 	// Parse each distinct source once and share it. This is the scale lever:
 	// M cameras on one source cost one copy of the media plus M encoder states.
@@ -314,7 +319,7 @@ func (f *Fleet) SpecHash() string { return f.specHash }
 // ReplayLine returns the one line a failing test should print to make its
 // failure reproducible.
 func (f *Fleet) ReplayLine() string {
-	return fmt.Sprintf("camfarm: seed=%#x spec=sha256:%s", f.spec.Seed, f.specHash[:12])
+	return fmt.Sprintf("camfarm: seed=%#x spec=sha256:%s", f.spec.Seed, f.specHash[:12]) + f.journalSuffix()
 }
 
 // Addr returns the fleet's bound addresses.
@@ -396,6 +401,7 @@ func (f *Fleet) AddCamera(spec CameraSpec) (*Camera, error) {
 	f.cameras[cs.ID] = cam
 	f.order = append(f.order, cs.ID)
 
+	f.publish(Event{Type: EventCameraAdded, Camera: cs.ID, FrameIndex: -1})
 	f.log.Info("camera added", "camera", cs.ID, "seed", fmt.Sprintf("%#x", camSeed))
 	return cam, nil
 }
@@ -419,6 +425,7 @@ func (f *Fleet) RemoveCamera(id string) error {
 		}
 	}
 	f.mu.Unlock()
+	f.publish(Event{Type: EventCameraRemoved, Camera: id, FrameIndex: -1})
 
 	var errs []error
 	if err := f.srv.RemoveCamera(id); err != nil {
@@ -489,6 +496,7 @@ func (f *Fleet) Close() error {
 	if stop != nil {
 		stop()
 	}
+	f.closeSubscribers()
 	f.srv.Close()
 	if f.onvifSrv != nil {
 		f.onvifSrv.Close()
@@ -618,5 +626,9 @@ func (c *Camera) swapFaults(next []FaultSpec, applied func(int)) error {
 }
 
 // noteFaultsApplied is called when a fault change takes effect at a frame
-// boundary. It is a hook for the event log.
-func (c *Camera) noteFaultsApplied(action string, f FaultSpec, frameIndex int) {}
+// boundary. It runs on the pump goroutine and publishes to the fleet's change
+// feed and journal; it takes neither c.mu nor Fleet.mu, and Inject never waits
+// on it.
+func (c *Camera) noteFaultsApplied(action string, f FaultSpec, frameIndex int) {
+	c.fleet.noteFault(action, c.id, f, frameIndex)
+}
