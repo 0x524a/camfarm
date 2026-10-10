@@ -62,7 +62,10 @@ th { color: var(--muted); font-weight: 600; font-size: 12px; }
 td .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 4px; }
 img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; border: 1px solid var(--line); border-radius: 4px; }
 #error { color: var(--danger); margin-block: 8px; }
-#error:empty { display: none; }
+/* Visually hidden when empty but kept in the accessibility tree, so a later
+   message is announced as an alert. */
+#error:empty { position: absolute; width: 1px; height: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#conn { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
 .fault-active { color: var(--ok); font-size: 12px; }
 .fault-controls input[type="number"] { width: 72px; }
 .empty { color: var(--muted); padding: 12px 8px; }
@@ -72,6 +75,8 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
 <main>
   <h1>CamFarm</h1>
   <p class="sub">A simulated camera fleet. It simulates cameras and is not an ONVIF-conformant implementation.</p>
+
+  <p id="conn" role="status">connecting…</p>
 
   <div class="panel">
     <h2>Replay</h2>
@@ -115,11 +120,14 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
   var api = "/api/v1";
   var tbody = document.querySelector("#cameras tbody");
   var errorBox = document.getElementById("error");
-  var cameras = [];
-  var snapshotURLs = {};   // id -> object URL of the last snapshot
-  var inputState = {};     // id -> {rate, protect}, survives re-renders
+  var connBox = document.getElementById("conn");
+  var rows = {};            // id -> {tr, refs, snapshotURL}
+  var seq = 0, applied = 0; // refresh ordering: ignore responses older than the last applied
 
+  // #error carries action errors only. Polling failures go to #conn, so a
+  // failed refresh can never overwrite (or clear) an error from a user action.
   function showError(msg) { errorBox.textContent = msg || ""; }
+  function setConn(ok) { connBox.textContent = ok ? "connected" : "disconnected, retrying"; }
 
   function request(method, path, body) {
     var opts = { method: method, headers: {} };
@@ -147,6 +155,20 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
     return n;
   }
 
+  // guard disables the button while fn's promise is in flight. Rows are
+  // updated in place rather than rebuilt, so the disabled state survives polls.
+  function guard(btn, fn) {
+    btn.addEventListener("click", function () {
+      if (btn.disabled) { return; }
+      btn.disabled = true;
+      showError("");
+      var p;
+      try { p = Promise.resolve(fn()); } catch (e) { p = Promise.reject(e); }
+      p.catch(function (e) { showError(e.message); })
+        .then(function () { btn.disabled = false; });
+    });
+  }
+
   function copyButton(value, what) {
     return el("button", { class: "copy secondary", type: "button", text: "Copy", "data-copy": value, "aria-label": "Copy " + what });
   }
@@ -166,58 +188,43 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
     }).join(", ");
   }
 
-  function renderRow(c) {
-    var st = inputState[c.id] || { rate: "0.2", protect: false };
-    inputState[c.id] = st;
+  function createRow(c) {
+    var entry = { snapshotURL: "" };
 
-    var rate = el("input", { class: "fault-rate", type: "number", min: "0", max: "1", step: "0.05", value: st.rate, "aria-label": "Drop rate for " + c.id });
-    rate.addEventListener("input", function () { st.rate = rate.value; });
-    var protect = el("input", { class: "fault-protect", type: "checkbox", checked: st.protect, "aria-label": "Protect keyframes for " + c.id });
-    protect.addEventListener("change", function () { st.protect = protect.checked; });
-
+    var rate = el("input", { class: "fault-rate", type: "number", min: "0", max: "1", step: "0.05", value: "0.2", "aria-label": "Rate, drop rate for " + c.id });
+    var protect = el("input", { class: "fault-protect", type: "checkbox", "aria-label": "Keep keyframes, protect keyframes for " + c.id });
     var kind = el("select", { class: "fault-kind", "aria-label": "Fault kind for " + c.id }, [
       el("option", { value: "frame_drop", text: "frame_drop" }),
       el("option", { value: "keyframe_starvation", text: "keyframe_starvation (not implemented)", disabled: true }),
       el("option", { value: "packet_loss", text: "packet_loss (not implemented)", disabled: true })
     ]);
 
-    var img = el("img", { class: "snapshot", alt: "Snapshot of " + c.id, hidden: !snapshotURLs[c.id] });
-    if (snapshotURLs[c.id]) { img.src = snapshotURLs[c.id]; }
+    var img = el("img", { class: "snapshot", alt: "Snapshot of " + c.id, hidden: true });
+    var base = "/cameras/" + encodeURIComponent(c.id);
 
     var snapBtn = el("button", { class: "btn-snapshot secondary", type: "button", text: "Snapshot" });
-    snapBtn.addEventListener("click", function () {
-      snapBtn.disabled = true;
-      showError("");
-      fetch(api + "/cameras/" + encodeURIComponent(c.id) + "/snapshot.jpg").then(function (r) {
-        if (!r.ok) { return r.json().catch(function () { return {}; }).then(function (j) { throw new Error(j.error || r.statusText); }); }
+    guard(snapBtn, function () {
+      return fetch(api + base + "/snapshot.jpg").then(function (r) {
+        if (!r.ok) { return r.json().catch(function () { return {}; }).then(function (j) { throw new Error("Snapshot failed: " + (j.error || r.statusText)); }); }
         return r.blob();
       }).then(function (blob) {
-        if (snapshotURLs[c.id]) { URL.revokeObjectURL(snapshotURLs[c.id]); }
-        snapshotURLs[c.id] = URL.createObjectURL(blob);
-        img.src = snapshotURLs[c.id];
+        if (entry.snapshotURL) { URL.revokeObjectURL(entry.snapshotURL); }
+        entry.snapshotURL = URL.createObjectURL(blob);
+        img.src = entry.snapshotURL;
         img.hidden = false;
-      }).catch(function (e) { showError("Snapshot failed: " + e.message); })
-        .then(function () { snapBtn.disabled = false; });
+      });
     });
 
     var removeBtn = el("button", { class: "btn-remove danger", type: "button", text: "Remove" });
-    removeBtn.addEventListener("click", function () {
-      showError("");
-      request("DELETE", "/cameras/" + encodeURIComponent(c.id)).then(refresh).catch(function (e) { showError(e.message); });
-    });
+    guard(removeBtn, function () { return request("DELETE", base).then(refresh); });
 
     var applyBtn = el("button", { class: "btn-fault", type: "button", text: "Apply fault" });
-    applyBtn.addEventListener("click", function () {
-      showError("");
-      request("POST", "/cameras/" + encodeURIComponent(c.id) + "/faults",
-        { kind: kind.value, rate: parseFloat(rate.value), protectKeyframes: protect.checked })
-        .then(refresh).catch(function (e) { showError(e.message); });
+    guard(applyBtn, function () {
+      return request("POST", base + "/faults",
+        { kind: kind.value, rate: parseFloat(rate.value), protectKeyframes: protect.checked }).then(refresh);
     });
     var clearBtn = el("button", { class: "btn-clear-fault secondary", type: "button", text: "Clear" });
-    clearBtn.addEventListener("click", function () {
-      showError("");
-      request("DELETE", "/cameras/" + encodeURIComponent(c.id) + "/faults").then(refresh).catch(function (e) { showError(e.message); });
-    });
+    guard(clearBtn, function () { return request("DELETE", base + "/faults").then(refresh); });
 
     var urls = el("td", {}, [
       urlLine("RTSP", c.rtspUrl, "cell-rtsp"),
@@ -227,19 +234,21 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
       urls.appendChild(el("div", { class: "row" }, [el("span", { text: "Auth" }), el("code", { text: c.username + " / " + c.password })]));
     }
 
+    var meta = el("div", { class: "sub" });
+    var statsA = el("div", { class: "mono" });
+    var statsB = el("div", { class: "mono" });
+    var active = el("div", { class: "fault-active" });
+
     var tr = el("tr", { "data-id": c.id }, [
       el("td", {}, [
         el("strong", { text: c.id }),
-        el("div", { class: "sub", text: c.codec + " " + c.width + "x" + c.height + " @ " + c.fps }),
+        meta,
         el("div", { class: "sub mono", text: "seed " + c.seed })
       ]),
       urls,
+      el("td", {}, [statsA, statsB]),
       el("td", {}, [
-        el("div", { class: "mono", text: "frames " + c.stats.FramesServed + " · loops " + c.stats.LoopsCompleted }),
-        el("div", { class: "mono", text: "faults fired " + c.stats.FaultsFired + " · readers " + c.readers })
-      ]),
-      el("td", {}, [
-        el("div", { class: "fault-active", text: faultText(c) }),
+        active,
         el("div", { class: "fault-controls row" }, [kind, el("label", {}, ["Rate", rate]), el("label", {}, ["Keep keyframes", protect])])
       ]),
       el("td", {}, [
@@ -247,47 +256,84 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
         img
       ])
     ]);
-    return tr;
+    entry.tr = tr;
+    entry.refs = { meta: meta, statsA: statsA, statsB: statsB, active: active };
+    return entry;
   }
 
-  function render() {
-    // Re-rendering replaces rows, so keep any input the user is editing.
-    var focused = document.activeElement;
-    var keep = focused && tbody.contains(focused) && focused.closest("tr") ? { id: focused.closest("tr").dataset.id, cls: focused.className } : null;
-    tbody.textContent = "";
-    cameras.forEach(function (c) { tbody.appendChild(renderRow(c)); });
+  // updateRow touches only the text that can change; inputs, buttons and the
+  // snapshot image are left alone so polling never eats a click or an edit.
+  function updateRow(entry, c) {
+    var r = entry.refs;
+    var set = function (n, t) { if (n.textContent !== t) { n.textContent = t; } };
+    set(r.meta, c.codec + " " + c.width + "x" + c.height + " @ " + c.fps);
+    set(r.statsA, "frames " + c.stats.FramesServed + " · loops " + c.stats.LoopsCompleted);
+    set(r.statsB, "faults fired " + c.stats.FaultsFired + " · readers " + c.readers);
+    set(r.active, faultText(c));
+  }
+
+  function render(cameras) {
+    var seen = {};
+    cameras.forEach(function (c, i) {
+      seen[c.id] = true;
+      var entry = rows[c.id];
+      if (!entry) { entry = rows[c.id] = createRow(c); }
+      updateRow(entry, c);
+      if (tbody.children[i] !== entry.tr) { tbody.insertBefore(entry.tr, tbody.children[i] || null); }
+    });
+    // Prune rows (and their blob URLs and input state) for removed cameras.
+    Object.keys(rows).forEach(function (id) {
+      if (seen[id]) { return; }
+      if (rows[id].snapshotURL) { URL.revokeObjectURL(rows[id].snapshotURL); }
+      rows[id].tr.remove();
+      delete rows[id];
+    });
     document.getElementById("empty").hidden = cameras.length > 0;
-    if (keep && keep.cls) {
-      var row = tbody.querySelector('tr[data-id="' + CSS.escape(keep.id) + '"]');
-      var again = row && row.querySelector("." + keep.cls.split(" ")[0]);
-      if (again) { again.focus(); }
-    }
   }
 
   function refresh() {
+    var mine = ++seq;
     return Promise.all([
-      // Seeds are uint64 and exceed 2^53, so JSON.parse would silently round
-      // them. Quote them in the text first so the replay seed shown is exact.
-      request("GET", "/cameras").then(function (r) { return r.text(); }).then(function (t) {
-        return JSON.parse(t.replace(/"([sS]eed)":\s*(\d+)/g, '"$1":"$2"'));
-      }),
+      request("GET", "/cameras").then(function (r) { return r.json(); }),
       request("GET", "/fleet").then(function (r) { return r.json(); })
     ]).then(function (res) {
-      cameras = res[0];
+      if (mine < applied) { return; }   // a newer response was already applied
+      applied = mine;
       document.getElementById("replay").textContent = res[1].replayLine;
-      render();
-    }).catch(function (e) { showError("Could not load the fleet: " + e.message); });
+      render(res[0]);
+      setConn(true);
+    }).catch(function () {
+      if (mine >= applied) { setConn(false); }
+    });
+  }
+
+  function legacyCopy(text) {
+    var ta = el("textarea", { value: text, readOnly: true });
+    ta.style.cssText = "position:fixed;left:-9999px;top:0";
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    ta.remove();
+    return ok;
   }
 
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest && ev.target.closest("button.copy");
     if (!b) { return; }
     var text = b.getAttribute("data-copy");
+    var done = function () {
+      var old = b.dataset.label || b.textContent;
+      b.dataset.label = old;
+      b.textContent = "Copied";
+      setTimeout(function () { b.textContent = old; }, 1200);
+    };
+    var fail = function () { showError("Copy failed; select the text manually."); };
+    var fallback = function () { if (legacyCopy(text)) { done(); } else { fail(); } };
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(function () {
-        var old = b.textContent; b.textContent = "Copied";
-        setTimeout(function () { b.textContent = old; }, 1200);
-      }).catch(function () { showError("Copy failed; select the text manually."); });
+      navigator.clipboard.writeText(text).then(done).catch(fallback);
+    } else {
+      fallback();
     }
   });
 
@@ -296,28 +342,34 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
     document.getElementById("add-path-label").hidden = source.value !== "file";
   });
 
-  document.getElementById("add-form").addEventListener("submit", function (ev) {
+  var addForm = document.getElementById("add-form");
+  var addSubmit = document.getElementById("add-submit");
+  addForm.addEventListener("submit", function (ev) {
     ev.preventDefault();
+    if (addSubmit.disabled) { return; }
+    addSubmit.disabled = true;
     showError("");
     var spec = { id: document.getElementById("add-id").value.trim() };
     var u = document.getElementById("add-user").value, p = document.getElementById("add-pass").value;
     if (u || p) { spec.auth = { username: u, password: p }; }
     if (source.value === "file") { spec.source = { kind: "file", path: document.getElementById("add-path").value }; }
     request("POST", "/cameras", spec).then(function () {
-      document.getElementById("add-form").reset();
+      addForm.reset();
       document.getElementById("add-path-label").hidden = true;
       return refresh();
-    }).catch(function (e) { showError(e.message); });
+    }).catch(function (e) { showError(e.message); })
+      .then(function () { addSubmit.disabled = false; });
   });
 
-  // SSE gives immediate updates on change; the interval keeps counters fresh.
+  // SSE gives immediate updates on change; the interval keeps counters fresh
+  // and is the fallback when the stream is unavailable.
   if (window.EventSource) {
     var es = new EventSource(api + "/events");
     ["camera_added", "camera_removed", "fault_injected", "fault_cleared"].forEach(function (t) {
       es.addEventListener(t, refresh);
     });
-    es.onerror = function () { /* the browser reconnects; refresh covers missed events */ };
-    es.onopen = refresh;
+    es.onerror = function () { setConn(false); };
+    es.onopen = function () { setConn(true); refresh(); };
   }
   setInterval(refresh, 2000);
   refresh();

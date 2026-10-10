@@ -10,6 +10,7 @@ import (
 	"image/jpeg"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -287,12 +288,35 @@ func TestEmbeddedPageCarriesTheTestHooks(t *testing.T) {
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(resp.Body)
 	page := buf.String()
+	// This only pins the construction patterns in the page source. The Task 10
+	// browser tests are the real contract for these hooks.
 	for _, hook := range []string{
-		`id="replay"`, `id="error"`, `role="alert"`, `id="add-form"`, `id="add-id"`,
-		`id="add-user"`, `id="add-pass"`, `id="add-source"`, `id="add-path"`, `id="add-submit"`,
-		`id="cameras"`, "btn-snapshot", "btn-remove", "img.snapshot", "fault-rate",
-		"fault-protect", "btn-fault", "btn-clear-fault", "fault-active", "button.copy",
-		"data-copy", "cell-rtsp", "cell-onvif",
+		`<code id="replay">`,
+		`<div id="error" role="alert"></div>`,
+		`<p id="conn" role="status">`,
+		`<form id="add-form"`,
+		`<input id="add-id" required`,
+		`<input id="add-user"`,
+		`<input id="add-pass"`,
+		`<select id="add-source">`,
+		`<option value="fixture">`,
+		`<option value="file">`,
+		`<input id="add-path"`,
+		`<button id="add-submit" type="submit">`,
+		`<table id="cameras">`,
+		`"data-id": c.id`,
+		`class: "btn-snapshot secondary"`,
+		`class: "btn-remove danger"`,
+		`class: "btn-fault"`,
+		`class: "btn-clear-fault secondary"`,
+		`class: "snapshot"`,
+		`class: "fault-rate", type: "number"`,
+		`class: "fault-protect", type: "checkbox"`,
+		`class: "fault-active"`,
+		`class: "copy secondary", type: "button"`,
+		`"data-copy": value`,
+		`"cell-rtsp"`,
+		`"cell-onvif"`,
 	} {
 		if !strings.Contains(page, hook) {
 			t.Errorf("page is missing hook %q", hook)
@@ -465,10 +489,50 @@ func TestReaddedCameraDoesNotJoinOldFlight(t *testing.T) {
 	wg.Wait()
 }
 
+// Seeds are uint64 and JavaScript rounds JSON numbers above 2^53, so the API
+// must send them as decimal strings.
+func TestSeedsAbove2Pow53RoundTripExactly(t *testing.T) {
+	const root = uint64(0xfedcba9876543210)
+	f := camfarm.StartT(t, camfarm.Spec{Seed: root, Cameras: []camfarm.CameraSpec{{ID: "c"}}})
+	ts := httptest.NewServer(Handler(f, Options{}))
+	t.Cleanup(ts.Close)
+
+	var fleet struct {
+		Seed string `json:"seed"`
+	}
+	resp := do(t, "GET", ts.URL+"/api/v1/fleet", "")
+	if err := json.NewDecoder(resp.Body).Decode(&fleet); err != nil {
+		t.Fatal(err)
+	}
+	if fleet.Seed != strconv.FormatUint(root, 10) {
+		t.Errorf("fleet seed = %q, want %d", fleet.Seed, root)
+	}
+
+	cam, err := f.Camera("c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strconv.FormatUint(cam.Stats().Seed, 10)
+	var list []struct {
+		Seed  string `json:"seed"`
+		Stats struct{ Seed string }
+	}
+	resp = do(t, "GET", ts.URL+"/api/v1/cameras", "")
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Seed != want || list[0].Stats.Seed != want {
+		t.Errorf("camera seeds = %+v, want %s", list, want)
+	}
+	if cam.Stats().Seed <= 1<<53 {
+		t.Logf("derived camera seed %d is below 2^53; only the fleet seed exercises the bound", cam.Stats().Seed)
+	}
+}
+
 func TestFleetEndpoint(t *testing.T) {
 	ts, _ := newServer(t, Options{})
 	var body struct {
-		Seed       uint64 `json:"seed"`
+		Seed       string `json:"seed"`
 		SpecHash   string `json:"specHash"`
 		ReplayLine string `json:"replayLine"`
 		Journal    []any  `json:"journal"`
@@ -480,7 +544,7 @@ func TestFleetEndpoint(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body.Seed != 1 || body.SpecHash == "" || !strings.Contains(body.ReplayLine, "seed=0x1") {
+	if body.Seed != "1" || body.SpecHash == "" || !strings.Contains(body.ReplayLine, "seed=0x1") {
 		t.Errorf("fleet = %+v", body)
 	}
 	if body.Journal == nil {

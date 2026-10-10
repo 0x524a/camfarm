@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/0x524a/camfarm"
 )
@@ -14,7 +15,7 @@ func (s *server) getFleet(w http.ResponseWriter, _ *http.Request) {
 		j = []camfarm.JournalEntry{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"seed":       s.fleet.Seed(),
+		"seed":       strconv.FormatUint(s.fleet.Seed(), 10),
 		"specHash":   s.fleet.SpecHash(),
 		"replayLine": s.fleet.ReplayLine(),
 		"journal":    j,

@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"mime"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/0x524a/camfarm"
@@ -70,11 +71,24 @@ type cameraDTO struct {
 	Height        int                 `json:"height"`
 	FPS           float64             `json:"fps"`
 	Readers       int                 `json:"readers"`
-	Seed          uint64              `json:"seed"`
+	Seed          string              `json:"seed"` // decimal string: a uint64 exceeds JS 2^53
 	Username      string              `json:"username,omitempty"`
 	Password      string              `json:"password,omitempty"`
 	Faults        []camfarm.FaultSpec `json:"faults"`
-	Stats         camfarm.Stats       `json:"stats"`
+	Stats         statsDTO            `json:"stats"`
+}
+
+// statsDTO mirrors camfarm.Stats with the seed as a decimal string, since a
+// uint64 seed above 2^53 is silently rounded by JavaScript's JSON.parse. The
+// other counters stay far below that bound.
+type statsDTO struct {
+	Seed               string
+	FramesServed       uint64
+	LoopsCompleted     uint64
+	FaultsFired        uint64
+	OutboundRTPPackets uint64
+	OutboundBytes      uint64
+	Readers            int
 }
 
 func (s *server) dto(cam *camfarm.Camera, st camfarm.Status) cameraDTO {
@@ -87,8 +101,14 @@ func (s *server) dto(cam *camfarm.Camera, st camfarm.Status) cameraDTO {
 	return cameraDTO{
 		ID: st.ID, RTSPURL: st.RTSPURL, ONVIFEndpoint: cam.ONVIFEndpoint(),
 		Source: st.Source, Codec: st.Codec, Width: st.Width, Height: st.Height, FPS: st.FPS,
-		Readers: st.Readers, Seed: stats.Seed, Username: u, Password: p,
-		Faults: faults, Stats: stats,
+		Readers: st.Readers, Seed: strconv.FormatUint(stats.Seed, 10), Username: u, Password: p,
+		Faults: faults,
+		Stats: statsDTO{
+			Seed: strconv.FormatUint(stats.Seed, 10), FramesServed: stats.FramesServed,
+			LoopsCompleted: stats.LoopsCompleted, FaultsFired: stats.FaultsFired,
+			OutboundRTPPackets: stats.OutboundRTPPackets, OutboundBytes: stats.OutboundBytes,
+			Readers: stats.Readers,
+		},
 	}
 }
 
