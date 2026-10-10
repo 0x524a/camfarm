@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/liberrors"
 	"github.com/pion/rtp"
 
+	"github.com/0x524a/camfarm/internal/fault"
 	"github.com/0x524a/camfarm/internal/media"
 	"github.com/0x524a/camfarm/internal/obs"
 	"github.com/0x524a/camfarm/internal/seed"
@@ -640,5 +642,96 @@ func TestRemoveCameraAfterCloseRefused(t *testing.T) {
 	s.Close()
 	if err := s.RemoveCamera("cam-00"); !errors.Is(err, ErrNotStarted) {
 		t.Fatalf("RemoveCamera after Close: err = %v, want ErrNotStarted", err)
+	}
+}
+
+func TestSetFaultsStopsAndResumesDeliveryToARealClient(t *testing.T) {
+	m := testMedia(t)
+	s, err := New(Config{Host: "127.0.0.1", Obs: obs.New(1000), Cameras: []CameraConfig{
+		{ID: "cam-00", Media: m, Seed: seed.Seed(11)},
+	}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(s.Close)
+
+	u, err := base.ParseURL(s.URL("cam-00"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	c, _ := newTestClient(u)
+	if err := c.Start(); err != nil {
+		t.Fatalf("client start: %v", err)
+	}
+	defer c.Close()
+	desc, _, err := c.Describe(u)
+	if err != nil {
+		t.Fatalf("DESCRIBE: %v", err)
+	}
+	if err := c.SetupAll(desc.BaseURL, desc.Medias); err != nil {
+		t.Fatalf("SETUP: %v", err)
+	}
+	var pkts atomic.Int64
+	c.OnPacketRTPAny(func(*description.Media, format.Format, *rtp.Packet) { pkts.Add(1) })
+	if _, err := c.Play(nil); err != nil {
+		t.Fatalf("PLAY: %v", err)
+	}
+
+	waitFor := func(what string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for !cond() {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitFor("packets to flow", func() bool { return pkts.Load() > 0 })
+
+	applied := make(chan int, 1)
+	if err := s.SetFaults("cam-00", []fault.Spec{{Kind: fault.KindFrameDrop, Rate: 1}}, func(f int) { applied <- f }); err != nil {
+		t.Fatalf("SetFaults: %v", err)
+	}
+	select {
+	case <-applied:
+	case <-time.After(10 * time.Second):
+		t.Fatal("fault swap never applied")
+	}
+	// Nothing is written after the swap applied, so the count is now frozen.
+	// Give in-flight packets time to arrive, then expect a stable count.
+	time.Sleep(300 * time.Millisecond)
+	frozen := pkts.Load()
+	time.Sleep(500 * time.Millisecond)
+	if got := pkts.Load(); got != frozen {
+		t.Fatalf("packets kept arriving under frame_drop rate 1: %d -> %d", frozen, got)
+	}
+
+	if err := s.SetFaults("cam-00", nil, nil); err != nil {
+		t.Fatalf("SetFaults(nil): %v", err)
+	}
+	waitFor("delivery to resume", func() bool { return pkts.Load() > frozen })
+}
+
+func TestSetFaultsUnknownCamera(t *testing.T) {
+	s := startServer(t, 1)
+	err := s.SetFaults("nope", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "unknown camera") {
+		t.Fatalf("err = %v, want an unknown-camera error", err)
+	}
+}
+
+func TestSetFaultsBeforeStart(t *testing.T) {
+	s, err := New(Config{Host: "127.0.0.1", Obs: obs.New(10), Cameras: []CameraConfig{
+		{ID: "c", Media: testMedia(t), Seed: seed.Seed(1)},
+	}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.SetFaults("c", nil, nil); !errors.Is(err, ErrNotStarted) {
+		t.Fatalf("err = %v, want ErrNotStarted", err)
 	}
 }
