@@ -404,6 +404,48 @@ func TestDiscoveryDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestMulticastInterfaceMapping(t *testing.T) {
+	cases := []struct {
+		name string
+		d    DiscoveryConfig
+		host string
+		want string
+	}{
+		{"ipv4 literal defaults", DiscoveryConfig{Multicast: true}, "192.0.2.7", "192.0.2.7"},
+		{"explicit wins", DiscoveryConfig{Multicast: true, Interface: "br0"}, "192.0.2.7", "br0"},
+		{"hostname stays empty", DiscoveryConfig{Multicast: true}, "camhost.example", ""},
+		{"ipv6 literal", DiscoveryConfig{Multicast: true}, "2001:db8::1", "2001:db8::1"},
+		{"bracketed ipv6", DiscoveryConfig{Multicast: true}, "[2001:db8::1]", "2001:db8::1"},
+		{"unicast untouched", DiscoveryConfig{ListenAddr: "127.0.0.1:0"}, "192.0.2.7", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := multicastInterface(&tc.d, tc.host); got != tc.want {
+				t.Errorf("multicastInterface = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMulticastRefusesHostnameBoundToLoopback(t *testing.T) {
+	srv, err := New(Config{Host: "localhost", Cameras: []CameraConfig{discoCam("a", 1)},
+		Discovery: &DiscoveryConfig{Multicast: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = srv.Start()
+	if err == nil {
+		srv.Close()
+		t.Fatal("Start: want loopback error")
+	}
+	if !strings.Contains(err.Error(), `"localhost"`) || !strings.Contains(err.Error(), "loopback") {
+		t.Errorf("error = %v, want it to name listen.host and loopback", err)
+	}
+	if srv.Addr() != nil {
+		t.Error("failed Start left a listener")
+	}
+}
+
 func TestDiscoveryConfigValidation(t *testing.T) {
 	cases := map[string]DiscoveryConfig{
 		"both modes":          {Multicast: true, ListenAddr: "127.0.0.1:0"},

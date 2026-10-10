@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/0x524a/onvif-go/discovery"
@@ -42,6 +43,22 @@ func (d *DiscoveryConfig) validate() error {
 	return nil
 }
 
+// multicastInterface picks the interface the responder joins the group on.
+// An explicit Interface wins. Otherwise, in multicast mode, a literal IP host
+// is used (onvif-go resolves an IP to its interface), so the join happens on
+// the interface the cameras are advertised from rather than the default route.
+// A hostname leaves it empty, as does unicast mode.
+func multicastInterface(d *DiscoveryConfig, host string) string {
+	if d.Interface != "" || !d.Multicast {
+		return d.Interface
+	}
+	h := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
 // responderState is the running WS-Discovery responder and what Close needs to
 // stop it.
 type responderState struct {
@@ -57,7 +74,7 @@ type responderState struct {
 func (s *Server) startResponder() (*responderState, error) {
 	ready := make(chan struct{})
 	resp := discovery.NewResponder(&discovery.ResponderConfig{
-		NetworkInterface: s.cfg.Discovery.Interface,
+		NetworkInterface: multicastInterface(s.cfg.Discovery, s.cfg.Host),
 		ListenAddr:       s.cfg.Discovery.ListenAddr,
 		AnnounceAddr:     s.cfg.Discovery.AnnounceAddr,
 		Ready:            ready,
@@ -72,7 +89,13 @@ func (s *Server) startResponder() (*responderState, error) {
 	st := &responderState{resp: resp, cancel: cancel, done: make(chan struct{}), errCh: make(chan error, 1)}
 	go func() {
 		defer close(st.done)
-		st.errCh <- resp.Start(ctx)
+		err := resp.Start(ctx)
+		if err != nil && ctx.Err() == nil {
+			// Died on its own rather than via stop; without this a dead
+			// responder would go unnoticed until Close.
+			s.log.Error("discovery responder stopped unexpectedly", "err", err)
+		}
+		st.errCh <- err
 	}()
 
 	timer := time.NewTimer(responderReadyTimeout)

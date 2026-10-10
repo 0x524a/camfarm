@@ -262,6 +262,16 @@ func (s *Server) Start() error {
 	}
 	httpSrv := &http.Server{Handler: s.mux}
 
+	if d := s.cfg.Discovery; d != nil && d.Multicast {
+		// The spec check sees only the literal host text; a hostname can
+		// still resolve to loopback.
+		if tcp, ok := ln.Addr().(*net.TCPAddr); ok && tcp.IP.IsLoopback() {
+			s.mu.Unlock()
+			_ = ln.Close()
+			return fmt.Errorf("onvif: listen.host %q resolves to loopback %s; multicast discovery would advertise an address no other host can reach", s.cfg.Host, tcp.IP)
+		}
+	}
+
 	s.ln = ln
 	if s.cfg.Discovery != nil {
 		// Started only now that the ONVIF listener is bound, so the XAddrs
