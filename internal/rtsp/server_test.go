@@ -305,6 +305,27 @@ func TestConcurrentCloseAndDescribe(t *testing.T) {
 	wg.Wait()
 }
 
+// TestHandlersAfterCloseAnswerNotFound pins the clean-error contract: once
+// Close has cleared a camera's stream, DESCRIBE/SETUP/PLAY for it must answer
+// 404, never StatusOK with a nil stream (which gortsplib panics on).
+func TestHandlersAfterCloseAnswerNotFound(t *testing.T) {
+	s := startServer(t, 1)
+	s.Close()
+
+	d, st, err := s.OnDescribe(&gortsplib.ServerHandlerOnDescribeCtx{Path: "cam-00"})
+	if err != nil || st != nil || d.StatusCode != base.StatusNotFound {
+		t.Fatalf("OnDescribe = %v, %v, %v; want 404, nil stream", d, st, err)
+	}
+	r, st, err := s.OnSetup(&gortsplib.ServerHandlerOnSetupCtx{Path: "cam-00"})
+	if err != nil || st != nil || r.StatusCode != base.StatusNotFound {
+		t.Fatalf("OnSetup = %v, %v, %v; want 404, nil stream", r, st, err)
+	}
+	p, err := s.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{Path: "cam-00"})
+	if err != nil || p.StatusCode != base.StatusNotFound {
+		t.Fatalf("OnPlay = %v, %v; want 404", p, err)
+	}
+}
+
 func TestMediaReachesAClient(t *testing.T) {
 	s := startServer(t, 2)
 

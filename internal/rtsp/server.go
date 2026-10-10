@@ -561,7 +561,11 @@ func (s *Server) lookup(path string) (id string, stream *gortsplib.ServerStream,
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	cam, ok := s.cams[strings.Trim(path, "/")]
-	if !ok {
+	// Close and Start's rollback clear cam.stream without removing the camera
+	// from s.cams, so a nil stream means the camera is shutting down. Reporting
+	// it as found would make a handler answer StatusOK with a nil stream, which
+	// gortsplib rejects with a panic; treat it as not found instead.
+	if !ok || cam.stream == nil {
 		return "", nil, false
 	}
 	return cam.id, cam.stream, true
