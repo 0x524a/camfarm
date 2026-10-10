@@ -1,5 +1,7 @@
 package fault
 
+import "time"
+
 // ticksPerMs is the pump's RTP clock rate (90 kHz) per millisecond.
 const ticksPerMs = 90
 
@@ -107,4 +109,23 @@ func (e *Engine) TimestampShift(frameIndex int, frameDur int64) int64 {
 		}
 	}
 	return shift
+}
+
+// FrameDelay returns jitter's delay for the frame, or zero when jitter is not
+// configured. Call it exactly once per frame, including frames another fault
+// removes and frames burst_delivery holds, so the sequence depends only on how
+// many frames have passed.
+//
+// The delay is uniform in [0, MaxMs) milliseconds, truncated to whole
+// microseconds so float noise cannot change a replayed schedule.
+func (e *Engine) FrameDelay(_ int) time.Duration {
+	for i := range e.entries {
+		en := &e.entries[i]
+		if en.spec.Kind != KindJitter {
+			continue
+		}
+		u := en.rnd.Float64()
+		return time.Duration(u * float64(en.spec.MaxMs) * float64(time.Millisecond)).Truncate(time.Microsecond)
+	}
+	return 0
 }

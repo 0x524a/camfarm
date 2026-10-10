@@ -93,3 +93,10 @@ func validateTimingTable(t *testing.T) {
 }
 
 func TestTimingValidation(t *testing.T) { validateTimingTable(t) }
+
+func TestJitterIsImplemented(t *testing.T) {
+	if !Implemented(KindJitter) {
+		t.Fatal("jitter not flipped to Implemented")
+	}
+	validateTimingTable(t)
+}

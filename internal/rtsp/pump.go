@@ -28,6 +28,7 @@ const (
 	detailTimestampFmt     = "timestamp shifted by %d ticks"
 	detailHeldFmt          = "held (%d of %d)"
 	detailReleasedFmt      = "released %d frames"
+	detailDelayedFmt       = "delayed %d ms"
 )
 
 // faultSwap is a pending replacement of a pump's fault engine.
@@ -255,35 +256,83 @@ func (p *Pump) writeFrame(pkts []*rtp.Packet) error {
 	return nil
 }
 
-// flushHeld writes every held frame in order, then cur if curFrame, counting
-// each as served now that it is emitted. The buffer is emptied first, so a
-// write error cannot cause a frame to be written twice.
-func (p *Pump) flushHeld(cur []*rtp.Packet, curFrame bool) error {
-	frames := p.held
-	p.held = nil
-	n := len(frames)
-	if curFrame {
-		frames = append(frames, cur)
-		n++
-	}
-	for _, pkts := range frames {
+// plannedFrame is one Step's decisions, made and not yet carried out.
+type plannedFrame struct {
+	// frames are the access units to write, each already stamped and
+	// loss-filtered: none when the access unit was dropped or is held, one
+	// normally, and a whole burst (held frames, then this one) on a flush.
+	frames [][]*rtp.Packet
+	// delay is jitter's delay for this frame; zero when none is configured or
+	// there is nothing to write. It is relative to the tick being processed.
+	delay time.Duration
+	// idx is the frame counter the frame was planned at, which events are
+	// attributed to.
+	idx int
+	// released, when non-zero, is the size of the burst this plan flushes.
+	released int
+}
+
+// emit writes the planned frames in order, counting each as served now that it
+// is emitted.
+func (p *Pump) emit(pf plannedFrame) error {
+	for _, pkts := range pf.frames {
 		if err := p.writeFrame(pkts); err != nil {
 			return err
 		}
 		p.obs.Frame(p.id)
 	}
-	p.obs.Fault(p.id, p.frameCounter, string(fault.KindBurstDelivery), fmt.Sprintf(detailReleasedFmt, n))
+	if pf.released > 0 {
+		p.obs.Fault(p.id, pf.idx, string(fault.KindBurstDelivery), fmt.Sprintf(detailReleasedFmt, pf.released))
+	}
 	return nil
 }
 
-// Step writes exactly one access unit, or holds it for burst_delivery.
+// takeHeld empties the hold buffer and returns its frames. Emptying first means
+// a write error cannot cause a frame to be written twice.
+func (p *Pump) takeHeld() [][]*rtp.Packet {
+	frames := p.held
+	p.held = nil
+	return frames
+}
+
+// Step writes exactly one access unit, or holds it for burst_delivery. It plans
+// the frame and emits it at once: jitter's delay is a pacing concern of run, so
+// a caller driving Step directly never waits. AfterFrame is called once the
+// frame is handled, held and dropped frames included, and not on error.
 func (p *Pump) Step() error {
+	pf, err := p.plan()
+	if err != nil {
+		return err
+	}
+	if err := p.emit(pf); err != nil {
+		return err
+	}
+	p.done()
+	return nil
+}
+
+// done reports a completed frame to AfterFrame.
+func (p *Pump) done() {
+	if p.afterFrame != nil {
+		p.afterFrame()
+	}
+}
+
+// plan makes every decision for one access unit, in this order: pending fault
+// swap, frame faults (drop, starvation), encode, packet loss, timestamp faults,
+// burst hold or flush, then jitter. Per-frame draws are made unconditionally,
+// for dropped and held frames too, so each sequence depends only on how many
+// frames have passed. It advances the pump to the next access unit and writes
+// nothing, except a hold released by a fault-set swap.
+func (p *Pump) plan() (plannedFrame, error) {
 	if p.applyPendingFaults() && len(p.held) > 0 {
 		// A new fault set starts with no hold running, so a hold in progress
 		// cannot continue. Release its frames now, before this frame, rather than
-		// lose them or leave them for some later unrelated burst.
-		if err := p.flushHeld(nil, false); err != nil {
-			return err
+		// lose them or leave them for some later unrelated burst. They are written
+		// at once, undelayed, as the old set's last act.
+		frames := p.takeHeld()
+		if err := p.emit(plannedFrame{frames: frames, idx: p.frameCounter, released: len(frames)}); err != nil {
+			return plannedFrame{}, err
 		}
 	}
 	au := p.aus[p.idx]
@@ -320,7 +369,7 @@ func (p *Pump) Step() error {
 	if !drop {
 		pkts, err := p.enc.Encode(au.NALUs)
 		if err != nil {
-			return fmt.Errorf("rtsp: encoding access unit %d of %q: %w", p.idx, p.id, err)
+			return plannedFrame{}, fmt.Errorf("rtsp: encoding access unit %d of %q: %w", p.idx, p.id, err)
 		}
 
 		// packet_loss: the frame is encoded (so the packetizer assigns
@@ -368,6 +417,7 @@ func (p *Pump) Step() error {
 	// their delivery moves. obs.Frame counts a frame when it is emitted, which
 	// for a held frame is the flush. A dropped frame has nothing to hold, but its
 	// decision still advances the hold.
+	pf := plannedFrame{idx: p.frameCounter}
 	switch hold {
 	case fault.HoldHeld:
 		if !drop {
@@ -377,16 +427,22 @@ func (p *Pump) Step() error {
 			p.obs.FaultTally(p.id, string(fault.KindBurstDelivery), 1, 0)
 		}
 	case fault.HoldFlush:
-		if err := p.flushHeld(out, !drop); err != nil {
-			return err
+		pf.frames = p.takeHeld()
+		if !drop {
+			pf.frames = append(pf.frames, out)
 		}
+		pf.released = len(pf.frames)
 	default:
 		if !drop {
-			if err := p.writeFrame(out); err != nil {
-				return err
-			}
-			p.obs.Frame(p.id)
+			pf.frames = [][]*rtp.Packet{out}
 		}
+	}
+
+	// jitter is drawn for every frame. A frame with nothing to write (dropped or
+	// held) discards its draw: a held frame leaves with its burst, whose last
+	// frame carries that frame's own delay.
+	if d := p.faults.FrameDelay(p.frameCounter); len(pf.frames) > 0 {
+		pf.delay = d
 	}
 
 	p.frameCounter++
@@ -402,10 +458,7 @@ func (p *Pump) Step() error {
 		p.loops++
 		p.obs.Loop(p.id)
 	}
-	if p.afterFrame != nil {
-		p.afterFrame()
-	}
-	return nil
+	return pf, nil
 }
 
 // interval returns the wall-clock spacing between access units.
@@ -421,6 +474,13 @@ func (p *Pump) interval() time.Duration {
 //
 // A write error is logged by the caller and does not stop the pump: a reader
 // disconnecting mid-write must not take the camera down.
+//
+// Each tick plans a frame and, if jitter delayed it, waits until tickTime+delay
+// before emitting; tickTime is the time of the tick being processed, not the
+// moment the wait began. The loop is sequential, so a frame is never emitted
+// earlier than the previous one: order is kept, and a late frame makes the ones
+// behind it bunch up (the ticker holds one pending tick). AfterFrame fires
+// after the delayed emit.
 func (p *Pump) run(ctx context.Context, ck clock.Clock, onErr func(error)) {
 	tk := ck.NewTicker(p.interval())
 	defer tk.Stop()
@@ -428,10 +488,30 @@ func (p *Pump) run(ctx context.Context, ck clock.Clock, onErr func(error)) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tk.C():
-			if err := p.Step(); err != nil && onErr != nil {
-				onErr(err)
+		case tickTime := <-tk.C():
+			pf, err := p.plan()
+			if err != nil {
+				if onErr != nil {
+					onErr(err)
+				}
+				continue
 			}
+			if pf.delay > 0 {
+				p.obs.Fault(p.id, pf.idx, string(fault.KindJitter), fmt.Sprintf(detailDelayedFmt, pf.delay.Milliseconds()))
+				p.obs.FaultTally(p.id, string(fault.KindJitter), 1, 0)
+				select {
+				case <-ck.After(max(0, tickTime.Add(pf.delay).Sub(ck.Now()))):
+				case <-ctx.Done():
+					return
+				}
+			}
+			if err := p.emit(pf); err != nil {
+				if onErr != nil {
+					onErr(err)
+				}
+				continue
+			}
+			p.done()
 		}
 	}
 }

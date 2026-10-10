@@ -141,7 +141,7 @@ func Catalogue() []KindInfo {
 			},
 		},
 		{
-			Kind:   KindJitter,
+			Kind: KindJitter, Implemented: true,
 			Models: "Inter-arrival jitter: each frame leaves a seeded random time late (order kept), which stresses jitter-buffer sizing.",
 			Clock:  "frame counter; one draw per frame",
 			Params: []Param{

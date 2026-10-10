@@ -52,12 +52,12 @@ func TestCatalogueOrderAndImplementedFlags(t *testing.T) {
 			t.Fatalf("catalogue order = %v, want %v", kinds, want)
 		}
 	}
-	for _, k := range []Kind{KindFrameDrop, KindPacketLoss, KindKeyframeStarvation, KindRTSPError, KindTeardown, KindSDPLie, KindBurstDelivery, KindPTSDTSMismatch, KindPTSDelayed} {
+	for _, k := range []Kind{KindFrameDrop, KindPacketLoss, KindKeyframeStarvation, KindRTSPError, KindTeardown, KindSDPLie, KindJitter, KindBurstDelivery, KindPTSDTSMismatch, KindPTSDelayed} {
 		if !impl[k] {
 			t.Errorf("%q should be implemented", k)
 		}
 	}
-	for _, k := range []Kind{KindJitter, KindAcceptThenSilence} {
+	for _, k := range []Kind{KindAcceptThenSilence} {
 		if impl[k] {
 			t.Errorf("%q should not be implemented yet", k)
 		}
