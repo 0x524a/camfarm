@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/assets/camfarm-icon.svg" alt="CamFarm icon" width="96" height="96"></p>
+<p align="center"><img src="docs/assets/camfarm-logo.svg" alt="CamFarm: synthetic RTSP camera farm" width="460" height="144"></p>
 
 # CamFarm
 

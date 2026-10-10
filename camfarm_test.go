@@ -692,3 +692,28 @@ func TestSentinelErrors(t *testing.T) {
 		}
 	}
 }
+
+// A handle kept past RemoveCamera must not act on a camera later re-added under
+// the same id: it would mutate the new camera's pump and journal the change.
+func TestStaleCameraHandleCannotInjectIntoReaddedCamera(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	stale, _ := f.Camera("front-door")
+	if err := f.RemoveCamera("front-door"); err != nil {
+		t.Fatalf("RemoveCamera: %v", err)
+	}
+	if _, err := f.AddCamera(CameraSpec{ID: "front-door"}); err != nil {
+		t.Fatalf("AddCamera: %v", err)
+	}
+	fresh, _ := f.Camera("front-door")
+	journalBefore := len(f.Journal())
+
+	if err := stale.Inject(FaultSpec{Kind: "frame_drop", Rate: 1}); !errors.Is(err, ErrUnknownCamera) {
+		t.Fatalf("stale Inject = %v, want ErrUnknownCamera", err)
+	}
+	if err := stale.Clear(); !errors.Is(err, ErrUnknownCamera) {
+		t.Fatalf("stale Clear = %v, want ErrUnknownCamera", err)
+	}
+	if len(fresh.Faults()) != 0 || len(f.Journal()) != journalBefore {
+		t.Fatalf("stale handle changed the re-added camera: faults=%v journal grew=%d", fresh.Faults(), len(f.Journal())-journalBefore)
+	}
+}

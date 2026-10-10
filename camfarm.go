@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/0x524a/camfarm/internal/fault"
 	"github.com/0x524a/camfarm/internal/media"
@@ -115,6 +116,10 @@ type Camera struct {
 
 	mu     sync.Mutex
 	faults []FaultSpec
+
+	// removed is set by RemoveCamera. A handle kept past removal must not act
+	// on a camera later re-added under the same id.
+	removed atomic.Bool
 }
 
 // Start brings up a fleet.
@@ -413,10 +418,12 @@ func (f *Fleet) AddCamera(spec CameraSpec) (*Camera, error) {
 // sides are always attempted regardless of whether the other failed.
 func (f *Fleet) RemoveCamera(id string) error {
 	f.mu.Lock()
-	if _, ok := f.cameras[id]; !ok {
+	cam, ok := f.cameras[id]
+	if !ok {
 		f.mu.Unlock()
 		return fmt.Errorf("%w: %q", ErrUnknownCamera, id)
 	}
+	cam.removed.Store(true)
 	delete(f.cameras, id)
 	for i, camID := range f.order {
 		if camID == id {
@@ -572,6 +579,10 @@ func (c *Camera) Faults() []FaultSpec {
 // Inject adds a fault to a running camera, replacing any active fault of the
 // same kind. The change takes effect at the camera's next frame boundary.
 // Only implemented kinds are accepted; the rest return ErrUnsupported.
+//
+// Each injection rebuilds the camera's fault engines from the camera seed, so
+// every fault's random stream restarts at its first draw rather than
+// continuing. A replay must restart streams at each journaled inject or clear.
 func (c *Camera) Inject(f FaultSpec) error {
 	if !fault.Known(fault.Kind(f.Kind)) {
 		return fmt.Errorf("%w: unknown fault kind %q", ErrInvalidSpec, f.Kind)
@@ -604,6 +615,9 @@ func (c *Camera) Inject(f FaultSpec) error {
 func (c *Camera) Clear() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.removed.Load() {
+		return fmt.Errorf("%w: %q", ErrUnknownCamera, c.id)
+	}
 	if len(c.faults) == 0 {
 		return nil
 	}
@@ -616,6 +630,9 @@ func (c *Camera) Clear() error {
 
 // swapFaults hands a new fault set to the camera's pump. Caller holds c.mu.
 func (c *Camera) swapFaults(next []FaultSpec, applied func(int)) error {
+	if c.removed.Load() {
+		return fmt.Errorf("%w: %q", ErrUnknownCamera, c.id)
+	}
 	if err := c.fleet.srv.SetFaults(c.id, toFaultSpecs(next), applied); err != nil {
 		if !c.fleet.srv.Has(c.id) {
 			return fmt.Errorf("%w: %q", ErrUnknownCamera, c.id)

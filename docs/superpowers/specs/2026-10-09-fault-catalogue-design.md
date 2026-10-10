@@ -1,19 +1,23 @@
 # Fault catalogue: media-path and control-plane faults — design
 
-Date: 2026-10-09. Status: approved design, not yet implemented.
+Date: 2026-10-09 (slice C added 2026-10-10). Status: slices A and B approved; slice C pending review. Not yet implemented.
 
-This is the design for the next two slices after slice 3 (dashboard, binary and the first fault
+This is the design for the next three slices after slice 3 (dashboard, binary and the first fault
 effect, `frame_drop`). It depends on slice 3 being merged: it reuses the pump's fault seam,
 `Pump.SetFaults`, the journal, the change feed and the dashboard's fault control.
 
-One design, two slices:
+One design, three slices:
 
 - **Slice A (media path):** the catalogue schema, `GET /api/v1/faults`, the generic fault UI,
   `packet_loss` and `keyframe_starvation`.
 - **Slice B (control plane):** a per-camera control-plane engine, `rtsp_error`, `teardown` and
   `sdp_lie`.
 
-Each slice gets its own plan and review. The model below is shared so that all eight kinds
+- **Slice C (timing):** `jitter`, `burst_delivery`, `pts_dts_mismatch` and `pts_delayed`. Added
+  2026-10-10 at the user's request. Built after A and B on the same catalogue schema, journal and
+  UI; it adds one pump seam (paced send deadlines) and one stamping seam (the RTP timestamp).
+
+Each slice gets its own plan and review. The model below is shared so that all twelve kinds
 (including `frame_drop`) behave consistently.
 
 Naming: the display name is CamFarm (page, README prose, `--help`); module path, packages and
@@ -39,6 +43,10 @@ is already present replaces it (existing behaviour of `Camera.Inject`).
 | `rtsp_error` | B | `on` (describe, setup, play), `status` (default 503), `rate`, optional `onlyRequest` | per-camera request counter per method; 1 draw per matching request | flaky camera answering 5xx |
 | `teardown` | B | `afterFrames`, `mode` (close, reset), `rate` | frames since the reader joined; 1 draw per PLAY | camera dropping sessions; TCP reset |
 | `sdp_lie` | B | `mode` (codec, sprop, resolution, contentBase), `rate`, optional `onlyRequest` | per-camera DESCRIBE counter; 1 draw per DESCRIBE | SDP that misdescribes the stream |
+| `jitter` | C | `maxMs` | frame counter; 1 draw per frame | inter-arrival jitter; jitter-buffer sizing bugs |
+| `burst_delivery` | C | `rate`, `holdFrames` | frame counter; 1 draw per frame, unconditional | bursty uplink or encoder buffering; NVR queue overflow |
+| `pts_dts_mismatch` | C | `reorderDepth` | frame counter; **no randomness** | B-frame camera stamping PTS; "non-monotonic dts" decoder errors |
+| `pts_delayed` | C | `delayMs`, `driftPpm` | frame counter; **no randomness** | latency mis-measurement and A/V sync; what `framelag` measures |
 
 All other kinds already in the `fault` package keep returning `ErrUnsupported`, naming the kind,
 until their effect exists.
@@ -145,6 +153,54 @@ an explicit body and a nil stream) is confirmed by a spike test at the start of 
 because it depends on `gortsplib` behaviour at the pinned version; if that route is blocked the
 plan escalates rather than falling back to a spec-time-only lie silently.
 
+### 2.6 `jitter` (slice C)
+
+Frame `k` normally leaves at its nominal deadline. With `jitter` its deadline is moved later by
+`d_k = u_k · maxMs`, where `u_k` is the `k`-th draw of the `jitter` stream (one draw per frame,
+unconditional). Frames are always sent in order, so a frame delayed past the next frame's slot makes
+the next one leave immediately after it: bunching falls out of the model rather than being a second
+mechanism. RTP timestamps and sequence numbers stay honest, so the receiver sees genuine
+inter-arrival jitter. `maxMs` is 1 to 5000. The planned delay of every frame is recorded in the
+observation stream, so tests assert the seeded schedule without sleeping; one wire test checks a
+loose lower bound on measured spread. The decision (the delay values) is reproducible; the arrival
+times a client measures are wall-clock and are not, which is the same limit the rest of this spec
+states.
+
+### 2.7 `burst_delivery` (slice C)
+
+Cross-frame hold and flush. At each frame boundary where no hold is active, a draw below `rate`
+starts one: this frame and the next `holdFrames - 1` are withheld and then released back-to-back with
+no pacing between them, after which nominal pacing resumes (deadlines are absolute, so the stream
+realigns without a catch-up error). Draws are unconditional (consumed during a hold too). Timestamps
+and sequence numbers stay honest and contiguous: nothing is lost, it all arrives late and together.
+`holdFrames` is an integer from 2 to 300. This is distinct from `packet_loss` burst mode, which
+drops packets. When combined with `jitter`, a held frame's deadline is that of the last frame of its
+hold, plus that frame's jitter.
+
+### 2.8 `pts_dts_mismatch` (slice C)
+
+The sources are served with `PTS == DTS` (the bundled fixtures have no B-frames, unverified), and the
+pump stamps the RTP timestamp from DTS. This fault stamps a reordered timeline instead, as a camera
+that puts PTS in the RTP timestamp would. Frames are taken in windows of `reorderDepth + 1`; within
+a window the first frame (decode order) gets the timestamp slot of the window's last frame and the
+others take the preceding slots in order. For `reorderDepth` 1 the timestamps in send order run
+`1, 0, 3, 2, 5, 4, ...` in frame-interval units. The set of timestamps is unchanged and the sequence
+numbers stay contiguous; only monotonicity is broken. `reorderDepth` is an integer from 1 to 4. No
+randomness: the effect is a pure function of the frame counter, so a test can assert exact values.
+
+### 2.9 `pts_delayed` (slice C)
+
+A standing lag or drift of the RTP timestamp against the real send clock. `delayMs` subtracts a
+constant from every timestamp; `driftPpm` makes timestamps advance at `(1 - driftPpm/1e6)` of the
+nominal rate, so the lag grows with time (integer arithmetic, no floats). At least one of the two is
+required. Injected mid-stream, `delayMs` is a one-time backward step of the timestamp followed by
+normal-rate advance; at spec time the shift is only visible through the RTCP sender report, whose
+timestamp-to-wall-clock mapping then disagrees with the media by the lag. This is the field bug a
+latency profiler such as `framelag` meets: a camera whose timestamps lag capture. `delayMs` is 1 to
+60000 and `driftPpm` 1 to 100000. No randomness. Both timestamp kinds add into the stamped value, so
+they compose with each other and with the frame faults. The effect on the SR is stated as expected
+behaviour of the library and pinned by a wire test rather than assumed.
+
 ## 3. One schema for validation, API and UI (slice A)
 
 `internal/fault` exposes a catalogue: for each kind, its name, whether it is implemented, a
@@ -230,6 +286,13 @@ Same standard as `frame_drop`: real wire, `-race`, fixed seeds.
   mode produces a connection reset at the client; no goroutine or connection leaks.
 - **`sdp_lie`:** the real DESCRIBE text shows each lie; the honest SDP returns after Clear; SETUP
   and PLAY still work with a lying SDP.
+- **Slice C timing:** `jitter` planned delays equal the seeded schedule for a fixed seed, delivery
+  order is preserved, and a real client measures spread above a stated floor; `burst_delivery` holds
+  and releases exactly `holdFrames` frames at the seeded boundaries, with contiguous sequence numbers
+  and honest timestamps; `pts_dts_mismatch` yields the exact timestamp sequence for each
+  `reorderDepth` and the same set of timestamps; `pts_delayed` shifts the timestamp by `delayMs`,
+  grows it by `driftPpm` per frame interval, and a real client's sender-report mapping shows the
+  lag; the four compose without panics under `-race`.
 - **Catalogue:** validation, `GET /api/v1/faults` and the README table agree; a parameter that does
   not apply to its kind is refused.
 - **Dashboard:** `httptest` for the catalogue endpoint and the mapped statuses; Playwright (the
@@ -247,6 +310,6 @@ determinism for a single client). The Scope / not-ONVIF-conformant section is un
 ## 8. Out of scope (recorded for later)
 
 `accept_then_silence` (needs a custom listener in front of `gortsplib`); the ONVIF capability lie
-(a per-camera override in the ONVIF layer); jitter and burst delay; per-reader loss; modelling TCP
+(a per-camera override in the ONVIF layer); per-reader loss; modelling TCP
 stall and backpressure; re-encoding of any kind; a versioned catalogue schema; dashboard
 hardening, which is a separate recorded follow-up.

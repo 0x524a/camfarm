@@ -121,7 +121,7 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
   var tbody = document.querySelector("#cameras tbody");
   var errorBox = document.getElementById("error");
   var connBox = document.getElementById("conn");
-  var rows = {};            // id -> {tr, refs, snapshotURL}
+  var rows = Object.create(null);            // id -> {tr, refs, snapshotURL}
   var seq = 0, applied = 0; // refresh ordering: ignore responses older than the last applied
 
   // #error carries action errors only. Polling failures go to #conn, so a
@@ -273,7 +273,7 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
   }
 
   function render(cameras) {
-    var seen = {};
+    var seen = Object.create(null);
     cameras.forEach(function (c, i) {
       seen[c.id] = true;
       var entry = rows[c.id];
