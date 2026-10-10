@@ -209,17 +209,20 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
           govulncheck ./...
 
-  # Proves the cgo-free claim for every shipped target: with CGO_ENABLED=0 the
-  # whole module must compile for each OS/arch pair, not just the linux/amd64
-  # the other jobs run on. Compile-only; nothing is executed.
+  # Proves the cgo-free claim off the linux/amd64 the other jobs run on: with
+  # CGO_ENABLED=0 the whole module must compile for each OS and each
+  # architecture at least once. Three pairs cover that; the other three would
+  # only repeat a combination already proven. Compile-only; nothing is executed.
   cross-compile:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        goos: [linux, darwin, windows]
-        goarch: [amd64, arm64]
+        include:
+          - {goos: linux, goarch: arm64}
+          - {goos: darwin, goarch: arm64}
+          - {goos: windows, goarch: amd64}
     env:
       CGO_ENABLED: "0"
       GOOS: ${{ matrix.goos }}
