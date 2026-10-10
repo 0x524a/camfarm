@@ -65,3 +65,13 @@ func TestCaptureDeadAddress(t *testing.T) {
 		t.Fatal("want an error dialing a closed port")
 	}
 }
+
+// H.265 is deliberately deferred; this guards that the deferral is honest.
+func TestCaptureH265IsUnsupported(t *testing.T) {
+	url := startRTSP(t, media.FixtureH265Source{})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := Capture(ctx, url); !errors.Is(err, ErrNoSupportedVideo) {
+		t.Fatalf("err = %v, want ErrNoSupportedVideo", err)
+	}
+}

@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"image/jpeg"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/0x524a/camfarm/internal/media"
 	"github.com/0x524a/camfarm/internal/obs"
@@ -82,6 +85,82 @@ func TestSnapshotCaptureFailureIs500(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 500 {
 		t.Errorf("status = %d, want 500", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "snapshot capture failed") {
+		t.Errorf("body = %q, want it to mention the capture failure", body)
+	}
+}
+
+// A source that accepts the TCP connection but never speaks RTSP must not pin
+// the handler: the capture deadline fires, the handler answers 500, and the
+// server keeps serving afterwards.
+func TestSnapshotTimesOutOnStalledSource(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c)
+			mu.Unlock()
+		}
+	}()
+	defer func() {
+		mu.Lock()
+		for _, c := range held {
+			c.Close()
+		}
+		mu.Unlock()
+	}()
+
+	m, goodURL := startRealRTSP(t)
+	srv, err := New(Config{Host: "127.0.0.1", Cameras: []CameraConfig{
+		{ID: "stall", Media: m, RTSPURL: "rtsp://" + ln.Addr().String() + "/cam", Seed: seed.Seed(1)},
+		{ID: "good", Media: m, RTSPURL: goodURL, Seed: seed.Seed(2)},
+	}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.snapshotTimeout = 3 * time.Second
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Close)
+
+	start := time.Now()
+	resp, err := http.Get(srv.Endpoint("stall") + "/snapshot")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 500 {
+		t.Errorf("status = %d, want 500", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "snapshot capture failed") {
+		t.Errorf("body = %q, want capture failure text", body)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("handler took %v, want well under the default %v", d, snapshotTimeout)
+	}
+
+	// The server still works for a healthy camera.
+	resp2, err := http.Get(srv.Endpoint("good") + "/snapshot")
+	if err != nil {
+		t.Fatalf("GET good: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		t.Errorf("good camera status = %d, want 200", resp2.StatusCode)
 	}
 }
 

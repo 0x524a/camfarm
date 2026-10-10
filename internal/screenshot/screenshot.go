@@ -22,8 +22,9 @@ import (
 	"github.com/pion/rtp"
 )
 
-// ErrNoSupportedVideo means the stream's SDP offers neither H.264 nor H.265.
-var ErrNoSupportedVideo = errors.New("screenshot: stream has no H.264 or H.265 video")
+// ErrNoSupportedVideo means no H.264 video was found in the stream's SDP.
+// H.265 is not yet supported, so an H.265-only stream also yields this error.
+var ErrNoSupportedVideo = errors.New("screenshot: no H.264 video found (H.265 is not yet supported)")
 
 // Capture returns the next decodable frame of the stream at rtspURL. It blocks
 // until a random access point arrives, the stream ends, or ctx is done; ctx's

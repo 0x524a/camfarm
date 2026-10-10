@@ -10,6 +10,7 @@ package onvif
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image/jpeg"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	onvifserver "github.com/0x524a/onvif-go/server"
 
@@ -30,6 +32,10 @@ import (
 // profileToken is the single media profile every camera in this slice
 // exposes. Multi-profile cameras are out of scope for slice 1.
 const profileToken = "profile1"
+
+// snapshotTimeout bounds one snapshot capture, so a source that never yields a
+// random access point or stalls its RTSP handshake cannot pin the handler.
+const snapshotTimeout = 15 * time.Second
 
 // CameraConfig describes one camera's ONVIF endpoint.
 type CameraConfig struct {
@@ -71,6 +77,9 @@ type Server struct {
 	ln   net.Listener
 	http *http.Server
 	cams map[string]*camera
+
+	// snapshotTimeout bounds each snapshot capture; tests shorten it.
+	snapshotTimeout time.Duration
 }
 
 // New validates cfg and builds one onvif-go *server.Server per camera.
@@ -86,7 +95,7 @@ func New(cfg Config) (*Server, error) {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
-	s := &Server{cfg: cfg, log: log, cams: make(map[string]*camera, len(cfg.Cameras))}
+	s := &Server{cfg: cfg, log: log, snapshotTimeout: snapshotTimeout, cams: make(map[string]*camera, len(cfg.Cameras))}
 
 	for _, cc := range cfg.Cameras {
 		if err := validateCameraConfig(cc, s.cams); err != nil {
@@ -370,10 +379,12 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request, cam *cam
 		return
 	}
 
-	img, err := screenshot.Capture(r.Context(), cam.rtspURL)
+	ctx, cancel := context.WithTimeout(r.Context(), s.snapshotTimeout)
+	defer cancel()
+	img, err := screenshot.Capture(ctx, cam.rtspURL)
 	if err != nil {
 		s.log.Warn("snapshot capture failed", "camera", cam.id, "err", err)
-		http.Error(w, "snapshot capture failed", http.StatusInternalServerError)
+		http.Error(w, "snapshot capture failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	var buf bytes.Buffer
