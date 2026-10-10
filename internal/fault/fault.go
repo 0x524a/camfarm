@@ -164,7 +164,8 @@ type entry struct {
 	bad  bool
 	p, q float64
 	// calls counts TimestampShift calls since this entry was installed; it is
-	// pts_delayed's drift clock.
+	// pts_delayed's drift clock. Inherit carries it across an engine swap that
+	// leaves the entry's spec unchanged.
 	calls int
 	// remaining is burst_delivery's hold state: zero when not holding, else the
 	// frames left in the hold, counting the current one.

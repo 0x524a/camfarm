@@ -79,8 +79,9 @@ func (e *Engine) TimestampKinds() []Kind { return e.tsKinds }
 //
 // pts_delayed: a constant lag of DelayMs, plus a lag that grows by DriftPpm of
 // a frame per frame since the entry was installed (not since frame zero, so a
-// fault added mid-run starts at no drift). Integer arithmetic only, multiplying
-// before dividing.
+// fault added mid-run starts at no drift). A swap that keeps the entry's spec
+// unchanged does not reinstall it: see Inherit. Integer arithmetic only,
+// multiplying before dividing.
 func (e *Engine) TimestampShift(frameIndex int, frameDur int64) int64 {
 	var shift int64
 	for i := range e.entries {
@@ -102,6 +103,31 @@ func (e *Engine) TimestampShift(frameIndex int, frameDur int64) int64 {
 		}
 	}
 	return shift
+}
+
+// Inherit carries pts_delayed's drift clock over from prev, the engine e is
+// replacing, when prev has a pts_delayed entry with an identical spec. It is
+// what keeps drift continuous when an unrelated frame fault is injected or
+// cleared: the swap rebuilds the whole engine, and without this the drift
+// would snap back to zero and the timestamps jump forward. A changed or newly
+// added pts_delayed starts its drift at zero, as an entry installed now does.
+// Nothing else is inherited: every other kind restarts its sequence on a swap.
+// Call it before e makes any decision. A nil prev is a no-op.
+func (e *Engine) Inherit(prev *Engine) {
+	if prev == nil {
+		return
+	}
+	for i := range e.entries {
+		en := &e.entries[i]
+		if en.spec.Kind != KindPTSDelayed {
+			continue
+		}
+		for j := range prev.entries {
+			if prev.entries[j].spec == en.spec {
+				en.calls = prev.entries[j].calls
+			}
+		}
+	}
 }
 
 // FrameDelay returns jitter's delay for the frame, or zero when jitter is not

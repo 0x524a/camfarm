@@ -107,7 +107,10 @@ Early:
     (`Client.PacketNTP`) sees a delayed camera at the same lag as a clean one (a difference near
     0 ms). The delay shows only as the SR's RTP timestamp sitting about `delayMs` behind a clean
     camera's (about -45000 ticks at 90 kHz for 500 ms). A wire test pins this, and a `gortsplib`
-    upgrade may change it, in which case that test fails loudly.
+    upgrade may change it, in which case that test fails loudly. `driftPpm` drift grows from the
+    frame the fault was installed on. Injecting or clearing an unrelated frame fault leaves an
+    unchanged `pts_delayed` drifting continuously; changing its own parameters, or clearing and
+    re-injecting it, restarts the drift at zero.
 
   Control-plane faults have their own limits:
   - `rtsp_error`, `sdp_lie` and `teardown` are deterministic for a **single client** only: their

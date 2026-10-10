@@ -238,6 +238,10 @@ func (p *Pump) applyPendingFaults() bool {
 	p.pending = nil
 	p.swapMu.Unlock()
 	for _, s := range swaps {
+		// An unchanged pts_delayed keeps its drift clock across the swap; see
+		// fault.Engine.Inherit. Done here, on the stepping goroutine, because the
+		// old engine's count is only final at the frame boundary.
+		s.eng.Inherit(p.faults)
 		p.faults = s.eng
 		if s.applied != nil {
 			s.applied(p.frameCounter)

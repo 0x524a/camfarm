@@ -203,7 +203,10 @@ randomness: the effect is a pure function of the frame counter, so a test can as
 A standing lag or drift of the RTP timestamp against the real send clock. `delayMs` subtracts a
 constant from every timestamp; `driftPpm` makes timestamps advance at `(1 - driftPpm/1e6)` of the
 nominal rate, so the lag grows with time (integer arithmetic, no floats). At least one of the two is
-required. Injected mid-stream, `delayMs` is a one-time backward step of the timestamp followed by
+required. The drift counts frames since the entry was installed (ruling R2); a fault-set swap that
+leaves the `pts_delayed` spec unchanged (an unrelated frame fault injected or cleared) carries the
+count over rather than reinstalling the entry, so drift stays continuous, while a changed spec
+starts again at zero. Injected mid-stream, `delayMs` is a one-time backward step of the timestamp followed by
 normal-rate advance; at spec time the shift shows up mainly in the RTCP sender report's own RTP timestamp. Measured
 on the pinned `gortsplib` v5.6.5, the server-side sender pairs the already-shifted RTP timestamp
 with the true write time, so a client mapping packets to wall-clock through the SR

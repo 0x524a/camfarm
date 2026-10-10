@@ -102,3 +102,44 @@ func TestDriftCountsCallsNotFrameIndex(t *testing.T) {
 		t.Fatalf("first call shift = %d, want 0", got)
 	}
 }
+
+// Inherit carries pts_delayed's drift clock only to an identical spec; a
+// changed spec, or one re-added after a swap without it, starts at zero.
+func TestInheritCarriesTheDriftClockOnlyForAnUnchangedSpec(t *testing.T) {
+	drift := fault.Spec{Kind: fault.KindPTSDelayed, DriftPpm: 100000} // 300 ticks per 3000-tick frame
+	newEngine := func(specs ...fault.Spec) *fault.Engine {
+		t.Helper()
+		e, err := fault.New(seed.Seed(1), specs)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return e
+	}
+	old := newEngine(drift)
+	for k := 0; k < 4; k++ {
+		old.TimestampShift(k, 3000)
+	}
+
+	same := newEngine(fault.Spec{Kind: fault.KindJitter, MaxMs: 5}, drift)
+	same.Inherit(old)
+	if got := same.TimestampShift(4, 3000); got != -4*300 {
+		t.Fatalf("unchanged spec after the swap: shift %d, want %d (drift continues)", got, -4*300)
+	}
+
+	changed := newEngine(fault.Spec{Kind: fault.KindPTSDelayed, DriftPpm: 50000})
+	changed.Inherit(old)
+	if got := changed.TimestampShift(4, 3000); got != 0 {
+		t.Fatalf("changed spec after the swap: shift %d, want 0 (drift restarts)", got)
+	}
+
+	// Removed, then re-added: the engine in between has no entry to carry from.
+	without := newEngine(fault.Spec{Kind: fault.KindJitter, MaxMs: 5})
+	without.Inherit(old)
+	readded := newEngine(drift)
+	readded.Inherit(without)
+	if got := readded.TimestampShift(4, 3000); got != 0 {
+		t.Fatalf("re-added spec: shift %d, want 0 (drift restarts)", got)
+	}
+
+	newEngine(drift).Inherit(nil) // a nil prev is a no-op
+}

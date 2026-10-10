@@ -54,10 +54,11 @@ func TestTimestampShiftContinuesAcrossTheLoopSeam(t *testing.T) {
 	}
 }
 
-// A fault-set swap installs a fresh engine, so pts_delayed's drift clock counts
-// from the swap, not from frame zero: the frame index the drift is measured
-// against restarts at zero while the pump's frame counter and the nominal
-// timeline carry on.
+// A fault-set swap that changes the pts_delayed spec installs a new entry, so its
+// drift clock counts from the swap, not from frame zero: the frame index the
+// drift is measured against restarts at zero while the pump's frame counter and
+// the nominal timeline carry on. (An unchanged spec keeps its clock: see
+// TestUnrelatedSwapLeavesTheDriftContinuous.)
 func TestMidStreamSwapRestartsTheDriftClock(t *testing.T) {
 	const dur = 3000
 	drift := []fault.Spec{{Kind: fault.KindPTSDelayed, DriftPpm: 100000}} // 300 ticks per frame
@@ -72,7 +73,8 @@ func TestMidStreamSwapRestartsTheDriftClock(t *testing.T) {
 	}
 
 	var appliedAt = -1
-	if err := p.SetFaults(drift, func(i int) { appliedAt = i }); err != nil {
+	faster := []fault.Spec{{Kind: fault.KindPTSDelayed, DriftPpm: 50000}} // a changed spec: 150 ticks per frame
+	if err := p.SetFaults(faster, func(i int) { appliedAt = i }); err != nil {
 		t.Fatalf("SetFaults: %v", err)
 	}
 	second := frameTimestamps(t, p, w, 3)
@@ -81,8 +83,49 @@ func TestMidStreamSwapRestartsTheDriftClock(t *testing.T) {
 	}
 	for j, ts := range second {
 		k := 5 + j
-		if want := uint32(int64(k)*dur - int64(j)*300); ts != want {
+		if want := uint32(int64(k)*dur - int64(j)*150); ts != want {
 			t.Fatalf("frame %d after the swap: timestamp %d, want %d (drift restarts at the swap)", k, ts, want)
+		}
+	}
+}
+
+// Injecting or clearing an unrelated frame fault rebuilds the pump's whole
+// engine, but an unchanged pts_delayed keeps its drift clock, so the timestamp
+// sequence is identical to an uninterrupted run. Without the carry-over the
+// drift would snap back to zero at each swap and the timestamps jump forward.
+func TestUnrelatedSwapLeavesTheDriftContinuous(t *testing.T) {
+	const (
+		dur    = 3000
+		frames = 40
+	)
+	drift := fault.Spec{Kind: fault.KindPTSDelayed, DelayMs: 20, DriftPpm: 100000}
+	m := regularMedia(t, dur, 30)
+
+	base, bw := pumpWithMedia(t, m, []fault.Spec{drift}, obs.New(10))
+	want := frameTimestamps(t, base, bw, frames)
+
+	p, w := pumpWithMedia(t, m, []fault.Spec{drift}, obs.New(10))
+	churn := map[int][][]fault.Spec{
+		10: {{drift, {Kind: fault.KindJitter, MaxMs: 50}}},
+		20: {{{Kind: fault.KindFrameDrop, Rate: 0}, drift}},
+		// Two swaps queued between one pair of frames chain the carry-over.
+		30: {{drift, {Kind: fault.KindJitter, MaxMs: 10}}, {drift}},
+	}
+	var got []uint32
+	for k := 0; k < frames; k++ {
+		for _, specs := range churn[k] {
+			if err := p.SetFaults(specs, nil); err != nil {
+				t.Fatalf("SetFaults at frame %d: %v", k, err)
+			}
+		}
+		got = append(got, frameTimestamps(t, p, w, 1)...)
+	}
+	if len(got) != frames {
+		t.Fatalf("%d frames written, want %d", len(got), frames)
+	}
+	for k := range want {
+		if got[k] != want[k] {
+			t.Fatalf("frame %d: timestamp %d under churn, %d uninterrupted (drift not continuous)", k, got[k], want[k])
 		}
 	}
 }
