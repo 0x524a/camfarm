@@ -187,7 +187,7 @@ jobs:
           version: v2.13.2
 
   # Known-vulnerability scan of the module's dependencies and the standard
-  # library it builds against (check-latest picks up the newest Go patch).
+  # library it builds against.
   vuln:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -196,7 +196,12 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: go.mod
+          # Not go-version-file: go.mod says `go 1.26.0`, and setup-go treats
+          # that as the exact patch release, so check-latest cannot move it
+          # forward (the other jobs therefore build with 1.26.0). The standard
+          # library is part of what govulncheck scans, so scan against the
+          # newest stable toolchain, which is what a fresh build would use.
+          go-version: stable
           check-latest: true
 
       - name: govulncheck
