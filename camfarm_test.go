@@ -845,3 +845,54 @@ func TestCameraONVIFUUIDIsStableAndDistinct(t *testing.T) {
 		t.Fatal("same seed and spec gave a different UUID")
 	}
 }
+
+func TestStartAcceptsEachTimingFault(t *testing.T) {
+	for _, fs := range []FaultSpec{
+		{Kind: "jitter", MaxMs: 100},
+		{Kind: "burst_delivery", Rate: 0.1, HoldFrames: 5},
+		{Kind: "pts_dts_mismatch", ReorderDepth: 4},
+		{Kind: "pts_delayed", DelayMs: 60000},
+	} {
+		s := minimalSpec()
+		s.Cameras[0].Faults = []FaultSpec{fs}
+		f, err := Start(context.Background(), s)
+		if err != nil {
+			t.Errorf("Start with %s: %v", fs.Kind, err)
+			continue
+		}
+		f.Close()
+	}
+}
+
+func TestStartRefusesBadTimingFaultParameters(t *testing.T) {
+	for name, fs := range map[string]FaultSpec{
+		"jitter missing maxMs":     {Kind: "jitter"},
+		"jitter maxMs 5001":        {Kind: "jitter", MaxMs: 5001},
+		"burst holdFrames 1":       {Kind: "burst_delivery", HoldFrames: 1},
+		"burst holdFrames 301":     {Kind: "burst_delivery", HoldFrames: 301},
+		"burst missing holdFrames": {Kind: "burst_delivery", Rate: 0.5},
+		"burst rate 2":             {Kind: "burst_delivery", Rate: 2, HoldFrames: 5},
+		"mismatch depth 5":         {Kind: "pts_dts_mismatch", ReorderDepth: 5},
+		"mismatch missing depth":   {Kind: "pts_dts_mismatch"},
+		"delayed empty":            {Kind: "pts_delayed"},
+		"delayed delay 60001":      {Kind: "pts_delayed", DelayMs: 60001},
+		"delayed drift 100001":     {Kind: "pts_delayed", DriftPpm: 100001},
+		"jitter foreign param":     {Kind: "jitter", MaxMs: 10, HoldFrames: 5},
+	} {
+		s := minimalSpec()
+		s.Cameras[0].Faults = []FaultSpec{fs}
+		if _, err := Start(context.Background(), s); !errors.Is(err, ErrInvalidSpec) {
+			t.Errorf("%s: Start = %v, want ErrInvalidSpec", name, err)
+		}
+	}
+}
+
+func TestStatsFaultCountsReportPTSDTSMismatch(t *testing.T) {
+	s := minimalSpec()
+	s.Cameras[0].Faults = []FaultSpec{{Kind: "pts_dts_mismatch", ReorderDepth: 2}}
+	f := StartT(t, s)
+	cam, _ := f.Camera("front-door")
+	waitUntil(t, "pts_dts_mismatch to be tallied", func() bool {
+		return cam.Stats().FaultCounts["pts_dts_mismatch"].Applied > 0
+	})
+}
