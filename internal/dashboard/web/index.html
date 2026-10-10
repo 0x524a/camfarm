@@ -277,6 +277,9 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
         if (!r.ok) { return r.json().catch(function () { return {}; }).then(function (j) { throw new Error("Snapshot failed: " + (j.error || r.statusText)); }); }
         return r.blob();
       }).then(function (blob) {
+        // The camera may have been removed while the snapshot was in flight; its
+        // row is gone and nothing would ever revoke a new blob URL.
+        if (rows[c.id] !== entry) { return; }
         if (entry.snapshotURL) { URL.revokeObjectURL(entry.snapshotURL); }
         entry.snapshotURL = URL.createObjectURL(blob);
         img.src = entry.snapshotURL;
@@ -450,7 +453,8 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
     ["camera_added", "camera_removed", "fault_injected", "fault_cleared"].forEach(function (t) {
       es.addEventListener(t, refresh);
     });
-    es.onerror = function () { setConn(false); };
+    // A broken stream does not flip #conn: polling is the source of truth for
+    // connectivity, and flipping here would flap against the next good poll.
     es.onopen = function () { setConn(true); refresh(); };
   }
   setInterval(refresh, 2000);

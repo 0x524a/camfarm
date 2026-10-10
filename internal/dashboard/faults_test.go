@@ -2,8 +2,10 @@ package dashboard
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/0x524a/camfarm"
@@ -14,6 +16,12 @@ func TestFaultCatalogueEndpoint(t *testing.T) {
 	resp := do(t, "GET", ts.URL+"/api/v1/faults", "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", ct)
+	}
+	if r := do(t, "POST", ts.URL+"/api/v1/faults", `{}`); r.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /faults status = %d, want 405", r.StatusCode)
 	}
 	var cat []struct {
 		Kind        string `json:"kind"`
@@ -168,4 +176,18 @@ func TestCameraJSONCarriesPerKindFaultCounts(t *testing.T) {
 		}
 		return cams[0].Stats.FaultCounts["frame_drop"].Applied >= 2
 	})
+}
+
+// A camera with no faults must report an empty tally object, not null: the page
+// indexes into it.
+func TestCameraJSONFaultCountsIsAnObjectNotNull(t *testing.T) {
+	ts, _ := newServer(t, Options{})
+	resp := do(t, "GET", ts.URL+"/api/v1/cameras", "")
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"FaultCounts":null`) || !strings.Contains(string(raw), `"FaultCounts":{`) {
+		t.Fatalf("FaultCounts is not an empty object in %s", raw)
+	}
 }
