@@ -127,7 +127,7 @@ func Catalogue() []KindInfo {
 			},
 		},
 		{
-			Kind: KindSDPLie, Models: "SDP that misdescribes the stream: wrong codec, wrong parameter sets, wrong geometry or wrong Content-Base.",
+			Kind: KindSDPLie, Implemented: true, Models: "SDP that misdescribes the stream: wrong codec, wrong parameter sets, wrong geometry or wrong Content-Base.",
 			Clock: "per-camera DESCRIBE counter; one draw per DESCRIBE",
 			Params: []Param{
 				{Name: "mode", Type: ParamEnum, Options: []string{"codec", "sprop", "resolution", "contentBase"}, Default: "codec", Required: true,

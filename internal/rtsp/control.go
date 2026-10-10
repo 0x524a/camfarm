@@ -10,6 +10,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
 
 	"github.com/0x524a/camfarm/internal/fault"
+	"github.com/0x524a/camfarm/internal/media"
 )
 
 // Journal clocks reported through SetFaults' applied callback.
@@ -208,4 +209,61 @@ func (s *Server) tearDown(a *armed) {
 		return
 	}
 	a.sess.Close()
+}
+
+// lieInfo is an sdp_lie decided for a connection's DESCRIBE.
+type lieInfo struct {
+	mode  string
+	camID string
+	codec media.Codec
+}
+
+// noteLie records the lie for the response about to be written on conn, and
+// tallies it. Requests on one connection are answered in order, so the next
+// response OnResponse sees for conn is this DESCRIBE's.
+func (s *Server) noteLie(conn *gortsplib.ServerConn, camID string, d fault.ControlDecision) {
+	s.mu.RLock()
+	cam, ok := s.cams[camID]
+	s.mu.RUnlock()
+	if !ok {
+		return
+	}
+	s.lieMu.Lock()
+	s.pendingLie[conn] = lieInfo{mode: d.Lie.Mode, camID: camID, codec: cam.cfg.Media.Codec}
+	s.lieMu.Unlock()
+	s.cfg.Obs.Fault(camID, d.Request, string(fault.KindSDPLie), "DESCRIBE answered with a lying "+d.Lie.Mode)
+	s.cfg.Obs.FaultTally(camID, string(fault.KindSDPLie), 1, 0)
+}
+
+// dropLie forgets a connection's pending lie.
+func (s *Server) dropLie(conn *gortsplib.ServerConn) {
+	s.lieMu.Lock()
+	delete(s.pendingLie, conn)
+	s.lieMu.Unlock()
+}
+
+// applyLie takes and clears conn's pending lie, applying it only to a 200
+// response: a DESCRIBE that went on to fail must not leave a lie behind for a
+// later response.
+func (s *Server) applyLie(conn *gortsplib.ServerConn, res *base.Response) {
+	s.lieMu.Lock()
+	li, ok := s.pendingLie[conn]
+	delete(s.pendingLie, conn)
+	s.lieMu.Unlock()
+	if !ok || res.StatusCode != base.StatusOK {
+		return
+	}
+	if li.mode == "contentBase" {
+		if cb := res.Header["Content-Base"]; len(cb) > 0 {
+			res.Header["Content-Base"] = base.HeaderValue{lieContentBase(cb[0])}
+		}
+		return
+	}
+	out, err := rewriteSDP(res.Body, li.mode, li.codec)
+	if err != nil {
+		// The honest SDP goes out: a lie that cannot be built is not a half-lie.
+		s.log.Warn("sdp_lie not applied", "camera", li.camID, "err", err)
+		return
+	}
+	res.Body = out
 }

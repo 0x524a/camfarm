@@ -98,11 +98,16 @@ type Server struct {
 
 	// armMu guards armed, the sessions a teardown fault will end. It is never
 	// held while closing a session or connection, and never together with mu.
-	armMu   sync.Mutex
-	armed   map[*gortsplib.ServerSession]*armed
-	rootCtx context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	armMu sync.Mutex
+	armed map[*gortsplib.ServerSession]*armed
+
+	// lieMu guards pendingLie, the sdp_lie decisions taken in OnDescribe and not
+	// yet delivered by OnResponse. It is a leaf lock, never held with mu or armMu.
+	lieMu      sync.Mutex
+	pendingLie map[*gortsplib.ServerConn]lieInfo
+	rootCtx    context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
 
 	// Test-only seams, nil in production, set before Start. They let tests
 	// install behaviour in the finaliser and PLAY hooks without any production
@@ -157,6 +162,8 @@ func New(cfg Config) (*Server, error) {
 		cams:    make(map[string]*camera, len(cfg.Cameras)),
 		readers: make(map[*gortsplib.ServerSession]string),
 		armed:   make(map[*gortsplib.ServerSession]*armed),
+
+		pendingLie: make(map[*gortsplib.ServerConn]lieInfo),
 	}
 	if s.log == nil {
 		s.log = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -615,8 +622,10 @@ func (s *Server) lookup(path string) (id string, stream *gortsplib.ServerStream,
 // gortsplib's ServerHandler is `any`; a server implements whichever of the
 // optional interfaces it needs.
 
-// OnConnClose logs connection teardown.
+// OnConnClose logs connection teardown and forgets a lie that was never
+// delivered because the connection ended first.
 func (s *Server) OnConnClose(ctx *gortsplib.ServerHandlerOnConnCloseCtx) {
+	s.dropLie(ctx.Conn)
 	s.log.Debug("connection closed", "err", ctx.Error)
 }
 
@@ -634,8 +643,12 @@ func (s *Server) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (*base.Re
 	if !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
 	}
-	if res := s.answerError(fault.MethodDescribe, id, ctl.Decide(fault.MethodDescribe)); res != nil {
-		return res, nil, nil
+	d := ctl.Decide(fault.MethodDescribe)
+	if res := s.answerError(fault.MethodDescribe, id, d); res != nil {
+		return res, nil, nil // Decide never returns a lie alongside an error
+	}
+	if d.Lie != nil {
+		s.noteLie(ctx.Conn, id, d)
 	}
 	return &base.Response{StatusCode: base.StatusOK}, stream, nil
 }
@@ -678,10 +691,11 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 // gortsplib sets Content-Base, Content-Type, CSeq, RTP-Info and the SDP body
 // after a handler returns, so a handler cannot lie about them. This hook
 // receives the same live response immediately before it is marshalled, which is
-// the only place those headers can be rewritten. No fault rewrites anything in
-// this version; the hook exists so the phase-2 faults have somewhere to live.
+// the only place those headers can be rewritten. It delivers an sdp_lie decided
+// in OnDescribe for this connection.
 func (s *Server) OnResponse(c *gortsplib.ServerConn, res *base.Response) {
 	if s.testOnResponse != nil {
 		s.testOnResponse(c, res)
 	}
+	s.applyLie(c, res)
 }

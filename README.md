@@ -90,7 +90,7 @@ Kept in step with the catalogue in `internal/fault` by a test that fails if this
 | `keyframe_starvation` | yes | Long-GOP camera: only every Nth keyframe is sent, so a client joining mid-stream cannot start decoding. |
 | `rtsp_error` | yes | Flaky camera that answers 5xx or 454 to some DESCRIBE, SETUP or PLAY requests. |
 | `teardown` | yes | Camera that drops live sessions; TCP reset when mode is reset. |
-| `sdp_lie` | no | SDP that misdescribes the stream: wrong codec, wrong parameter sets, wrong geometry or wrong Content-Base. |
+| `sdp_lie` | yes | SDP that misdescribes the stream: wrong codec, wrong parameter sets, wrong geometry or wrong Content-Base. |
 | `accept_then_silence` | no | Camera that accepts the TCP connection and never answers. |
 <!-- fault-table:end -->
 
