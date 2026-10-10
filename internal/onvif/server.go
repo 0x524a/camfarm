@@ -57,6 +57,10 @@ type Config struct {
 	Log *slog.Logger
 
 	Cameras []CameraConfig
+
+	// Discovery, when non-nil, answers WS-Discovery probes for every camera.
+	// Nil leaves discovery off.
+	Discovery *DiscoveryConfig
 }
 
 type camera struct {
@@ -65,6 +69,8 @@ type camera struct {
 	rtspURL string
 	uuid    string      // seed-derived endpoint UUID, see EndpointUUID
 	digest  *digestAuth // nil means open
+
+	discoRef string // endpoint ref registered with the responder, "" if none
 }
 
 // Server serves the ONVIF control plane for a fleet, behind one HTTP
@@ -79,6 +85,10 @@ type Server struct {
 	http *http.Server
 	cams map[string]*camera
 
+	// responder is the running WS-Discovery responder; nil when discovery is
+	// disabled or the server is not started.
+	responder *responderState
+
 	// snapshotTimeout bounds each snapshot capture; tests shorten it.
 	snapshotTimeout time.Duration
 }
@@ -90,6 +100,11 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.Host == "" {
 		cfg.Host = "127.0.0.1"
+	}
+	if cfg.Discovery != nil {
+		if err := cfg.Discovery.validate(); err != nil {
+			return nil, err
+		}
 	}
 	log := cfg.Log
 	if log == nil {
@@ -199,6 +214,15 @@ func (s *Server) AddCamera(cc CameraConfig) error {
 		return err
 	}
 	s.cams[cc.ID] = cam
+	if s.responder != nil {
+		if err := s.registerLocked(s.responder.resp, cam); err != nil {
+			// Unregister is a no-op if Register never took effect, and sends
+			// Bye if it did, so no phantom device outlives the failure.
+			s.responder.resp.Unregister(cam.discoRef)
+			delete(s.cams, cc.ID)
+			return err
+		}
+	}
 
 	s.log.Info("camera added", "camera", cc.ID)
 	return nil
@@ -210,8 +234,12 @@ func (s *Server) RemoveCamera(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.cams[id]; !ok {
+	cam, ok := s.cams[id]
+	if !ok {
 		return fmt.Errorf("onvif: unknown camera %q", id)
+	}
+	if s.responder != nil && cam.discoRef != "" {
+		s.responder.resp.Unregister(cam.discoRef)
 	}
 	delete(s.cams, id)
 
@@ -235,6 +263,18 @@ func (s *Server) Start() error {
 	httpSrv := &http.Server{Handler: s.mux}
 
 	s.ln = ln
+	if s.cfg.Discovery != nil {
+		// Started only now that the ONVIF listener is bound, so the XAddrs
+		// advertised in Hello and ProbeMatches carry the real port.
+		st, err := s.startResponder()
+		if err != nil {
+			s.ln = nil
+			s.mu.Unlock()
+			_ = ln.Close()
+			return err
+		}
+		s.responder = st
+	}
 	s.http = httpSrv
 	s.mu.Unlock()
 
@@ -252,10 +292,15 @@ func (s *Server) Start() error {
 func (s *Server) Close() {
 	s.mu.Lock()
 	httpSrv := s.http
+	st := s.responder
 	s.http = nil
 	s.ln = nil
+	s.responder = nil
 	s.mu.Unlock()
 
+	if st != nil {
+		st.stop(s)
+	}
 	if httpSrv != nil {
 		_ = httpSrv.Close()
 	}
