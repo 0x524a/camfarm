@@ -55,9 +55,10 @@ jobs:
       - name: test
         run: go test -coverprofile=coverage.out -covermode=atomic ./...
 
-      # fail_ci_if_error is false on purpose: Codecov needs the repo activated
-      # at codecov.io (a one-time manual step, not something this workflow can
-      # do) before an upload succeeds. Until that happens, this step reports
+      # fail_ci_if_error is false on purpose: the upload needs the repo
+      # activated at codecov.io and the CODECOV_TOKEN secret set (one-time
+      # manual steps, not something this workflow can do). If either is
+      # missing, or the secret is unavailable to the run, this step reports
       # its own failure without turning the whole job -- and the CLAUDE.md
       # "CI green" claim -- red over a reporting integration, not a build or
       # test failure.
@@ -65,6 +66,7 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
   # The race detector requires cgo, which is why this is a separate job. That
@@ -121,6 +123,14 @@ jobs:
         if: ${{ env.SONAR_TOKEN != '' }}
         with:
           fetch-depth: 0
+
+      # internal/media tests cross-check against ffprobe; see the build job.
+      - name: install ffmpeg
+        if: ${{ env.SONAR_TOKEN != '' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffprobe -version | head -1
 
       - uses: actions/setup-go@v5
         if: ${{ env.SONAR_TOKEN != '' }}
