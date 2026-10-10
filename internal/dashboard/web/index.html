@@ -196,7 +196,7 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
     var counts = (c.stats && c.stats.FaultCounts) || {};
     return c.faults.map(function (f) {
       var parts = [f.kind];
-      ["rate", "meanBurst", "keepEvery"].forEach(function (k) { if (f[k]) { parts.push(k + "=" + f[k]); } });
+      ["rate", "meanBurst", "keepEvery", "on", "status", "onlyRequest", "afterFrames", "mode"].forEach(function (k) { if (f[k]) { parts.push(k + "=" + f[k]); } });
       if (f.protectKeyframes) { parts.push("keyframes protected"); }
       var n = counts[f.kind];
       if (n) { parts.push("applied " + n.Applied + (n.Suppressed ? ", spared " + n.Suppressed : "")); }
@@ -222,8 +222,16 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
       var input;
       if (p.type === "boolean") {
         input = el("input", { type: "checkbox", checked: p["default"] === true });
+      } else if (p.type === "enum") {
+        input = el("select", {});
+        (p.options || []).forEach(function (o) { input.appendChild(el("option", { value: o, text: o })); });
+        // An optional enum can be left unset; a required one always has a value.
+        if (!p.required) { input.insertBefore(el("option", { value: "", text: "(unset)" }), input.firstChild); }
+        input.value = p["default"] !== undefined ? String(p["default"]) : (p.required && p.options && p.options.length ? p.options[0] : "");
       } else if (p.type === "number" || p.type === "integer") {
-        input = el("input", { type: "number", value: p["default"] === undefined ? "" : String(p["default"]) });
+        // A default below the minimum (onlyRequest's 0) means "unset": leave it empty so it is omitted.
+        var unset = p["default"] === undefined || (p.min !== undefined && p["default"] < p.min && !p.required);
+        input = el("input", { type: "number", value: unset ? "" : String(p["default"]) });
         if (p.min !== undefined) { input.setAttribute("min", String(p.min)); }
         if (p.max !== undefined) { input.setAttribute("max", String(p.max)); }
         input.setAttribute("step", p.type === "integer" ? "1" : "any");
@@ -286,6 +294,8 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
         var name = input.getAttribute("data-param");
         if (input.type === "checkbox") {
           if (input.checked) { body[name] = true; }
+        } else if (input.tagName === "SELECT") {
+          if (input.value !== "") { body[name] = input.value; }
         } else if (input.value !== "") {
           body[name] = parseFloat(input.value);
         }
