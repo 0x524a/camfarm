@@ -27,8 +27,28 @@ servers, and with file sources make this process read local paths. The
 dashboard also displays cameras' Digest credentials. Do not expose it to a
 network you do not trust.
 
+Seed: --seed accepts decimal or 0x-prefixed hex (a leading 0 means octal, per
+Go's flag parsing). Without --seed, a --spec file's own seed is used (0 if the
+file has none); with neither, a random seed is drawn and printed on stderr.
+--cameras and --spec are mutually exclusive.
+
 Flags:
 `
+
+// exitError carries an exit code from run to main. quiet means the message was
+// already printed (by the flag package) and main must not print it again.
+type exitError struct {
+	code  int
+	err   error
+	quiet bool
+}
+
+func (e *exitError) Error() string { return e.err.Error() }
+func (e *exitError) Unwrap() error { return e.err }
+
+func usageErr(format string, a ...any) error {
+	return &exitError{code: 2, err: fmt.Errorf(format, a...)}
+}
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("camfarm", flag.ContinueOnError)
@@ -45,10 +65,22 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return err
+		return &exitError{code: 2, err: err, quiet: true}
 	}
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	for name, port := range map[string]int{"rtsp-port": *rtspPort, "onvif-port": *onvifPort} {
+		if port < 0 || port > 65535 {
+			return usageErr("--%s %d out of range 0..65535", name, port)
+		}
+	}
+	if _, _, err := net.SplitHostPort(*httpAddr); err != nil {
+		return usageErr("invalid --http-addr %q: %v", *httpAddr, err)
+	}
+	if set["cameras"] && *specPath != "" {
+		return usageErr("--cameras and --spec are mutually exclusive")
+	}
 
 	var spec camfarm.Spec
 	if *specPath != "" {
@@ -63,7 +95,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		}
 	} else {
 		if *cameras < 1 {
-			return errors.New("--cameras must be at least 1")
+			return usageErr("--cameras must be at least 1")
 		}
 		for i := 1; i <= *cameras; i++ {
 			spec.Cameras = append(spec.Cameras, camfarm.CameraSpec{ID: fmt.Sprintf("cam-%d", i)})
@@ -109,7 +141,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		}
 	}
 
-	srv := &http.Server{Handler: dashboard.Handler(fleet, dashboard.Options{}), ReadHeaderTimeout: 10 * time.Second}
+	// Request contexts derive from bctx; cancelling it on shutdown ends
+	// long-lived SSE streams so Shutdown does not wait out its full timeout.
+	bctx, bcancel := context.WithCancel(context.Background())
+	defer bcancel()
+	srv := &http.Server{
+		Handler:           dashboard.Handler(fleet, dashboard.Options{}),
+		ReadHeaderTimeout: 10 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return bctx },
+	}
+	srv.RegisterOnShutdown(bcancel)
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
 	fmt.Fprintf(stdout, "dashboard: http://%s/\n", ln.Addr())
