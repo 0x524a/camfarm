@@ -95,3 +95,13 @@ func TestRewriteXAddrOnServices(t *testing.T) {
 		t.Errorf("Service[1].XAddr = %q", resp.Service[1].XAddr)
 	}
 }
+
+func TestRewriteSnapshotURI(t *testing.T) {
+	resp := &onvifserver.GetSnapshotURIResponse{MediaURI: onvifserver.MediaURI{URI: "http://wrong/snapshot?profile=profile1"}}
+	rewriteSnapshotURI(resp, "http://real/onvif/cam/snapshot")
+	if resp.MediaURI.URI != "http://real/onvif/cam/snapshot" {
+		t.Errorf("URI = %q", resp.MediaURI.URI)
+	}
+	// Other response types pass through untouched.
+	rewriteSnapshotURI(&onvifserver.GetStreamURIResponse{}, "http://real/onvif/cam/snapshot")
+}

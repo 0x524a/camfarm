@@ -48,3 +48,12 @@ func rewriteXAddr(resp any, deviceURL, mediaURL string) {
 		}
 	}
 }
+
+// rewriteSnapshotURI rewrites onvif-go's GetSnapshotUri answer, built from the
+// same unbound Config.Host/Port as the XAddrs, to the camera's real snapshot
+// endpoint on this fleet's ONVIF listener.
+func rewriteSnapshotURI(resp any, snapshotURL string) {
+	if r, ok := resp.(*onvifserver.GetSnapshotURIResponse); ok {
+		r.MediaURI.URI = snapshotURL
+	}
+}

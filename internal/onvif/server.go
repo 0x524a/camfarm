@@ -9,7 +9,9 @@
 package onvif
 
 import (
+	"bytes"
 	"fmt"
+	"image/jpeg"
 	"io"
 	"log/slog"
 	"net"
@@ -21,6 +23,7 @@ import (
 	onvifserver "github.com/0x524a/onvif-go/server"
 
 	"github.com/0x524a/camfarm/internal/media"
+	"github.com/0x524a/camfarm/internal/screenshot"
 	"github.com/0x524a/camfarm/internal/seed"
 )
 
@@ -51,9 +54,10 @@ type Config struct {
 }
 
 type camera struct {
-	id     string
-	srv    *onvifserver.Server
-	digest *digestAuth // nil means open
+	id      string
+	srv     *onvifserver.Server
+	rtspURL string
+	digest  *digestAuth // nil means open
 }
 
 // Server serves the ONVIF control plane for a fleet, behind one HTTP
@@ -147,7 +151,10 @@ func buildCamera(cc CameraConfig) (*camera, error) {
 					Resolution: onvifserver.Resolution{Width: cc.Media.Width, Height: cc.Media.Height},
 					Framerate:  int(cc.Media.FPS),
 				},
-				Snapshot: onvifserver.SnapshotConfig{Enabled: false},
+				Snapshot: onvifserver.SnapshotConfig{
+					Enabled:    true,
+					Resolution: onvifserver.Resolution{Width: cc.Media.Width, Height: cc.Media.Height},
+				},
 			},
 		},
 	})
@@ -158,7 +165,7 @@ func buildCamera(cc CameraConfig) (*camera, error) {
 		return nil, fmt.Errorf("onvif: wiring stream URI for %q: %w", cc.ID, err)
 	}
 
-	cam := &camera{id: cc.ID, srv: srv}
+	cam := &camera{id: cc.ID, srv: srv, rtspURL: cc.RTSPURL}
 	if cc.Username != "" && cc.Password != "" {
 		cam.digest = newDigestAuth(cc.Username, cc.Password, cc.Seed.Stream("onvif-auth"))
 	}
@@ -274,8 +281,9 @@ func (s *Server) Endpoint(cameraID string) string {
 	return fmt.Sprintf("http://%s/onvif/%s", addr.String(), cameraID)
 }
 
-func (s *Server) deviceURL(id string) string { return s.Endpoint(id) + "/device" }
-func (s *Server) mediaURL(id string) string  { return s.Endpoint(id) + "/media" }
+func (s *Server) deviceURL(id string) string   { return s.Endpoint(id) + "/device" }
+func (s *Server) mediaURL(id string) string    { return s.Endpoint(id) + "/media" }
+func (s *Server) snapshotURL(id string) string { return s.Endpoint(id) + "/snapshot" }
 
 func (s *Server) cameraByID(id string) (*camera, bool) {
 	s.mu.RLock()
@@ -298,13 +306,17 @@ func parsePath(p string) (cameraID, service string, ok bool) {
 // when the camera is credentialed, and dispatches the SOAP action inside.
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	id, service, ok := parsePath(r.URL.Path)
-	if !ok || (service != "device" && service != "media") {
+	if !ok || (service != "device" && service != "media" && service != "snapshot") {
 		http.NotFound(w, r)
 		return
 	}
 	cam, ok := s.cameraByID(id)
 	if !ok {
 		http.NotFound(w, r)
+		return
+	}
+	if service == "snapshot" {
+		s.handleSnapshot(w, r, cam)
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -341,5 +353,35 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rewriteXAddr(resp, s.deviceURL(id), s.mediaURL(id))
+	rewriteSnapshotURI(resp, s.snapshotURL(id))
 	writeResponse(w, resp)
+}
+
+// handleSnapshot serves one JPEG frame of the camera's live RTSP stream. It is
+// the HTTP endpoint GetSnapshotUri advertises, gated behind the same Digest
+// auth as the SOAP services.
+func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request, cam *camera) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if cam.digest != nil && !cam.digest.verify(r) {
+		cam.digest.challenge(w)
+		return
+	}
+
+	img, err := screenshot.Capture(r.Context(), cam.rtspURL)
+	if err != nil {
+		s.log.Warn("snapshot capture failed", "camera", cam.id, "err", err)
+		http.Error(w, "snapshot capture failed", http.StatusInternalServerError)
+		return
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
+		s.log.Warn("snapshot encode failed", "camera", cam.id, "err", err)
+		http.Error(w, "snapshot encode failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	_, _ = w.Write(buf.Bytes())
 }

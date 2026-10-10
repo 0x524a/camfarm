@@ -92,11 +92,7 @@ func TestEveryDeviceAndMediaOperation(t *testing.T) {
 		{"SystemReboot", "/device", deviceNS, "SystemReboot", "", "SystemRebootResponse"},
 		{"GetProfiles", "/media", mediaNS, "GetProfiles", "", "profile1"},
 		{"GetVideoSources", "/media", mediaNS, "GetVideoSources", "", "GetVideoSourcesResponse"},
-		// Snapshot is disabled in this camera's profile config (server.go's
-		// Snapshot: SnapshotConfig{Enabled: false}), and this project has no
-		// endpoint behind the URL a snapshot response would advertise, so a
-		// fault is the correct simulated behavior here, not a placeholder.
-		{"GetSnapshotUri", "/media", mediaNS, "GetSnapshotUri", "<ProfileToken>profile1</ProfileToken>", "snapshot not supported for profile"},
+		{"GetSnapshotUri", "/media", mediaNS, "GetSnapshotUri", "<ProfileToken>profile1</ProfileToken>", "/onvif/cam/snapshot"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
