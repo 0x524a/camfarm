@@ -73,16 +73,17 @@ Early:
   keyframe, and with `keepEvery` above about 15 (a 1s GOP at the fixture's 15fps) the 15s snapshot
   deadline is exceeded, so dashboard and ONVIF snapshots fail.
   Control-plane faults have their own limits:
-  - `rtsp_error` and `sdp_lie` are deterministic for a **single client** only: their request
-    counters are per camera and shared across connections, so concurrent clients interleave
-    non-deterministically.
+  - `rtsp_error`, `sdp_lie` and `teardown` are deterministic for a **single client** only: their
+    request counters and draws are per camera and shared across connections, so concurrent
+    clients interleave non-deterministically.
   - A control-plane fault takes effect on the **next request**, not on a frame boundary. Journal
     entries carry a `clock` of `request` or `frame`. For a set containing both classes the
     request-clock entry is journaled at once and the frame-clock entry at the next frame
     boundary, in that order. Only classes whose specs changed are journaled and restarted;
     re-injecting an identical fault is a no-op, so to restart its seeded sequence, clear and then
     inject. There is still no per-kind clear: clearing removes every fault.
-  - `teardown` counts pump frames, not wall-clock time, and a frame that fails to encode or write
+  - `teardown` counts pump frames, not wall-clock time (frames removed by `frame_drop` or
+    `keyframe_starvation` still count), and a frame that fails to encode or write
     does not count. Its `reset` mode reaches the connection through `ServerConn.NetConn()`, which
     is outside `gortsplib`'s documented API, and is pinned by a test so a library upgrade that
     breaks it fails loudly. On a connection that is not a `*net.TCPConn` it closes the connection
@@ -90,7 +91,8 @@ Early:
   - `sdp_lie` rewrites only the DESCRIBE response. Mode `codec` changes only the `a=rtpmap` line
     (the honest `fmtp` stays); `sprop` replaces the parameter sets; `resolution` substitutes one
     of two embedded SPS constants (`mediacommon` has no SPS writer); `contentBase` replaces the
-    host with `wrong.invalid` and keeps the path. `a=control` lines are never altered.
+    host with `wrong.invalid` and keeps the path. `a=control` lines are never altered. A lie is
+    counted in the fault tally and journal only when the rewrite actually changed the response.
 - **Works:** Playwright end-to-end tests of the dashboard, behind the `e2e` build tag and run in
   the `e2e` CI job. Locally, `go test -tags e2e ./internal/dashboard/` needs Chromium installed
   for Playwright.

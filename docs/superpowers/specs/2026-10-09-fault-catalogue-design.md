@@ -248,7 +248,8 @@ on `gortsplib` connection goroutines, so they get a separate per-camera engine:
   with both classes the request-class entry is journaled first (synchronously), then the
   frame-class entry at the next frame boundary (effect order); only changed classes are applied.
 - The server keeps the `ServerSession` and connection of each reader so `teardown` can close them
-  without reaching into `gortsplib` internals beyond the documented `Close` and `NetConn`.
+  without reaching into `gortsplib` internals beyond `Close` and, for `reset` mode, `NetConn()`, which is
+  outside the documented API (see 2.4).
 - Lock discipline: the engine's mutex is never held across a call into `gortsplib` or the pump,
   and the fleet lock order (`Fleet.mu` before `events.mu`) is unchanged.
 
