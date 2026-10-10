@@ -111,6 +111,13 @@ type Engine struct {
 type entry struct {
 	spec Spec
 	rnd  *rand.Rand
+
+	// seenRandomAccess counts random-access units seen by keyframe_starvation.
+	seenRandomAccess int
+	// bad is packet_loss burst state; p and q are its transition
+	// probabilities (good->bad and bad->bad).
+	bad  bool
+	p, q float64
 }
 
 // New returns an Engine for one camera. Each kind draws from its own generator,
@@ -128,10 +135,14 @@ func New(s seed.Seed, specs []Spec) (*Engine, error) {
 		if err := Validate(sp); err != nil {
 			return nil, err
 		}
-		e.entries = append(e.entries, entry{
-			spec: sp,
-			rnd:  s.Stream(string(sp.Kind)).Rand(),
-		})
+		en := entry{spec: sp, rnd: s.Stream(string(sp.Kind)).Rand()}
+		if sp.Kind == KindPacketLoss && sp.MeanBurst > 1 {
+			// Two-state loss model: long-run loss equals Rate and the mean
+			// run of losses equals MeanBurst. Validate guarantees p <= 1.
+			en.q = 1 - 1/sp.MeanBurst
+			en.p = sp.Rate * (1 - en.q) / (1 - sp.Rate)
+		}
+		e.entries = append(e.entries, en)
 	}
 	return e, nil
 }
@@ -141,7 +152,8 @@ func (e *Engine) Enabled() bool { return len(e.entries) > 0 }
 
 // DecideFrame returns the faults that fire for the given frame counter.
 // randomAccess reports whether the access unit at that position is a random
-// access point; only ProtectKeyframes consults it.
+// access point; ProtectKeyframes and keyframe_starvation consult it. It must be
+// called exactly once per frame, since the engine counts random-access units.
 //
 // The counter is monotonic across loops of the source media, so a decision is
 // tied to a position in the run rather than to a position in the file.
@@ -153,21 +165,74 @@ func (e *Engine) DecideFrame(frameIndex int, randomAccess bool) []Decision {
 	for i := range e.entries {
 		en := &e.entries[i]
 		switch en.spec.Kind {
-		case KindFrameDrop, KindKeyframeStarvation:
+		case KindFrameDrop:
 			// Draw unconditionally so the sequence does not depend on earlier
 			// outcomes.
 			if en.rnd.Float64() >= en.spec.Rate {
 				continue
 			}
 			d := Decision{Kind: en.spec.Kind, FrameIndex: frameIndex}
-			if en.spec.Kind == KindFrameDrop && en.spec.ProtectKeyframes && randomAccess {
+			if en.spec.ProtectKeyframes && randomAccess {
 				d.Suppressed = true
 			}
 			out = append(out, d)
+		case KindKeyframeStarvation:
+			// No randomness: the k-th random-access unit is delivered when
+			// k mod KeepEvery == 0, so the first one always is.
+			if !randomAccess {
+				continue
+			}
+			k := en.seenRandomAccess
+			en.seenRandomAccess++
+			if k%en.spec.KeepEvery != 0 {
+				out = append(out, Decision{Kind: en.spec.Kind, FrameIndex: frameIndex})
+			}
 		default:
-			// Session, transport and control-plane faults are not frame-scoped.
-			// They are catalogued and validated, and decided elsewhere when
-			// their effects land.
+			// Packet loss is decided per packet (DecidePackets); session,
+			// transport and control-plane faults are not frame-scoped.
+		}
+	}
+	return out
+}
+
+// PacketDecision is one packet a packet_loss fault fires on.
+type PacketDecision struct {
+	// Index is the packet's position in the frame's packet list.
+	Index int
+	// Suppressed reports that the loss fired but must not be applied (the
+	// packet belongs to a random-access frame and ProtectKeyframes is set).
+	Suppressed bool
+}
+
+// DecidePackets returns the packets of one encoded frame that a packet_loss
+// fault fires on. Call it once per encoded frame, after DecideFrame: a frame
+// that was never encoded has no packets and consumes no draws.
+//
+// Exactly one draw is consumed per packet, unconditionally, so the sequence
+// depends only on the packet count so far, never on earlier outcomes.
+func (e *Engine) DecidePackets(_, count int, randomAccess bool) []PacketDecision {
+	var out []PacketDecision
+	for i := range e.entries {
+		en := &e.entries[i]
+		if en.spec.Kind != KindPacketLoss {
+			continue
+		}
+		for j := 0; j < count; j++ {
+			u := en.rnd.Float64()
+			var lost bool
+			if en.spec.MeanBurst > 1 {
+				if en.bad {
+					en.bad = u < en.q
+				} else {
+					en.bad = u < en.p
+				}
+				lost = en.bad
+			} else {
+				lost = u < en.spec.Rate
+			}
+			if lost {
+				out = append(out, PacketDecision{Index: j, Suppressed: en.spec.ProtectKeyframes && randomAccess})
+			}
 		}
 	}
 	return out
