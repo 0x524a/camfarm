@@ -133,7 +133,9 @@ func validateCameraConfig(cc CameraConfig, existing map[string]*camera) error {
 // buildCamera constructs the onvif-go server and digest state for one
 // camera. Shared by New and AddCamera.
 func buildCamera(cc CameraConfig) (*camera, error) {
+	uuid := EndpointUUID(cc.Seed)
 	srv, err := onvifserver.New(&onvifserver.Config{
+		EndpointUUID: uuid,
 		DeviceInfo: onvifserver.DeviceInfo{
 			Manufacturer:    "camfarm",
 			Model:           "synthetic",
@@ -175,7 +177,7 @@ func buildCamera(cc CameraConfig) (*camera, error) {
 		return nil, fmt.Errorf("onvif: wiring stream URI for %q: %w", cc.ID, err)
 	}
 
-	cam := &camera{id: cc.ID, srv: srv, rtspURL: cc.RTSPURL, uuid: EndpointUUID(cc.Seed)}
+	cam := &camera{id: cc.ID, srv: srv, rtspURL: cc.RTSPURL, uuid: uuid}
 	if cc.Username != "" && cc.Password != "" {
 		cam.digest = newDigestAuth(cc.Username, cc.Password, cc.Seed.Stream("onvif-auth"))
 	}
@@ -350,23 +352,15 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var resp any
-	if actionName == "GetEndpointReference" {
-		// onvif-go has no such handler: answered natively from the camera's
-		// seed-derived UUID.
-		resp = &getEndpointReferenceResponse{GUID: cam.uuid}
-	} else {
-		h, ok := handlers[actionName]
-		if !ok {
-			writeFault(w, "Client", "Action not supported")
-			return
-		}
-		var herr error
-		resp, herr = h(cam.srv, payload)
-		if herr != nil {
-			writeFault(w, "Server", herr.Error())
-			return
-		}
+	h, ok := handlers[actionName]
+	if !ok {
+		writeFault(w, "Client", "Action not supported")
+		return
+	}
+	resp, herr := h(cam.srv, payload)
+	if herr != nil {
+		writeFault(w, "Server", herr.Error())
+		return
 	}
 
 	rewriteXAddr(resp, s.deviceURL(id), s.mediaURL(id))

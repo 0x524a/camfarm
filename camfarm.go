@@ -668,6 +668,7 @@ func (c *Camera) noteFaultsApplied(action string, f FaultSpec, index int, clock 
 }
 
 // ONVIFUUID is the camera's ONVIF endpoint UUID. It is deterministic from the
-// camera seed and is the same value the camera's ONVIF Device service returns
-// from GetEndpointReference.
+// camera seed. The camera's ONVIF Device service returns it from
+// GetEndpointReference with a "urn:uuid:" prefix; this accessor, the API and the
+// dashboard show it bare.
 func (c *Camera) ONVIFUUID() string { return onvif.EndpointUUID(c.seed) }
