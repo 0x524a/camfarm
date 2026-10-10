@@ -121,7 +121,7 @@ answer; do not invent a decision that has not been made.
    teardown mid-session, TCP reset, RTSP interleaved-versus-UDP transport differences, and timestamp
    discontinuities. Decide which belong in the first usable version and which are later work, and hold
    each candidate to the standard that it maps to a real class of field bug rather than being arbitrary
-   chaos for its own sake. Slices A and B (`frame_drop`, `packet_loss`, `keyframe_starvation`, `rtsp_error`, `teardown`, `sdp_lie`, the catalogue) have
+   chaos for its own sake. Slices A, B and C (`frame_drop`, `packet_loss`, `keyframe_starvation`, `rtsp_error`, `teardown`, `sdp_lie`, the catalogue, and the timing faults `jitter`, `burst_delivery`, `pts_dts_mismatch`, `pts_delayed`) have
    shipped; see the README fault table for the current state.
 
 3. **Determinism and reproducibility mechanics.** How a seed is threaded through fault selection,

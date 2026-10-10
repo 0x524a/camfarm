@@ -77,6 +77,48 @@ func TestFaultCatalogueEndpoint(t *testing.T) {
 	}
 }
 
+func TestFaultCatalogueListsTheTimingKindsAsImplemented(t *testing.T) {
+	ts, _ := newServer(t, Options{})
+	resp := do(t, "GET", ts.URL+"/api/v1/faults", "")
+	var cat []struct {
+		Kind        string `json:"kind"`
+		Implemented bool   `json:"implemented"`
+		Params      []struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&cat); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		"jitter":           {"maxMs"},
+		"burst_delivery":   {"rate", "holdFrames"},
+		"pts_dts_mismatch": {"reorderDepth"},
+		"pts_delayed":      {"delayMs", "driftPpm"},
+	}
+	seen := 0
+	for _, k := range cat {
+		params, ok := want[k.Kind]
+		if !ok {
+			continue
+		}
+		seen++
+		if !k.Implemented {
+			t.Errorf("%s should be implemented", k.Kind)
+		}
+		var got []string
+		for _, p := range k.Params {
+			got = append(got, p.Name)
+		}
+		if !reflect.DeepEqual(got, params) {
+			t.Errorf("%s params = %v, want %v", k.Kind, got, params)
+		}
+	}
+	if seen != len(want) {
+		t.Errorf("found %d of %d timing kinds", seen, len(want))
+	}
+}
+
 func TestInjectRoundTripsEnumAndIntegerFaultFields(t *testing.T) {
 	ts, f := newServer(t, Options{})
 	resp := do(t, "POST", ts.URL+"/api/v1/cameras/front-door/faults",

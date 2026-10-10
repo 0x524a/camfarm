@@ -1,6 +1,6 @@
 # Fault catalogue: media-path and control-plane faults — design
 
-Date: 2026-10-09 (slice C added 2026-10-10). Status: slices A and B implemented; slice C pending review, not yet implemented.
+Date: 2026-10-09 (slice C added 2026-10-10). Status: slices A, B and C implemented.
 
 This is the design for the next three slices after slice 3 (dashboard, binary and the first fault
 effect, `frame_drop`). It depends on slice 3 being merged: it reuses the pump's fault seam,
@@ -194,12 +194,16 @@ A standing lag or drift of the RTP timestamp against the real send clock. `delay
 constant from every timestamp; `driftPpm` makes timestamps advance at `(1 - driftPpm/1e6)` of the
 nominal rate, so the lag grows with time (integer arithmetic, no floats). At least one of the two is
 required. Injected mid-stream, `delayMs` is a one-time backward step of the timestamp followed by
-normal-rate advance; at spec time the shift is only visible through the RTCP sender report, whose
-timestamp-to-wall-clock mapping then disagrees with the media by the lag. This is the field bug a
+normal-rate advance; at spec time the shift shows up mainly in the RTCP sender report's own RTP timestamp. Measured
+on the pinned `gortsplib` v5.6.5, the server-side sender pairs the already-shifted RTP timestamp
+with the true write time, so a client mapping packets to wall-clock through the SR
+(`Client.PacketNTP`) sees a delayed camera at the same lag as a clean one (delta about 0 ms); the
+delay appears only as the SR's RTP timestamp sitting about `delayMs` behind a clean camera's
+(about -45000 ticks at 90 kHz for 500 ms). This is the field bug a
 latency profiler such as `framelag` meets: a camera whose timestamps lag capture. `delayMs` is 1 to
 60000 and `driftPpm` 1 to 100000. No randomness. Both timestamp kinds add into the stamped value, so
-they compose with each other and with the frame faults. The effect on the SR is stated as expected
-behaviour of the library and pinned by a wire test rather than assumed.
+they compose with each other and with the frame faults. This SR behaviour is the library's, pinned by a wire
+test rather than assumed; a `gortsplib` upgrade may change it and the test then fails loudly.
 
 ## 3. One schema for validation, API and UI (slice A)
 
