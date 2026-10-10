@@ -131,4 +131,30 @@ func TestJournalRecordsFrameIndexForFaults(t *testing.T) {
 	if e.Action != "inject" || e.Camera != "front-door" || e.FrameIndex < 3 {
 		t.Fatalf("journal entry = %+v", e)
 	}
+	if e.Clock != "frame" {
+		t.Fatalf("clock = %q, want frame", e.Clock)
+	}
+}
+
+func TestJournalClocksFaultChangesByClass(t *testing.T) {
+	f := StartT(t, minimalSpec())
+	cam, _ := f.Camera("front-door")
+	waitUntil(t, "frames", func() bool { return cam.Stats().FramesServed > 3 })
+
+	if err := cam.Inject(FaultSpec{Kind: "rtsp_error", On: "describe", Status: 503, Rate: 1}); err != nil {
+		t.Fatalf("Inject rtsp_error: %v", err)
+	}
+	if err := cam.Inject(FaultSpec{Kind: "frame_drop", Rate: 0.5}); err != nil {
+		t.Fatalf("Inject frame_drop: %v", err)
+	}
+	waitUntil(t, "journal", func() bool { return len(f.Journal()) >= 3 })
+
+	j := f.Journal()
+	if j[0].Clock != "request" || j[0].Fault.Kind != "rtsp_error" {
+		t.Errorf("first entry = %+v, want a request-clocked rtsp_error", j[0])
+	}
+	// The second inject installs both classes: one entry per class, frame first.
+	if j[1].Clock != "frame" || j[2].Clock != "request" {
+		t.Errorf("clocks = %q, %q; want frame, request", j[1].Clock, j[2].Clock)
+	}
 }

@@ -73,6 +73,14 @@ type camera struct {
 	done   chan struct{}
 	// pump is the camera's stepping loop, kept so SetFaults can reach it.
 	pump *Pump
+	// ctl decides the camera's control-plane faults. Set under s.mu before the
+	// camera is visible to a handler; internally synchronised thereafter.
+	ctl *fault.ControlEngine
+	// setMu guards hadMedia and hadControl, which record which fault classes
+	// the last SetFaults installed so a clear can report the classes it removed.
+	setMu      sync.Mutex
+	hadMedia   bool
+	hadControl bool
 }
 
 // Server serves a fleet of synthetic RTSP cameras.
@@ -202,12 +210,17 @@ func (s *Server) buildPumps() (pumps map[string]*Pump, failedID string, err erro
 			Medi:     cam.medi,
 			Writer:   cam.stream,
 			Seed:     cam.cfg.Seed,
-			Faults:   cam.cfg.Faults,
+			Faults:   mediaFaults(cam.cfg.Faults),
 			Obs:      s.cfg.Obs,
 		})
 		if err != nil {
 			return nil, id, err
 		}
+		ctl, err := newControl(cam.cfg)
+		if err != nil {
+			return nil, id, err
+		}
+		cam.ctl = ctl
 		pumps[id] = pump
 	}
 	return pumps, "", nil
@@ -417,7 +430,7 @@ func (s *Server) AddCamera(cc CameraConfig) error {
 		Medi:     medi,
 		Writer:   stream,
 		Seed:     cc.Seed,
-		Faults:   cc.Faults,
+		Faults:   mediaFaults(cc.Faults),
 		Obs:      s.cfg.Obs,
 	})
 	if err != nil {
@@ -425,10 +438,16 @@ func (s *Server) AddCamera(cc CameraConfig) error {
 		s.mu.Unlock()
 		return fmt.Errorf("rtsp: building pump for %q: %w", cc.ID, err)
 	}
+	ctl, err := newControl(cc)
+	if err != nil {
+		stream.Close()
+		s.mu.Unlock()
+		return fmt.Errorf("rtsp: building control faults for %q: %w", cc.ID, err)
+	}
 
 	camCtx, camCancel := context.WithCancel(s.rootCtx)
 	done := make(chan struct{})
-	cam := &camera{id: cc.ID, cfg: cc, stream: stream, medi: medi, forma: forma, cancel: camCancel, done: done, pump: pump}
+	cam := &camera{id: cc.ID, cfg: cc, stream: stream, medi: medi, forma: forma, cancel: camCancel, done: done, pump: pump, ctl: ctl}
 	s.cams[cc.ID] = cam
 	s.order = append(s.order, cc.ID)
 
@@ -485,23 +504,6 @@ func (s *Server) RemoveCamera(id string) error {
 
 	s.log.Info("camera removed", "camera", id)
 	return nil
-}
-
-// SetFaults replaces a camera's fault set on a running server. The swap takes
-// effect at the camera's next frame boundary; applied, if non-nil, receives the
-// frame index it took effect on.
-func (s *Server) SetFaults(id string, specs []fault.Spec, applied func(frameIndex int)) error {
-	s.mu.RLock()
-	started := s.srv != nil
-	cam, ok := s.cams[id]
-	s.mu.RUnlock()
-	if !started {
-		return ErrNotStarted
-	}
-	if !ok || cam.pump == nil {
-		return fmt.Errorf("rtsp: unknown camera %q", id)
-	}
-	return cam.pump.SetFaults(specs, applied)
 }
 
 // Addr returns the bound address, or nil before a successful Start.
@@ -583,7 +585,7 @@ func (s *Server) streamStatsErr(id string) (packets, bytes uint64, err error) {
 // *camera after lookup returns would be reading that field with no lock
 // held at all, racing those writes. Handing back copies read under the lock
 // closes that window.
-func (s *Server) lookup(path string) (id string, stream *gortsplib.ServerStream, ok bool) {
+func (s *Server) lookup(path string) (id string, stream *gortsplib.ServerStream, ctl *fault.ControlEngine, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	cam, ok := s.cams[strings.Trim(path, "/")]
@@ -592,9 +594,9 @@ func (s *Server) lookup(path string) (id string, stream *gortsplib.ServerStream,
 	// it as found would make a handler answer StatusOK with a nil stream, which
 	// gortsplib rejects with a panic; treat it as not found instead.
 	if !ok || cam.stream == nil {
-		return "", nil, false
+		return "", nil, nil, false
 	}
-	return cam.id, cam.stream, true
+	return cam.id, cam.stream, cam.ctl, true
 }
 
 // --- gortsplib handlers ---
@@ -616,18 +618,24 @@ func (s *Server) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
 
 // OnDescribe answers DESCRIBE by path.
 func (s *Server) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error) {
-	_, stream, ok := s.lookup(ctx.Path)
+	id, stream, ctl, ok := s.lookup(ctx.Path)
 	if !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
+	}
+	if res := s.answerError(fault.MethodDescribe, id, ctl.Decide(fault.MethodDescribe)); res != nil {
+		return res, nil, nil
 	}
 	return &base.Response{StatusCode: base.StatusOK}, stream, nil
 }
 
 // OnSetup answers SETUP by path and registers the session as a reader.
 func (s *Server) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response, *gortsplib.ServerStream, error) {
-	id, stream, ok := s.lookup(ctx.Path)
+	id, stream, ctl, ok := s.lookup(ctx.Path)
 	if !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
+	}
+	if res := s.answerError(fault.MethodSetup, id, ctl.Decide(fault.MethodSetup)); res != nil {
+		return res, nil, nil
 	}
 	s.mu.Lock()
 	s.readers[ctx.Session] = id
@@ -637,8 +645,12 @@ func (s *Server) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response
 
 // OnPlay answers PLAY.
 func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
-	if _, _, ok := s.lookup(ctx.Path); !ok {
+	id, _, ctl, ok := s.lookup(ctx.Path)
+	if !ok {
 		return &base.Response{StatusCode: base.StatusNotFound}, nil
+	}
+	if res := s.answerError(fault.MethodPlay, id, ctl.Decide(fault.MethodPlay)); res != nil {
+		return res, nil
 	}
 	if s.testOnPlay != nil {
 		s.testOnPlay(ctx)

@@ -98,6 +98,10 @@ func (e *ControlEngine) Set(specs []Spec) error {
 	return nil
 }
 
+// IsControl reports whether a kind is decided per RTSP request by a
+// ControlEngine rather than per frame by the pump's Engine.
+func IsControl(k Kind) bool { return isControlKind(k) }
+
 func isControlKind(k Kind) bool {
 	for _, c := range controlKinds {
 		if c == k {

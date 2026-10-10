@@ -103,7 +103,7 @@ func Catalogue() []KindInfo {
 			},
 		},
 		{
-			Kind: KindRTSPError, Models: "Flaky camera that answers 5xx or 454 to some DESCRIBE, SETUP or PLAY requests.",
+			Kind: KindRTSPError, Implemented: true, Models: "Flaky camera that answers 5xx or 454 to some DESCRIBE, SETUP or PLAY requests.",
 			Clock: "per-method request counter; one draw per matching request",
 			Params: []Param{
 				{Name: "on", Type: ParamEnum, Options: []string{"describe", "setup", "play", "all"}, Default: "describe", Required: true,

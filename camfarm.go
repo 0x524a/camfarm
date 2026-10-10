@@ -613,7 +613,7 @@ func (c *Camera) Inject(f FaultSpec) error {
 		}
 	}
 	next = append(next, f)
-	err := c.swapFaults(next, func(frame int) { c.noteFaultsApplied("inject", f, frame) })
+	err := c.swapFaults(next, func(i int, clock string) { c.noteFaultsApplied("inject", f, i, clock) })
 	if err == nil {
 		c.faults = next
 	}
@@ -632,7 +632,7 @@ func (c *Camera) Clear() error {
 	if len(c.faults) == 0 {
 		return nil
 	}
-	err := c.swapFaults(nil, func(frame int) { c.noteFaultsApplied("clear", FaultSpec{}, frame) })
+	err := c.swapFaults(nil, func(i int, clock string) { c.noteFaultsApplied("clear", FaultSpec{}, i, clock) })
 	if err == nil {
 		c.faults = nil
 	}
@@ -640,7 +640,7 @@ func (c *Camera) Clear() error {
 }
 
 // swapFaults hands a new fault set to the camera's pump. Caller holds c.mu.
-func (c *Camera) swapFaults(next []FaultSpec, applied func(int)) error {
+func (c *Camera) swapFaults(next []FaultSpec, applied func(int, string)) error {
 	if c.removed.Load() {
 		return fmt.Errorf("%w: %q", ErrUnknownCamera, c.id)
 	}
@@ -653,12 +653,13 @@ func (c *Camera) swapFaults(next []FaultSpec, applied func(int)) error {
 	return nil
 }
 
-// noteFaultsApplied is called when a fault change takes effect at a frame
-// boundary. It runs on the pump goroutine and publishes to the fleet's change
-// feed and journal; it takes neither c.mu nor Fleet.mu, and Inject never waits
-// on it.
-func (c *Camera) noteFaultsApplied(action string, f FaultSpec, frameIndex int) {
-	c.fleet.noteFault(action, c.id, f, frameIndex)
+// noteFaultsApplied is called when a fault change takes effect, at a frame
+// boundary (clock "frame", on the pump goroutine) or on the next request (clock
+// "request", possibly synchronously from Inject). It publishes to the fleet's
+// change feed and journal; it takes neither c.mu nor Fleet.mu, and Inject never
+// waits on it.
+func (c *Camera) noteFaultsApplied(action string, f FaultSpec, index int, clock string) {
+	c.fleet.noteFault(action, c.id, f, index, clock)
 }
 
 // ONVIFUUID is the camera's ONVIF endpoint UUID. It is deterministic from the
