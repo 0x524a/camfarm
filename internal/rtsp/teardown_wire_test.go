@@ -66,8 +66,13 @@ func TestTeardownEndsTheSessionAfterNFrames(t *testing.T) {
 				if err == nil {
 					t.Fatal("session ended without error")
 				}
-				if mode == "reset" && !strings.Contains(err.Error(), "reset") && !strings.Contains(err.Error(), "EOF") {
-					t.Fatalf("reset mode error = %v", err)
+				// RST must be distinguishable from a clean close.
+				isReset := strings.Contains(strings.ToLower(err.Error()), "reset")
+				if mode == "reset" && !isReset {
+					t.Fatalf("reset mode error = %v, want a connection reset", err)
+				}
+				if mode == "close" && isReset {
+					t.Fatalf("close mode error = %v, must not be a reset", err)
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("session not torn down")
@@ -100,14 +105,41 @@ func TestTeardownRateZeroNeverArms(t *testing.T) {
 	}
 }
 
+// Racing RemoveCamera and Close against a teardown, with frames flowing. armed
+// removes while the teardown is still pending (large AfterFrames); firing lets
+// the teardown trip concurrently with the removal (small AfterFrames, removal
+// not waiting for the client).
 func TestTeardownRacingRemoveCameraDoesNotPanicOrHang(t *testing.T) {
-	srv, _ := startFaultServer(t, nil)
-	if err := srv.SetFaults("cam-00", []fault.Spec{{Kind: fault.KindTeardown, AfterFrames: 3, Mode: "reset", Rate: 1}}, nil); err != nil {
+	for _, c := range []struct {
+		name        string
+		afterFrames int
+		mode        string
+	}{
+		{"armed-reset", 100000, "reset"},
+		{"armed-close", 100000, "close"},
+		{"firing-reset", 3, "reset"},
+		{"firing-close", 3, "close"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			racingRemove(t, c.afterFrames, c.mode)
+		})
+	}
+}
+
+func racingRemove(t *testing.T, afterFrames int, mode string) {
+	srv, rec := startFaultServer(t, nil)
+	if err := srv.SetFaults("cam-00", []fault.Spec{{Kind: fault.KindTeardown, AfterFrames: afterFrames, Mode: mode, Rate: 1}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	var packets atomic.Int64
 	_ = playClient(t, srv.URL("cam-00"), func() { packets.Add(1) })
-	awaitCond(t, "first packets", func() bool { return packets.Load() > 0 })
+	if afterFrames > 100 {
+		// Frames are demonstrably flowing while the teardown stays pending.
+		awaitCond(t, "frames flowing", func() bool { return packets.Load() > 3 })
+		if got := rec.Counters("cam-00").ByKind["teardown"].Applied; got != 0 {
+			t.Fatalf("teardown fired early: %d", got)
+		}
+	}
 
 	done := make(chan struct{})
 	go func() {

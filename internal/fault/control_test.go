@@ -48,8 +48,18 @@ func TestRTSPErrorRateZeroNeverFiresAndSeedIsReproducible(t *testing.T) {
 		}
 		return out
 	}
-	if !reflect.DeepEqual(run(), run()) {
+	first := run()
+	if !reflect.DeepEqual(first, run()) {
 		t.Fatal("same seed produced different sequences")
+	}
+	fired := 0
+	for _, f := range first {
+		if f {
+			fired++
+		}
+	}
+	if fired == 0 || fired == len(first) {
+		t.Fatalf("rate 0.5 fired %d of %d", fired, len(first))
 	}
 	e := fault.NewControlEngine(seed.Seed(7))
 	_ = e.Set([]fault.Spec{{Kind: fault.KindRTSPError, On: "all", Status: 503}})
@@ -60,7 +70,9 @@ func TestRTSPErrorRateZeroNeverFiresAndSeedIsReproducible(t *testing.T) {
 	}
 }
 
-func TestDrawsAreUnconditionalPerMatchingRequest(t *testing.T) {
+// Draw consumption for OnlyRequest specs is checked white-box in
+// TestOnlyRequestStillConsumesOneDrawPerMatchingRequest (control_draws_test.go).
+func TestNonMatchingMethodsDoNotChangeTheMatchingSequence(t *testing.T) {
 	// A non-matching method must not consume draws: the sequence at the
 	// matching method is identical with and without interleaved SETUPs.
 	a := fault.NewControlEngine(seed.Seed(3))
@@ -76,7 +88,23 @@ func TestDrawsAreUnconditionalPerMatchingRequest(t *testing.T) {
 	}
 }
 
-func TestSetResetsStreamsAndEngineIsRaceFree(t *testing.T) {
+func TestTeardownStreamRestartsAfterSet(t *testing.T) {
+	e := fault.NewControlEngine(seed.Seed(9))
+	spec := []fault.Spec{{Kind: fault.KindTeardown, AfterFrames: 10, Mode: "close", Rate: 0.5}}
+	_ = e.Set(spec)
+	var first []bool
+	for i := 0; i < 40; i++ {
+		first = append(first, e.ArmPlay() != nil)
+	}
+	_ = e.Set(spec)
+	for i, want := range first {
+		if got := e.ArmPlay() != nil; got != want {
+			t.Fatalf("ArmPlay sequence did not restart at %d", i)
+		}
+	}
+}
+
+func TestEngineConcurrentSetAndDecideIsRaceFree(t *testing.T) {
 	e := fault.NewControlEngine(seed.Seed(1))
 	var wg sync.WaitGroup
 	for g := 0; g < 4; g++ {

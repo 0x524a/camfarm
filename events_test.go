@@ -203,11 +203,11 @@ func TestJournalOrderFollowsEffectOrderAcrossBackToBackSets(t *testing.T) {
 	if !sawFrameClear || !sawInject {
 		t.Errorf("journal = %+v, want a frame clear and a request inject", j)
 	}
-	// The request-class inject is effective immediately, so it precedes nothing
-	// before the clear's own request entry and must not precede it.
-	for i, e := range j {
-		if e.Action == "inject" && i == 0 {
-			t.Errorf("inject journaled before the clear it followed: %+v", j)
+	// The request-class inject was issued after the clear, so its request index
+	// must not be lower than the clear's own request entry.
+	for _, e := range j[1:] {
+		if e.Action == "inject" && e.Clock == "request" && e.FrameIndex < j[0].FrameIndex {
+			t.Errorf("inject at request %d precedes the clear at request %d: %+v", e.FrameIndex, j[0].FrameIndex, j)
 		}
 	}
 }

@@ -47,9 +47,12 @@ var (
 
 // rewriteSDP makes an honest DESCRIBE body lie as mode says. codec is the
 // camera's real codec. It is a pure function of its arguments. Only the
-// a=rtpmap and a=fmtp attributes are touched: a=control, the line endings and
-// everything else are preserved, so SETUP against the advertised control URL
-// keeps working. contentBase is a header lie and is not handled here.
+// a=rtpmap and a=fmtp attributes are touched (mode codec changes the a=rtpmap
+// codec name alone and leaves the honest a=fmtp in place, so the two disagree;
+// the other modes edit only the fmtp parameter sets): a=control, the line
+// endings and everything else are preserved, so SETUP against the advertised
+// control URL keeps working. contentBase is a header lie and is not handled
+// here. A successful rewrite always differs from its input.
 func rewriteSDP(body []byte, mode string, codec media.Codec) ([]byte, error) {
 	s := string(body)
 	switch mode {
@@ -68,14 +71,22 @@ func rewriteSDP(body []byte, mode string, codec media.Codec) ([]byte, error) {
 			if !reSpropSets.MatchString(s) {
 				return nil, fmt.Errorf("rtsp: sdp_lie sprop: no sprop-parameter-sets in the SDP")
 			}
-			return []byte(reSpropSets.ReplaceAllString(s, "sprop-parameter-sets="+lieSPSLarge264+","+lieSPropPPS264)), nil
+			out := reSpropSets.ReplaceAllString(s, "sprop-parameter-sets="+lieSPSLarge264+","+lieSPropPPS264)
+			if out == s { // the honest sets already are the constant pair
+				out = reSpropSets.ReplaceAllString(s, "sprop-parameter-sets="+lieSPSSmall264+","+lieSPropPPS264)
+			}
+			return []byte(out), nil
 		case media.CodecH265:
 			if !reSpropVPS.MatchString(s) || !reSpropSPS.MatchString(s) || !reSpropPPS.MatchString(s) {
 				return nil, fmt.Errorf("rtsp: sdp_lie sprop: sprop-vps, sprop-sps or sprop-pps missing from the SDP")
 			}
-			s = reSpropVPS.ReplaceAllString(s, "sprop-vps="+lieVPSLarge265)
-			s = reSpropSPS.ReplaceAllString(s, "sprop-sps="+lieSPSLarge265)
-			return []byte(reSpropPPS.ReplaceAllString(s, "sprop-pps="+liePPSLarge265)), nil
+			lieSPS := lieSPSLarge265
+			if m := reSpropSPS.FindStringSubmatch(s); m != nil && m[1] == lieSPSLarge265 {
+				lieSPS = lieSPSSmall265 // the honest SPS already is the constant one
+			}
+			out := reSpropVPS.ReplaceAllString(s, "sprop-vps="+lieVPSLarge265)
+			out = reSpropSPS.ReplaceAllString(out, "sprop-sps="+lieSPS)
+			return []byte(reSpropPPS.ReplaceAllString(out, "sprop-pps="+liePPSLarge265)), nil
 		}
 	case "resolution":
 		switch codec {

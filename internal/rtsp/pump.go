@@ -64,7 +64,8 @@ type PumpConfig struct {
 	Obs      *obs.Recorder
 	// AfterFrame, if set, is called at the end of every Step that completes,
 	// dropped frames included, so a consumer counts frames by pump step rather
-	// than by wall clock.
+	// than by wall clock. An errored Step does not call it, so it does not count
+	// toward a teardown's afterFrames.
 	AfterFrame func()
 }
 

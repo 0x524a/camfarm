@@ -5,7 +5,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
@@ -118,7 +117,7 @@ func TestSetFaultsControlOnlyAppliesImmediatelyWithTheRequestClock(t *testing.T)
 }
 
 func TestSetFaultsLeavesAnUnchangedClassAloneWhenTheOtherChanges(t *testing.T) {
-	s, _ := startFaultServer(t, nil)
+	s, rec := startFaultServer(t, nil)
 	var mu sync.Mutex
 	var clocks []string
 	applied := func(_ int, clock string) { mu.Lock(); clocks = append(clocks, clock); mu.Unlock() }
@@ -149,7 +148,10 @@ func TestSetFaultsLeavesAnUnchangedClassAloneWhenTheOtherChanges(t *testing.T) {
 	if err := s.SetFaults("cam-00", both, applied); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(100 * time.Millisecond) // a wrongly queued pump swap would report by now
+	// A wrongly queued pump swap would report at the next frame boundary, so wait
+	// for whole frames to be stepped rather than for wall-clock time.
+	before := rec.Counters("cam-00").FramesServed
+	awaitCond(t, "frames past the resubmit", func() bool { return rec.Counters("cam-00").FramesServed >= before+3 })
 	if c := got(); len(c) != 2 {
 		t.Fatalf("an unchanged set was notified: %v", c)
 	}

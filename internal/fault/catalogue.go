@@ -131,7 +131,7 @@ func Catalogue() []KindInfo {
 			Clock: "per-camera DESCRIBE counter; one draw per DESCRIBE",
 			Params: []Param{
 				{Name: "mode", Type: ParamEnum, Options: []string{"codec", "sprop", "resolution", "contentBase"}, Default: "codec", Required: true,
-					Help: "Which part of the SDP lies."},
+					Help: "Which part of the SDP lies. codec changes only the a=rtpmap codec name (the honest a=fmtp stays); sprop and resolution edit the parameter sets; contentBase swaps the Content-Base host."},
 				onceRate("Probability in [0,1] that a DESCRIBE gets the lying SDP."),
 				{Name: "onlyRequest", Type: ParamInteger, Min: f64(1), Max: f64(1000000), Default: 0.0,
 					Help: "Lie only on the Nth DESCRIBE (ignores rate). 0 or omitted means unset."},

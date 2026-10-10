@@ -198,7 +198,10 @@ func (s *Server) afterFrame(camID string) {
 }
 
 // tearDown ends a session. Every call is safe on a session or connection that
-// is already gone.
+// is already gone. Mode reset sends an RST only when the connection is a
+// *net.TCPConn; any other net.Conn falls back to a plain Close (FIN). Frames
+// keep counting while a session is paused, and a later PLAY re-arms the session
+// (arm overwrites its entry, restarting the count).
 func (s *Server) tearDown(a *armed) {
 	nc := a.conn.NetConn()
 	if a.mode == "reset" {
@@ -213,14 +216,16 @@ func (s *Server) tearDown(a *armed) {
 
 // lieInfo is an sdp_lie decided for a connection's DESCRIBE.
 type lieInfo struct {
-	mode  string
-	camID string
-	codec media.Codec
+	mode    string
+	camID   string
+	codec   media.Codec
+	request int
 }
 
-// noteLie records the lie for the response about to be written on conn, and
-// tallies it. Requests on one connection are answered in order, so the next
-// response OnResponse sees for conn is this DESCRIBE's.
+// noteLie records the lie for the response about to be written on conn. It is
+// tallied only when applyLie actually changes the response. Requests on one
+// connection are answered in order, so the next response OnResponse sees for
+// conn is this DESCRIBE's.
 func (s *Server) noteLie(conn *gortsplib.ServerConn, camID string, d fault.ControlDecision) {
 	s.mu.RLock()
 	cam, ok := s.cams[camID]
@@ -229,10 +234,14 @@ func (s *Server) noteLie(conn *gortsplib.ServerConn, camID string, d fault.Contr
 		return
 	}
 	s.lieMu.Lock()
-	s.pendingLie[conn] = lieInfo{mode: d.Lie.Mode, camID: camID, codec: cam.cfg.Media.Codec}
+	s.pendingLie[conn] = lieInfo{mode: d.Lie.Mode, camID: camID, codec: cam.cfg.Media.Codec, request: d.Request}
 	s.lieMu.Unlock()
-	s.cfg.Obs.Fault(camID, d.Request, string(fault.KindSDPLie), "DESCRIBE answered with a lying "+d.Lie.Mode)
-	s.cfg.Obs.FaultTally(camID, string(fault.KindSDPLie), 1, 0)
+}
+
+// lieDelivered records an sdp_lie that really changed the response.
+func (s *Server) lieDelivered(li lieInfo) {
+	s.cfg.Obs.Fault(li.camID, li.request, string(fault.KindSDPLie), "DESCRIBE answered with a lying "+li.mode)
+	s.cfg.Obs.FaultTally(li.camID, string(fault.KindSDPLie), 1, 0)
 }
 
 // dropLie forgets a connection's pending lie.
@@ -244,7 +253,8 @@ func (s *Server) dropLie(conn *gortsplib.ServerConn) {
 
 // applyLie takes and clears conn's pending lie, applying it only to a 200
 // response: a DESCRIBE that went on to fail must not leave a lie behind for a
-// later response.
+// later response. The lie is journalled and tallied here, on delivery, and only
+// when the response really changed.
 func (s *Server) applyLie(conn *gortsplib.ServerConn, res *base.Response) {
 	s.lieMu.Lock()
 	li, ok := s.pendingLie[conn]
@@ -254,9 +264,13 @@ func (s *Server) applyLie(conn *gortsplib.ServerConn, res *base.Response) {
 		return
 	}
 	if li.mode == "contentBase" {
-		if cb := res.Header["Content-Base"]; len(cb) > 0 {
-			res.Header["Content-Base"] = base.HeaderValue{lieContentBase(cb[0])}
+		cb := res.Header["Content-Base"]
+		if len(cb) == 0 || lieContentBase(cb[0]) == cb[0] {
+			s.log.Warn("sdp_lie not applied", "camera", li.camID, "err", "no rewritable Content-Base header")
+			return
 		}
+		res.Header["Content-Base"] = base.HeaderValue{lieContentBase(cb[0])}
+		s.lieDelivered(li)
 		return
 	}
 	out, err := rewriteSDP(res.Body, li.mode, li.codec)
@@ -266,4 +280,5 @@ func (s *Server) applyLie(conn *gortsplib.ServerConn, res *base.Response) {
 		return
 	}
 	res.Body = out
+	s.lieDelivered(li)
 }

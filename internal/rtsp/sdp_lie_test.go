@@ -172,6 +172,31 @@ func TestRewriteSDPSpropReplacesTheParameterSetsWithAnotherValidPair(t *testing.
 	h265Dims(t, string(h265Out))
 }
 
+// The honest parameter sets may already be the constant lie; the SDP must still
+// change.
+func TestRewriteSDPSpropAlwaysChangesTheSDP(t *testing.T) {
+	h264sdp := "a=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1;sprop-parameter-sets=" + lieSPSLarge264 + "," + lieSPropPPS264 + "\r\n"
+	h265sdp := "a=rtpmap:96 H265/90000\r\na=fmtp:96 sprop-vps=" + lieVPSLarge265 + ";sprop-sps=" + lieSPSLarge265 + ";sprop-pps=" + liePPSLarge265 + "\r\n"
+	for _, c := range []struct {
+		sdp   string
+		codec media.Codec
+	}{{h264sdp, media.CodecH264}, {h265sdp, media.CodecH265}} {
+		out, err := rewriteSDP([]byte(c.sdp), "sprop", c.codec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(out) == c.sdp {
+			t.Fatalf("%s sprop lie left an already-constant SDP unchanged", c.codec)
+		}
+	}
+}
+
+func TestRewriteSDPFailsWithoutSprop(t *testing.T) {
+	if _, err := rewriteSDP([]byte("a=rtpmap:96 H264/90000\r\n"), "sprop", media.CodecH264); err == nil {
+		t.Fatal("sprop lie on an SDP without sprop-parameter-sets succeeded")
+	}
+}
+
 func TestRewriteSDPResolutionChangesTheParsedGeometry(t *testing.T) {
 	honest := readSDP(t, "describe_h264.sdp")
 	hSPS, hPPS := h264Parts(t, honest)

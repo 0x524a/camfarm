@@ -565,6 +565,12 @@ func TestE2EEnumParameterAppliesRtspError(t *testing.T) {
 	if err := expect().Locator(row.Locator(".fault-active")).ToContainText("rtsp_error"); err != nil {
 		t.Fatalf("rtsp_error not shown as active: %v", err)
 	}
+	// The active-fault line carries the new parameters as key=value.
+	for _, want := range []string{"on=setup", "status=454"} {
+		if err := expect().Locator(row.Locator(".fault-active")).ToContainText(want); err != nil {
+			t.Fatalf("active-fault line lacks %q: %v", want, err)
+		}
+	}
 	got := cam.Faults()
 	if len(got) != 1 || got[0].On != "setup" || got[0].Status != 454 || got[0].OnlyRequest != 0 {
 		t.Fatalf("camera faults = %+v", got)

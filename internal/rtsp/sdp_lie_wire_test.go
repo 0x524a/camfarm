@@ -311,3 +311,36 @@ func TestPendingLiesDrainAfterRealConnectionsClose(t *testing.T) {
 	}
 	awaitCond(t, "pending lies to drain", func() bool { return s.pendingLieCount() == 0 })
 }
+
+// A lie that cannot be built goes out as the honest SDP and must not be tallied
+// as delivered.
+func TestSDPLieNotTalliedWhenTheRewriteFails(t *testing.T) {
+	s, rec := startFaultServer(t, nil)
+	for _, mode := range []string{"sprop", "resolution", "contentBase"} {
+		c := new(gortsplib.ServerConn)
+		s.noteLie(c, "cam-00", fault.ControlDecision{Request: 1, Lie: &fault.LieDecision{Mode: mode}})
+		body := "v=0\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n"
+		res := &base.Response{StatusCode: base.StatusOK, Header: base.Header{}, Body: []byte(body)}
+		s.OnResponse(c, res)
+		if string(res.Body) != body {
+			t.Fatalf("%s: body changed on a failed rewrite", mode)
+		}
+	}
+	if got := rec.Counters("cam-00").ByKind["sdp_lie"].Applied; got != 0 {
+		t.Fatalf("sdp_lie tally = %d after only failed rewrites, want 0", got)
+	}
+}
+
+func TestSDPLieTalliedOnDelivery(t *testing.T) {
+	s, rec := startFaultServer(t, nil)
+	c := new(gortsplib.ServerConn)
+	s.noteLie(c, "cam-00", fault.ControlDecision{Request: 1, Lie: &fault.LieDecision{Mode: "codec"}})
+	if got := rec.Counters("cam-00").ByKind["sdp_lie"].Applied; got != 0 {
+		t.Fatalf("tallied at decision time: %d", got)
+	}
+	res := &base.Response{StatusCode: base.StatusOK, Body: []byte("a=rtpmap:96 H264/90000\r\n")}
+	s.OnResponse(c, res)
+	if got := rec.Counters("cam-00").ByKind["sdp_lie"].Applied; got != 1 {
+		t.Fatalf("tally after delivery = %d, want 1", got)
+	}
+}
