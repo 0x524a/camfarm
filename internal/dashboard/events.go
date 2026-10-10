@@ -38,7 +38,7 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 	h.Set("Cache-Control", "no-store")
 	h.Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, ": connected\n\n")
+	_, _ = fmt.Fprint(w, ": connected\n\n")
 	fl.Flush()
 
 	for {
@@ -53,7 +53,7 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, b)
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, b)
 			fl.Flush()
 		}
 	}

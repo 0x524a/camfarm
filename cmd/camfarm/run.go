@@ -53,7 +53,7 @@ func usageErr(format string, a ...any) error {
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("camfarm", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.Usage = func() { fmt.Fprint(stderr, usage); fs.PrintDefaults() }
+	fs.Usage = func() { _, _ = fmt.Fprint(stderr, usage); fs.PrintDefaults() }
 	specPath := fs.String("spec", "", "path to a JSON fleet spec")
 	seedFlag := fs.Uint64("seed", 0, "root seed (drawn at random and printed when omitted)")
 	cameras := fs.Int("cameras", 1, "number of cameras cam-1..N on the bundled fixture (cannot be combined with --spec)")
@@ -134,10 +134,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	defer fleet.Close()
 
-	fmt.Fprintln(stderr, fleet.ReplayLine())
+	_, _ = fmt.Fprintln(stderr, fleet.ReplayLine())
 	if host, _, err := net.SplitHostPort(ln.Addr().String()); err == nil {
 		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
-			fmt.Fprintln(stderr, "warning: the dashboard is not bound to loopback and has no authentication")
+			_, _ = fmt.Fprintln(stderr, "warning: the dashboard is not bound to loopback and has no authentication")
 		}
 	}
 
@@ -153,7 +153,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	srv.RegisterOnShutdown(bcancel)
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
-	fmt.Fprintf(stdout, "dashboard: http://%s/\n", ln.Addr())
+	_, _ = fmt.Fprintf(stdout, "dashboard: http://%s/\n", ln.Addr())
 
 	select {
 	case <-ctx.Done():

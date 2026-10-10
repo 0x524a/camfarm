@@ -249,8 +249,21 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
-      - name: install Chromium
-        run: go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps chromium
+      # playwright-go downloads its driver from azureedge.net, which Microsoft
+      # retired (404). The driver is only node plus the playwright-core npm
+      # package, so assemble it from npm and point playwright-go at it. Keep
+      # the version equal to playwrightCliVersion in the pinned playwright-go.
+      - name: install Playwright driver and Chromium
+        env:
+          PLAYWRIGHT_VERSION: "1.60.0"
+        run: |
+          drv="$RUNNER_TEMP/playwright-driver"
+          mkdir -p "$drv/package"
+          ln -s "$(command -v node)" "$drv/node"
+          npm pack "playwright-core@$PLAYWRIGHT_VERSION" --pack-destination "$RUNNER_TEMP"
+          tar -xzf "$RUNNER_TEMP/playwright-core-$PLAYWRIGHT_VERSION.tgz" -C "$drv/package" --strip-components=1
+          echo "PLAYWRIGHT_DRIVER_PATH=$drv" >> "$GITHUB_ENV"
+          node "$drv/package/cli.js" install --with-deps chromium
 
       - name: e2e tests
         run: go test -tags e2e -count=1 ./internal/dashboard/...

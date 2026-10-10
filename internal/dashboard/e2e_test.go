@@ -8,6 +8,9 @@
 //
 //	go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps chromium
 //
+// (That command downloads the driver from a retired CDN and currently fails;
+// the e2e CI job assembles the driver from npm instead, see ci.yml.)
+//
 // CAMFARM_E2E_CHROMIUM may name a Chromium/Chrome executable to launch instead
 // of the one Playwright downloaded.
 package dashboard
