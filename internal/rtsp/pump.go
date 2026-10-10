@@ -19,15 +19,12 @@ import (
 	"github.com/0x524a/camfarm/internal/seed"
 )
 
-// detailDecidedNotApplied is recorded against a fault that was decided but whose
-// effect this version does not implement. It must read as deliberate, because a
-// camera that is lying on purpose and a camera that is broken being
-// indistinguishable would make this tool useless.
-const detailDecidedNotApplied = "decided; effect not implemented in this version"
-
 const (
 	detailFrameDropApplied = "applied: access unit not encoded or sent"
 	detailSuppressed       = "decided; suppressed by protect_keyframes"
+	detailKeyframeWithheld = "keyframe withheld (not encoded)"
+	detailPacketLossFmt    = "withheld %d of %d packets"
+	detailPacketSparedFmt  = "withheld %d of %d packets; spared %d keyframe packets"
 )
 
 // faultSwap is a pending replacement of a pump's fault engine.
@@ -229,18 +226,23 @@ func (p *Pump) Step() error {
 	p.applyPendingFaults()
 	au := p.aus[p.idx]
 
-	// The fault seam. frame_drop is applied here; kinds whose effect does not
-	// exist yet are recorded as decided and change nothing.
+	// The fault seam. frame_drop and keyframe_starvation remove the frame before
+	// it is encoded, so they consume no packet_loss draws.
 	drop := false
 	for _, d := range p.faults.DecideFrame(p.frameCounter, au.RandomAccess) {
+		kind := string(d.Kind)
 		switch {
 		case d.Suppressed:
-			p.obs.Fault(p.id, d.FrameIndex, string(d.Kind), detailSuppressed)
+			p.obs.Fault(p.id, d.FrameIndex, kind, detailSuppressed)
+			p.obs.FaultTally(p.id, kind, 0, 1)
 		case d.Kind == fault.KindFrameDrop:
-			p.obs.Fault(p.id, d.FrameIndex, string(d.Kind), detailFrameDropApplied)
+			p.obs.Fault(p.id, d.FrameIndex, kind, detailFrameDropApplied)
+			p.obs.FaultTally(p.id, kind, 1, 0)
 			drop = true
-		default:
-			p.obs.Fault(p.id, d.FrameIndex, string(d.Kind), detailDecidedNotApplied)
+		case d.Kind == fault.KindKeyframeStarvation:
+			p.obs.Fault(p.id, d.FrameIndex, kind, detailKeyframeWithheld)
+			p.obs.FaultTally(p.id, kind, 1, 0)
+			drop = true
 		}
 	}
 
@@ -250,8 +252,33 @@ func (p *Pump) Step() error {
 			return fmt.Errorf("rtsp: encoding access unit %d of %q: %w", p.idx, p.id, err)
 		}
 
+		// packet_loss: the frame is encoded (so the packetizer assigns
+		// sequence numbers) and individual packets are then not written,
+		// which is what leaves a real gap.
+		skip := make([]bool, len(pkts))
+		withheld, spared := 0, 0
+		for _, d := range p.faults.DecidePackets(p.frameCounter, len(pkts), au.RandomAccess) {
+			if d.Suppressed {
+				spared++
+			} else if !skip[d.Index] {
+				skip[d.Index] = true
+				withheld++
+			}
+		}
+		if withheld > 0 || spared > 0 {
+			detail := fmt.Sprintf(detailPacketLossFmt, withheld, len(pkts))
+			if spared > 0 {
+				detail = fmt.Sprintf(detailPacketSparedFmt, withheld, len(pkts), spared)
+			}
+			p.obs.Fault(p.id, p.frameCounter, string(fault.KindPacketLoss), detail)
+			p.obs.FaultTally(p.id, string(fault.KindPacketLoss), uint64(withheld), uint64(spared))
+		}
+
 		ts := uint32(p.tsOffset + au.DTS)
-		for _, pkt := range pkts {
+		for i, pkt := range pkts {
+			if skip[i] {
+				continue
+			}
 			pkt.Timestamp = ts
 			if err := p.w.WritePacketRTP(p.medi, pkt); err != nil {
 				return fmt.Errorf("rtsp: writing RTP for %q: %w", p.id, err)
