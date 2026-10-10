@@ -297,7 +297,8 @@ img.snapshot { display: block; max-width: 100%; height: auto; margin-top: 6px; b
 
     var urls = el("td", {}, [
       urlLine("RTSP", c.rtspUrl, "cell-rtsp"),
-      urlLine("ONVIF", c.onvifEndpoint, "cell-onvif")
+      urlLine("ONVIF", c.onvifEndpoint, "cell-onvif"),
+      urlLine("UUID", c.onvifUuid, "cell-uuid")
     ]);
     if (c.username) {
       urls.appendChild(el("div", { class: "row" }, [el("span", { text: "Auth" }), el("code", { text: c.username + " / " + c.password })]));

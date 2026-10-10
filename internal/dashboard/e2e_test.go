@@ -171,10 +171,14 @@ func (s *session) row(id string) playwright.Locator {
 }
 
 func TestE2ECameraTableRendersURLsAndReplayLine(t *testing.T) {
-	url, _ := e2eServer(t)
+	url, fleet := e2eServer(t)
 	s := newSession(t)
 	s.open(t, url)
 	row := s.row("front-door")
+	cam, _ := fleet.Camera("front-door")
+	if err := expect().Locator(row.Locator(`[data-testid="cell-uuid"]`)).ToHaveText(cam.ONVIFUUID()); err != nil {
+		t.Fatalf("ONVIF UUID missing: %v", err)
+	}
 	if err := expect().Locator(row).ToBeVisible(); err != nil {
 		t.Fatalf("row not visible: %v", err)
 	}

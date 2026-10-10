@@ -788,3 +788,17 @@ func TestStatsFaultCountsReportPerKindEffects(t *testing.T) {
 		return cam.Stats().FaultCounts["frame_drop"].Applied >= 3
 	})
 }
+
+func TestCameraONVIFUUIDIsStableAndDistinct(t *testing.T) {
+	f := StartT(t, Spec{Seed: 7, Cameras: []CameraSpec{{ID: "a"}, {ID: "b"}}})
+	a, _ := f.Camera("a")
+	b, _ := f.Camera("b")
+	if a.ONVIFUUID() == "" || a.ONVIFUUID() == b.ONVIFUUID() {
+		t.Fatalf("UUIDs: a=%q b=%q", a.ONVIFUUID(), b.ONVIFUUID())
+	}
+	g := StartT(t, Spec{Seed: 7, Cameras: []CameraSpec{{ID: "a"}, {ID: "b"}}})
+	a2, _ := g.Camera("a")
+	if a.ONVIFUUID() != a2.ONVIFUUID() {
+		t.Fatal("same seed and spec gave a different UUID")
+	}
+}

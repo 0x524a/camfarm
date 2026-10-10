@@ -67,6 +67,7 @@ type cameraDTO struct {
 	ID            string              `json:"id"`
 	RTSPURL       string              `json:"rtspUrl"`
 	ONVIFEndpoint string              `json:"onvifEndpoint"`
+	ONVIFUUID     string              `json:"onvifUuid"`
 	Source        string              `json:"source"`
 	Codec         string              `json:"codec"`
 	Width         int                 `json:"width"`
@@ -102,7 +103,7 @@ func (s *server) dto(cam *camfarm.Camera, st camfarm.Status) cameraDTO {
 		faults = []camfarm.FaultSpec{}
 	}
 	return cameraDTO{
-		ID: st.ID, RTSPURL: st.RTSPURL, ONVIFEndpoint: cam.ONVIFEndpoint(),
+		ID: st.ID, RTSPURL: st.RTSPURL, ONVIFEndpoint: cam.ONVIFEndpoint(), ONVIFUUID: cam.ONVIFUUID(),
 		Source: st.Source, Codec: st.Codec, Width: st.Width, Height: st.Height, FPS: st.FPS,
 		Readers: st.Readers, Seed: strconv.FormatUint(stats.Seed, 10), Username: u, Password: p,
 		Faults: faults,

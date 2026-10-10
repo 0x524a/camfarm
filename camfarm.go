@@ -657,3 +657,8 @@ func (c *Camera) swapFaults(next []FaultSpec, applied func(int)) error {
 func (c *Camera) noteFaultsApplied(action string, f FaultSpec, frameIndex int) {
 	c.fleet.noteFault(action, c.id, f, frameIndex)
 }
+
+// ONVIFUUID is the camera's ONVIF endpoint UUID. It is deterministic from the
+// camera seed and is the same value the camera's ONVIF Device service returns
+// from GetEndpointReference.
+func (c *Camera) ONVIFUUID() string { return onvif.EndpointUUID(c.seed) }
