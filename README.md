@@ -65,10 +65,12 @@ Early:
   from the seed, because it depends on when the click arrived; `packet_loss` draws only for
   frames that were actually encoded, so frames removed by `frame_drop` or `keyframe_starvation`
   consume no `packet_loss` draws and combining them makes its sequence depend on theirs;
-  `FramesServed` still counts a frame whose packets were all withheld; a withheld packet is a
-  genuine loss over UDP but only a sequence gap, with no stall, over TCP-interleaved transport
-  (TCP delivers everything it is given); loss applies to every reader of the camera, not per
-  reader.
+  `FramesServed` still counts a frame whose packets were all withheld; a withheld packet is
+  only a sequence gap, with no stall, because RTSP is served over TCP-interleaved transport only
+  today (TCP delivers everything it is given); genuine loss arrives with UDP serving; loss applies to every reader of the camera, not per
+  reader; `keyframe_starvation` also withholds the in-band SPS/PPS that travel with the withheld
+  keyframe, and with `keepEvery` above about 15 (a 1s GOP at the fixture's 15fps) the 15s snapshot
+  deadline is exceeded, so dashboard and ONVIF snapshots fail.
 - **Works:** Playwright end-to-end tests of the dashboard, behind the `e2e` build tag and run in
   the `e2e` CI job. Locally, `go test -tags e2e ./internal/dashboard/` needs Chromium installed
   for Playwright.
@@ -78,7 +80,7 @@ Early:
 
 ## Fault catalogue
 
-Generated from the catalogue in `internal/fault`; a test fails if this table drifts.
+Kept in step with the catalogue in `internal/fault` by a test that fails if this table drifts.
 
 <!-- fault-table:start -->
 | Kind | Implemented | Models |

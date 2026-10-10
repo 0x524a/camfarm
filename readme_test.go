@@ -36,6 +36,11 @@ func TestREADMEFaultTableMatchesTheCatalogue(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(raw)
+	for _, m := range []string{faultTableStart, faultTableEnd} {
+		if n := strings.Count(s, m); n != 1 {
+			t.Fatalf("README.md contains %q %d times, want exactly once", m, n)
+		}
+	}
 	i, j := strings.Index(s, faultTableStart), strings.Index(s, faultTableEnd)
 	if i < 0 || j < i {
 		t.Fatalf("README.md lacks the %s ... %s markers", faultTableStart, faultTableEnd)

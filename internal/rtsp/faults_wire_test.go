@@ -27,9 +27,10 @@ func awaitCond(t *testing.T, what string, cond func() bool) {
 	}
 }
 
-func startFaultServer(t *testing.T, faults []fault.Spec) *Server {
+func startFaultServer(t *testing.T, faults []fault.Spec) (*Server, *obs.Recorder) {
 	t.Helper()
-	s, err := New(Config{Host: "127.0.0.1", Obs: obs.New(1000), Cameras: []CameraConfig{
+	rec := obs.New(1000)
+	s, err := New(Config{Host: "127.0.0.1", Obs: rec, Cameras: []CameraConfig{
 		{ID: "cam-00", Media: testMedia(t), Seed: seed.Seed(21), Faults: faults},
 	}})
 	if err != nil {
@@ -39,7 +40,7 @@ func startFaultServer(t *testing.T, faults []fault.Spec) *Server {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(s.Close)
-	return s
+	return s, rec
 }
 
 // A withheld packet is a real sequence gap on the wire. Over TCP-interleaved
@@ -47,7 +48,7 @@ func startFaultServer(t *testing.T, faults []fault.Spec) *Server {
 // everything it is given; over UDP it would be a genuine loss. This test only
 // claims what both transports share: gaps, in order, with nothing duplicated.
 func TestPacketLossGapsAreVisibleToARealClient(t *testing.T) {
-	s := startFaultServer(t, []fault.Spec{{Kind: fault.KindPacketLoss, Rate: 0.3}})
+	s, _ := startFaultServer(t, []fault.Spec{{Kind: fault.KindPacketLoss, Rate: 0.3}})
 	u, err := base.ParseURL(s.URL("cam-00"))
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +75,8 @@ func TestPacketLossGapsAreVisibleToARealClient(t *testing.T) {
 	if _, err := c.Play(nil); err != nil {
 		t.Fatalf("PLAY: %v", err)
 	}
-	awaitCond(t, "150 packets", func() bool { mu.Lock(); defer mu.Unlock(); return len(seqs) >= 150 })
+	// Seed and rate are fixed, so gaps are certain well within 40 packets.
+	awaitCond(t, "40 packets", func() bool { mu.Lock(); defer mu.Unlock(); return len(seqs) >= 40 })
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -148,15 +150,16 @@ func TestKeyframeStarvationLeavesALateJoinerWithoutAKeyframe(t *testing.T) {
 	// Control: without the fault a late joiner gets a keyframe within a few
 	// seconds. Without this the starved assertion could pass vacuously (a
 	// detector that never fires).
-	clean := startFaultServer(t, nil)
+	clean, _ := startFaultServer(t, nil)
 	if units, keys := countKeyframes(t, clean, 4*time.Second); units == 0 || keys == 0 {
 		t.Fatalf("control: %d units, %d keyframes; want both non-zero", units, keys)
 	}
 
 	// keepEvery 1000 means only the very first keyframe is ever delivered,
 	// and the camera has long since sent it by the time a client joins.
-	starved := startFaultServer(t, []fault.Spec{{Kind: fault.KindKeyframeStarvation, KeepEvery: 1000}})
-	time.Sleep(500 * time.Millisecond) // let the first (delivered) keyframe pass before the client joins
+	starved, rec := startFaultServer(t, []fault.Spec{{Kind: fault.KindKeyframeStarvation, KeepEvery: 1000}})
+	// Let the first (delivered) keyframe pass before the client joins.
+	awaitCond(t, "the first frame to be served", func() bool { return rec.Counters("cam-00").FramesServed >= 1 })
 	units, keys := countKeyframes(t, starved, 4*time.Second)
 	if units == 0 {
 		t.Fatal("starved camera delivered no access units at all; P frames should still flow")

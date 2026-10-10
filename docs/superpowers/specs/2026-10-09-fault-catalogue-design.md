@@ -266,6 +266,10 @@ Each camera row's fault controls render from `GET /api/v1/faults`:
 - If the catalogue contains a kind or parameter type the page cannot render, the page skips it and
   shows a notice; the schema is not versioned.
 
+**Implementation note (slice A).** `Clear` removes every fault on the camera. Per-kind clear
+(`ClearKind`, `DELETE /faults/{kind}`) is deferred to a follow-up; the per-kind "Clear" wording above
+describes the intended end state, not what slice A ships.
+
 ## 6. Testing
 
 Same standard as `frame_drop`: real wire, `-race`, fixed seeds.

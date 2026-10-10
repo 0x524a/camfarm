@@ -551,11 +551,29 @@ func TestPacketLossLeavesSequenceGapsAndHonestTimestamps(t *testing.T) {
 		total += c
 	}
 
+	// Fault-free run of the same fixture and seed: the reference timestamps.
+	cleanP, cleanW := newTestPump(t, seed.Seed(0x1055), nil, obs.New(1000))
+	for i := 0; i < steps; i++ {
+		if err := cleanP.Step(); err != nil {
+			t.Fatalf("clean Step: %v", err)
+		}
+	}
+	cleanTS := map[uint16]uint32{}
+	for _, pkt := range cleanW.pkts {
+		cleanTS[pkt.SequenceNumber] = pkt.Timestamp
+	}
+
 	rec := obs.New(1000)
 	p, w := newTestPump(t, seed.Seed(0x1055), []fault.Spec{{Kind: fault.KindPacketLoss, Rate: 0.3}}, rec)
 	for i := 0; i < steps; i++ {
 		if err := p.Step(); err != nil {
 			t.Fatalf("Step: %v", err)
+		}
+	}
+	for i, pkt := range w.pkts {
+		want, ok := cleanTS[pkt.SequenceNumber]
+		if !ok || pkt.Timestamp != want {
+			t.Fatalf("packet %d (seq %d): timestamp %d, fault-free run has %d (present=%v)", i, pkt.SequenceNumber, pkt.Timestamp, want, ok)
 		}
 	}
 	tally := rec.Counters("cam").ByKind["packet_loss"]

@@ -116,6 +116,7 @@ func TestConcurrentUse(t *testing.T) {
 			for j := 0; j < 100; j++ {
 				r.Frame("a")
 				r.Fault("a", j, "frame_drop", "")
+				r.FaultTally("a", "packet_loss", 2, 1)
 				_ = r.Counters("a")
 				_ = r.Events()
 			}
