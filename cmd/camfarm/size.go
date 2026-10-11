@@ -23,7 +23,7 @@ func parseSize(s string) (int64, error) {
 	}
 	n, err := strconv.ParseFloat(num, 64)
 	if err != nil {
-		return 0, fmt.Errorf("%q is not a size", s)
+		return 0, fmt.Errorf("not a size")
 	}
 	mult, ok := sizeUnits[unit]
 	if !ok {
@@ -31,7 +31,7 @@ func parseSize(s string) (int64, error) {
 	}
 	v := n * float64(mult)
 	if v < 1 || v >= math.MaxInt64 {
-		return 0, fmt.Errorf("%q must be at least 1 byte and fit in 63 bits", s)
+		return 0, fmt.Errorf("must be at least 1 byte and fit in 63 bits")
 	}
 	return int64(v), nil
 }

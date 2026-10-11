@@ -1,6 +1,29 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"context"
+	"strings"
+	"testing"
+)
+
+// The caller quotes the input in its own message; parseSize must not repeat it.
+func TestParseSizeErrorsDoNotRepeatTheInput(t *testing.T) {
+	for _, in := range []string{"lots", "99999999999GiB", "0"} {
+		_, err := parseSize(in)
+		if err == nil {
+			t.Fatalf("parseSize(%q) succeeded", in)
+		}
+		if strings.Contains(err.Error(), in) {
+			t.Errorf("parseSize(%q) error %q repeats the input", in, err)
+		}
+	}
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"--max-upload", "lots", "--http-addr", "127.0.0.1:0"}, &out, &errb)
+	if err == nil || strings.Count(err.Error()+errb.String(), `"lots"`) != 1 {
+		t.Errorf("run error %v (stderr %q), want the input quoted exactly once", err, errb.String())
+	}
+}
 
 func TestParseSize(t *testing.T) {
 	ok := map[string]int64{
