@@ -430,6 +430,15 @@ func (f *Fleet) AddCamera(spec CameraSpec) (*Camera, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Any failure below must not leave the parse cached with no camera holding
+	// it. evictUnusedSource keeps it when another camera still uses it. The
+	// deferred call runs before the mutex is released.
+	added := false
+	defer func() {
+		if !added {
+			f.evictUnusedSource(m)
+		}
+	}()
 	if err := checkAdvertised(cs, m); err != nil {
 		return nil, err
 	}
@@ -470,6 +479,7 @@ func (f *Fleet) AddCamera(spec CameraSpec) (*Camera, error) {
 	}
 	f.cameras[cs.ID] = cam
 	f.order = append(f.order, cs.ID)
+	added = true
 
 	f.publish(Event{Type: EventCameraAdded, Camera: cs.ID, FrameIndex: -1})
 	f.log.Info("camera added", "camera", cs.ID, "seed", fmt.Sprintf("%#x", camSeed))
