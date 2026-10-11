@@ -424,7 +424,7 @@ func TestLibraryErrorsNeverEchoUnrelatedPaths(t *testing.T) {
 	ts, _, _ := libServer(t, library.Options{AllowUIPaths: true})
 	resp := do(t, "POST", ts.URL+"/api/v1/library/roots", `{"path":"/etc/shadow"}`)
 	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 400 || strings.Contains(string(b), "root:") {
-		t.Errorf("status %d body %s", resp.StatusCode, b)
+	if resp.StatusCode != 400 || strings.Contains(string(b), "/etc/shadow") {
+		t.Errorf("status %d body %s, want 400 without the typed path echoed", resp.StatusCode, b)
 	}
 }
