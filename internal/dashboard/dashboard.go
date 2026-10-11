@@ -18,6 +18,7 @@ import (
 
 	"github.com/0x524a/camfarm"
 	"github.com/0x524a/camfarm/internal/fault"
+	"github.com/0x524a/camfarm/internal/library"
 )
 
 // Options configures the dashboard.
@@ -28,6 +29,8 @@ type Options struct {
 	MaxConcurrentSnapshots int
 	// capture is the capture seam; nil means Camera.Screenshot. Tests only.
 	capture func(context.Context, *camfarm.Camera) (image.Image, error)
+	// Library, when non-nil, enables the media library endpoints.
+	Library *library.Library
 }
 
 //go:embed web
@@ -38,11 +41,12 @@ const maxBody = 1 << 20
 type server struct {
 	fleet *camfarm.Fleet
 	snap  *snapshotter
+	lib   *library.Library
 }
 
 // Handler returns the dashboard for a fleet.
 func Handler(f *camfarm.Fleet, opt Options) http.Handler {
-	s := &server{fleet: f, snap: newSnapshotter(opt)}
+	s := &server{fleet: f, snap: newSnapshotter(opt), lib: opt.Library}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/fleet", s.getFleet)
 	mux.HandleFunc("GET /api/v1/cameras", s.listCameras)
@@ -54,6 +58,11 @@ func Handler(f *camfarm.Fleet, opt Options) http.Handler {
 	mux.HandleFunc("DELETE /api/v1/cameras/{id}/faults", s.clearFaults)
 	mux.HandleFunc("GET /api/v1/faults", s.getFaultCatalogue)
 	mux.HandleFunc("GET /api/v1/events", s.events)
+	mux.HandleFunc("GET /api/v1/library", s.getLibrary)
+	mux.HandleFunc("POST /api/v1/library/scan", s.scanLibrary)
+	mux.HandleFunc("POST /api/v1/library/upload", s.uploadFile)
+	mux.HandleFunc("DELETE /api/v1/library/files/{id}", s.deleteFile)
+	mux.HandleFunc("POST /api/v1/library/roots", s.addRoot)
 
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {

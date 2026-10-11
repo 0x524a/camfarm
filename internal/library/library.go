@@ -187,6 +187,9 @@ func (l *Library) UploadEnabled() bool { _, ok := l.uploadRoot(); return ok }
 // MaxUpload is the largest accepted upload in bytes.
 func (l *Library) MaxUpload() int64 { return l.opt.MaxUpload }
 
+// AllowUIPaths reports whether AddRoot is enabled.
+func (l *Library) AllowUIPaths() bool { return l.opt.AllowUIPaths }
+
 // Scanning reports whether a scan is running.
 func (l *Library) Scanning() bool { return l.scanning.Load() > 0 }
 
