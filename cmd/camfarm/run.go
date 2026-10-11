@@ -25,12 +25,14 @@ import (
 const usage = `CamFarm runs a simulated RTSP/ONVIF camera fleet with a web dashboard.
 
 SECURITY: the dashboard listens on loopback by default and has no
-authentication, no Host-header check and no CSRF protection. Its API can start
-servers, and with file sources make this process read local paths. The
+authentication and no Host-header check, and only the media library's
+mutating endpoints refuse cross-origin browser requests. Its API can start
+servers, and with file sources make this process read local paths (any path
+this process can read, validated or not). The
 dashboard also displays cameras' Digest credentials. Do not expose it to a
-network you do not trust. --media-dir makes every video file under that
-directory listable and servable, and uploads (capped by --max-upload) write to the
-first writable one;
+network you do not trust. --media-dir makes the video files in that directory
+(up to three levels deep) listable and servable, and uploads (capped by
+--max-upload) write to the uploads/ subdirectory of the first writable one;
 --allow-ui-paths lets anyone who can reach the dashboard point it at any
 readable directory.
 
@@ -80,7 +82,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	discoveryIface := fs.String("discovery-interface", "", "interface (name or IP) that joins the multicast group; only with multicast discovery")
 	var mediaDirs stringList
 	fs.Var(&mediaDirs, "media-dir", "directory of video files for the media library; repeatable.\n"+
-		"the first writable one receives dashboard uploads. Files are validated once, at startup, on rescan and on upload")
+		"video files up to three levels deep are listed (dot-files and symlinks are skipped); the first writable\n"+
+		"directory receives dashboard uploads in its uploads/ subdirectory, the only place the API deletes from.\n"+
+		"files are validated once per change: at startup, on rescan, on upload, and again when a camera is\n"+
+		"created from the file if it changed. a typed source.path is not validated")
 	allowUIPaths := fs.Bool("allow-ui-paths", false, "let the dashboard add more media directories by typed path (any directory this process can read)")
 	maxUpload := fs.String("max-upload", "2GiB", "largest accepted dashboard upload, e.g. 500MB or 2GiB")
 	if err := fs.Parse(args); err != nil {

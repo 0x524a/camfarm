@@ -22,10 +22,14 @@ Success:
 
 - A file uploaded through the dashboard, or dropped in a configured directory, appears in the
   library with a status: `valid`, `warning` or `invalid`, and a list of issues in plain language.
-- Validation happens once per file: on rescan or on upload. It never runs continuously.
-- An `invalid` file cannot become a camera. A `warning` file can, and the warning stays visible.
-- Nothing in the dashboard lets an unauthenticated caller read or list arbitrary parts of the
-  filesystem unless the operator started the binary with `--allow-ui-paths`.
+- Validation happens once per change to a file: on startup, on rescan, on upload, and again when a
+  camera is created from the file if it changed. It never runs continuously.
+- An `invalid` file cannot become a camera through `libraryId`. A `warning` file can, and the
+  warning stays visible. A typed `source.path` is not validated.
+- The library endpoints do not list or read arbitrary parts of the filesystem unless the operator
+  started the binary with `--allow-ui-paths`. This does not cover the pre-existing typed
+  `source.path` on `POST /api/v1/cameras`, which stays ungated and can read any file this process
+  can read; the library does not change that.
 
 Constraints inherited from `CLAUDE.md`: `CGO_ENABLED=0` keeps building; determinism is the
 product; real sockets and real files in tests; no coverage figure stated that CI did not produce;
