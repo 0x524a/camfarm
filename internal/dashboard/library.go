@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,6 +50,36 @@ type libraryDTO struct {
 	MaxUpload     int64              `json:"maxUpload"`
 	Scanning      bool               `json:"scanning"`
 	Files         []fileDTO          `json:"files"`
+}
+
+// sameOrigin refuses a request a browser sent on behalf of another origin.
+// multipart/form-data is a CORS-safelisted content type, so a foreign page can
+// POST an upload without a preflight; the JSON endpoints get a preflight from
+// their content type, but every mutating library endpoint is guarded the same
+// way. It runs before the handler reads any body. A request with neither
+// Sec-Fetch-Site nor Origin (curl, a Go client) is not from a browser page and
+// passes.
+func sameOrigin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		originOK := true
+		if o := r.Header.Get("Origin"); o != "" {
+			u, err := url.Parse(o)
+			originOK = err == nil && u.Host != "" && u.Host == r.Host
+		}
+		switch r.Header.Get("Sec-Fetch-Site") {
+		case "cross-site":
+			originOK = false
+		case "same-site":
+			// Another origin on the same registrable domain: only acceptable if
+			// the Origin header proves it is this one.
+			originOK = originOK && r.Header.Get("Origin") != ""
+		}
+		if !originOK {
+			writeError(w, http.StatusForbidden, "cross-origin request refused")
+			return
+		}
+		next(w, r)
+	}
 }
 
 // needLibrary replies 404 and returns false when the library is not enabled.

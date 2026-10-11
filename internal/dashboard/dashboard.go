@@ -68,10 +68,10 @@ func Handler(f *camfarm.Fleet, opt Options) http.Handler {
 	mux.HandleFunc("GET /api/v1/faults", s.getFaultCatalogue)
 	mux.HandleFunc("GET /api/v1/events", s.events)
 	mux.HandleFunc("GET /api/v1/library", s.getLibrary)
-	mux.HandleFunc("POST /api/v1/library/scan", s.scanLibrary)
-	mux.HandleFunc("POST /api/v1/library/upload", s.uploadFile)
-	mux.HandleFunc("DELETE /api/v1/library/files/{id}", s.deleteFile)
-	mux.HandleFunc("POST /api/v1/library/roots", s.addRoot)
+	mux.HandleFunc("POST /api/v1/library/scan", sameOrigin(s.scanLibrary))
+	mux.HandleFunc("POST /api/v1/library/upload", sameOrigin(s.uploadFile))
+	mux.HandleFunc("DELETE /api/v1/library/files/{id}", sameOrigin(s.deleteFile))
+	mux.HandleFunc("POST /api/v1/library/roots", sameOrigin(s.addRoot))
 
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
