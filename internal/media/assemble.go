@@ -18,6 +18,9 @@ type rawSample struct {
 	SyncKnown bool
 }
 
+// ErrNoAccessUnits is returned when a source parses but holds no frames.
+var ErrNoAccessUnits = errors.New("media: source contains no access units")
+
 // assemble validates parsed samples and finalizes them into immutable Media.
 //
 // Every container converges here, so validation, timestamp rebasing, and the
@@ -30,7 +33,7 @@ func assemble(ad codecAdapter, ps paramSets, samples []rawSample) (*Media, error
 	// adapter seam: a source with nothing in it should say so, rather than
 	// blaming a missing SPS it never had a chance to carry.
 	if len(samples) == 0 {
-		return nil, errors.New("media: source contains no access units")
+		return nil, ErrNoAccessUnits
 	}
 	if err := ad.Validate(ps); err != nil {
 		return nil, err
