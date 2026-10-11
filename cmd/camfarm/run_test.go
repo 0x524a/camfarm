@@ -221,7 +221,11 @@ func TestRunRejectsBadInput(t *testing.T) {
 		{"negative port", []string{"--onvif-port", "-1", "--http-addr", addr}, "out of range"},
 	} {
 		var out, errb bytes.Buffer
-		err := run(context.Background(), tc.args, &out, &errb)
+		// A row that wrongly succeeds starts serving; the timeout makes run return
+		// nil so the row fails fast instead of blocking until the test timeout.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := run(ctx, tc.args, &out, &errb)
+		cancel()
 		if err == nil {
 			t.Errorf("%s: run succeeded, want an error", tc.name)
 			continue

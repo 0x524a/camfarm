@@ -12,7 +12,7 @@ func TestParseSize(t *testing.T) {
 			t.Errorf("parseSize(%q) = %d, %v; want %d", in, got, err, want)
 		}
 	}
-	for _, in := range []string{"", "0", "-1", "abc", "2XB", "1e3", "1.2.3", "GiB", "99999999999GiB"} {
+	for _, in := range []string{"", "0", "-1", "abc", "2XB", "1e3", "1.2.3", "GiB", "99999999999GiB", "NaN", "Inf", "+5", "0x10", "1_000"} {
 		if got, err := parseSize(in); err == nil {
 			t.Errorf("parseSize(%q) = %d, want an error", in, got)
 		}

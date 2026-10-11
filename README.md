@@ -214,15 +214,17 @@ A Docker volume or bind mount is just a directory, so inside a container point
 `--media-dir` at the mount path.
 
 - Files with a video extension (`.ts .mp4 .m4v .mov .mkv .avi .h264 .h265 .mpg`)
-  are listed, up to three directories deep (`root/a/b/file.mp4` is listed,
-  `root/a/b/c/file.mp4` is not). Symlinks and dot-files are skipped.
+  are listed when they sit up to three levels below the media directory
+  (`root/a/b/file.mp4` is listed, `root/a/b/c/file.mp4` is not). Symlinks and dot-files are skipped.
   The container is judged from content, so a `.mkv` is reported as an
   unsupported container rather than ignored. Only MPEG-TS and MP4/MOV carrying
   H.264 or H.265 can be served.
-- Dashboard uploads go to the first writable `--media-dir`, capped by
-  `--max-upload` (default 2GiB). An upload that fails validation is kept so its
+- Uploads through the dashboard API (`POST /api/v1/library/upload`; the dashboard
+  page has no library controls yet) go to the first writable `--media-dir`,
+  capped by `--max-upload` (default 2GiB). An upload that fails validation is kept so its
   report stays visible; delete it with `DELETE /api/v1/library/files/{id}`.
-- `--allow-ui-paths` lets the dashboard add directories by typed path. It is off
+- `--allow-ui-paths` lets the dashboard API add directories by typed path
+  (`POST /api/v1/library/roots`). It is off
   by default because the dashboard has no authentication and the option lets
   anyone who can reach it point the process at any directory it can read.
 - A camera takes a library file with `{"id": "cam", "libraryId": "<id from GET
