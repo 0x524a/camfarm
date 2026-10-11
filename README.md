@@ -220,9 +220,12 @@ A Docker volume or bind mount is just a directory, so inside a container point
   unsupported container rather than ignored. Only MPEG-TS and MP4/MOV carrying
   H.264 or H.265 can be served.
 - Uploads through the dashboard API (`POST /api/v1/library/upload`; the dashboard
-  page has no library controls yet) go to the first writable `--media-dir`,
-  capped by `--max-upload` (default 2GiB). An upload that fails validation is kept so its
-  report stays visible; delete it with `DELETE /api/v1/library/files/{id}`.
+  page has no library controls yet) go to an `uploads/` subdirectory of the first
+  writable `--media-dir`, created on first use, capped by `--max-upload` (default 2GiB).
+  An upload that fails validation is kept so its report stays visible; delete it with
+  `DELETE /api/v1/library/files/{id}`. Only files inside `uploads/` can be deleted
+  (anything you place there by hand included); your own files elsewhere in the
+  directory are never removed by the API.
 - `--allow-ui-paths` lets the dashboard API add directories by typed path
   (`POST /api/v1/library/roots`). It is off
   by default because the dashboard has no authentication and the option lets

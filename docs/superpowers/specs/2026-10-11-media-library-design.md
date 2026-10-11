@@ -162,7 +162,10 @@ func (l *Library) Resolve(id string) (Entry, bool)
 
 ### Upload and delete
 
-- `Upload` streams to `<root>/.upload-*.part`, enforcing `--max-upload` (default 2 GiB; exceeding it
+- Uploads live in a dedicated `uploads/` subdirectory of the first writable root, created on first
+  use. A scanned entry for an upload is therefore named `uploads/<file>` (depth 2, inside the scan
+  depth limit).
+- `Upload` streams to `<root>/uploads/.upload-*.part`, enforcing `--max-upload` (default 2 GiB; exceeding it
   aborts and removes the part file with `ErrTooLarge`). It then validates the part file, places
   it and records the entry. Placement is a hard link (which fails rather than overwrite), falling
   back to reserving the name with an exclusive create and renaming over it on filesystems without
@@ -170,10 +173,12 @@ func (l *Library) Resolve(id string) (Entry, bool)
 - The name is reduced to its base, rejects empty names, `.`/`..`, control characters and path
   separators, and must carry a listed video extension. An existing file is never overwritten: a
   numeric suffix is added (`clip-1.mp4`).
-- `Delete` removes only a file in the upload root; any other id returns `ErrNotDeletable`. It
+- `Delete` removes only a file inside `uploads/` of the first writable root (anything in that
+  directory counts, including a file placed there by hand); every other id, including the
+  operator's own originals elsewhere in the same root, returns `ErrNotDeletable`. It
   refuses a file a running camera is serving (the dashboard checks the fleet and passes the set of
   in-use paths; see §3).
-- Part files left by a crash are removed at startup.
+- Part files left by a crash are removed at startup, from `uploads/` only.
 
 ## 3. Dashboard API (`internal/dashboard`)
 
@@ -184,7 +189,7 @@ All handlers are thin: parse, call the library, encode. JSON field names are low
 | `GET /api/v1/library` | `{roots: [{path, writable, ui}], uploadEnabled, allowUIPaths, files: [Entry…]}`. Each file also carries `inUseBy: [cameraId…]`. |
 | `POST /api/v1/library/scan` | Body `{force?: bool, root?: string}`. Scans one root or all. Returns the same shape as GET. |
 | `POST /api/v1/library/upload` | `multipart/form-data`, one `file` part. Returns the new entry (201), including an `invalid` one. 413 over `--max-upload`; 400 on a bad name; 403 when no root is writable. |
-| `DELETE /api/v1/library/files/{id}` | 204; 404 unknown; 409 when a camera uses it; 403 outside the upload root. |
+| `DELETE /api/v1/library/files/{id}` | 204; 404 unknown; 409 when a camera uses it; 403 for any file outside `uploads/`. |
 | `POST /api/v1/library/roots` | Body `{path}`. 403 unless `--allow-ui-paths`; 400 if not an existing directory. |
 
 `POST /api/v1/cameras` accepts a top-level `libraryId: "<id>"` alongside `source: {kind: "file"}`

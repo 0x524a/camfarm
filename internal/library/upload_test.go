@@ -36,20 +36,81 @@ func dirEntries(t *testing.T, dir string) []string {
 	return out
 }
 
+// uploadEntries lists the uploads/ subdirectory of root; missing is empty.
+func uploadEntries(t *testing.T, root string) []string {
+	t.Helper()
+	es, err := os.ReadDir(filepath.Join(root, "uploads"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range es {
+		out = append(out, e.Name())
+	}
+	return out
+}
+
 func TestUploadStoresValidatesAndListsTheFile(t *testing.T) {
 	l, root := upLib(t, 0)
 	e, err := l.Upload(context.Background(), "clip.ts", bytes.NewReader(fixture.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.Report.Status != media.StatusValid || e.Name != "clip.ts" || e.Path != filepath.Join(root, "clip.ts") {
+	if e.Report.Status != media.StatusValid || e.Name != "uploads/clip.ts" || e.Path != filepath.Join(root, "uploads", "clip.ts") {
 		t.Errorf("entry = %+v", e)
 	}
 	if got, ok := l.Resolve(e.ID); !ok || got.Path != e.Path {
 		t.Error("uploaded file is not in the library")
 	}
-	if names := dirEntries(t, root); len(names) != 1 || names[0] != "clip.ts" {
-		t.Errorf("directory = %v (a part file must not be left behind)", names)
+	if names := dirEntries(t, root); len(names) != 1 || names[0] != "uploads" {
+		t.Errorf("root = %v, want only the uploads directory", names)
+	}
+	if names := uploadEntries(t, root); len(names) != 1 || names[0] != "clip.ts" {
+		t.Errorf("uploads = %v (a part file must not be left behind)", names)
+	}
+	// A rescan must find the very same entry: same id, same name.
+	scanAll(t, l)
+	if got, ok := l.Resolve(e.ID); !ok || got.Name != "uploads/clip.ts" || len(l.List()) != 1 {
+		t.Errorf("after rescan: %+v, %d entries", got, len(l.List()))
+	}
+}
+
+func TestDeleteRefusesAScannedOriginalInTheWritableRoot(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "original.ts"), fixture.Bytes())
+	write(t, filepath.Join(dir, "sub", "deep.ts"), fixture.Bytes())
+	l := newLib(t, Options{Roots: []string{dir}})
+	scanAll(t, l)
+	if !l.UploadEnabled() || len(l.List()) != 2 {
+		t.Fatalf("setup: upload=%v entries=%v", l.UploadEnabled(), names(l))
+	}
+	for _, e := range l.List() {
+		if err := l.Delete(e.ID); !errors.Is(err, ErrNotDeletable) {
+			t.Errorf("Delete(%s) = %v, want ErrNotDeletable", e.Name, err)
+		}
+		if _, err := os.Stat(e.Path); err != nil {
+			t.Errorf("%s was removed: %v", e.Name, err)
+		}
+	}
+}
+
+func TestDeleteAllowsAFilePlacedByHandUnderUploads(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "uploads", "mine.ts"), fixture.Bytes())
+	l := newLib(t, Options{Roots: []string{dir}})
+	scanAll(t, l)
+	es := l.List()
+	if len(es) != 1 || es[0].Name != "uploads/mine.ts" {
+		t.Fatalf("entries = %v", names(l))
+	}
+	if err := l.Delete(es[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(es[0].Path); !os.IsNotExist(err) {
+		t.Errorf("file still on disk: %v", err)
 	}
 }
 
@@ -62,7 +123,7 @@ func TestUploadKeepsAnInvalidFileWithItsReason(t *testing.T) {
 	if e.Report.Status != media.StatusInvalid || e.Report.Issues[0].Code != "unsupported_container" {
 		t.Errorf("report = %+v", e.Report)
 	}
-	if _, err := os.Stat(filepath.Join(root, "junk.mp4")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "uploads", "junk.mp4")); err != nil {
 		t.Errorf("invalid upload was not kept: %v", err)
 	}
 }
@@ -75,7 +136,7 @@ func TestUploadNeverOverwrites(t *testing.T) {
 		}
 	}
 	want := []string{"clip-1.ts", "clip-2.ts", "clip.ts"}
-	if got := dirEntries(t, root); strings.Join(got, ",") != strings.Join(want, ",") {
+	if got := uploadEntries(t, root); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("directory = %v, want %v", got, want)
 	}
 }
@@ -93,7 +154,7 @@ func TestConcurrentUploadsOfOneNameKeepEveryFile(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if got := dirEntries(t, root); len(got) != 6 {
+	if got := uploadEntries(t, root); len(got) != 6 {
 		t.Errorf("directory = %v, want 6 distinct files", got)
 	}
 	if len(l.List()) != 6 {
@@ -107,7 +168,7 @@ func TestUploadOverTheLimitLeavesNothingBehind(t *testing.T) {
 	if !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("err = %v, want ErrTooLarge", err)
 	}
-	if got := dirEntries(t, root); len(got) != 0 {
+	if got := uploadEntries(t, root); len(got) != 0 {
 		t.Errorf("directory = %v, want empty", got)
 	}
 	// Exactly at the limit is accepted.
@@ -123,7 +184,7 @@ func TestUploadReaderFailureLeavesNothingBehind(t *testing.T) {
 	if _, err := l.Upload(context.Background(), "x.ts", r); !errors.Is(err, boom) {
 		t.Fatalf("err = %v", err)
 	}
-	if got := dirEntries(t, root); len(got) != 0 {
+	if got := uploadEntries(t, root); len(got) != 0 {
 		t.Errorf("directory = %v, want empty", got)
 	}
 }
@@ -165,7 +226,7 @@ func TestUploadNames(t *testing.T) {
 				if !errors.Is(err, ErrBadName) {
 					t.Errorf("err = %v, want ErrBadName", err)
 				}
-				if got := dirEntries(t, root); len(got) != 0 {
+				if got := uploadEntries(t, root); len(got) != 0 {
 					t.Errorf("a rejected name left %v behind", got)
 				}
 				return
@@ -173,7 +234,7 @@ func TestUploadNames(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := dirEntries(t, root); len(got) != 1 || got[0] != c.want {
+			if got := uploadEntries(t, root); len(got) != 1 || got[0] != c.want {
 				t.Errorf("directory = %v, want [%s]", got, c.want)
 			}
 			if _, err := os.Stat(outside); err == nil {
@@ -195,10 +256,10 @@ func TestUploadReadOnlyLibrary(t *testing.T) {
 
 func TestNewRemovesLeftoverPartFiles(t *testing.T) {
 	dir := t.TempDir()
-	write(t, filepath.Join(dir, ".upload-123.part"), []byte("partial"))
-	write(t, filepath.Join(dir, "keep.ts"), fixture.Bytes())
+	write(t, filepath.Join(dir, "uploads", ".upload-123.part"), []byte("partial"))
+	write(t, filepath.Join(dir, "uploads", "keep.ts"), fixture.Bytes())
 	newLib(t, Options{Roots: []string{dir}})
-	if got := dirEntries(t, dir); len(got) != 1 || got[0] != "keep.ts" {
+	if got := uploadEntries(t, dir); len(got) != 1 || got[0] != "keep.ts" {
 		t.Errorf("directory = %v", got)
 	}
 }
@@ -218,7 +279,7 @@ func TestDelete(t *testing.T) {
 	if _, ok := l.Resolve(e.ID); ok {
 		t.Error("entry still listed")
 	}
-	if got := dirEntries(t, root); len(got) != 0 {
+	if got := uploadEntries(t, root); len(got) != 0 {
 		t.Errorf("directory = %v", got)
 	}
 	if err := l.Delete(e.ID); !errors.Is(err, ErrNotFound) {
@@ -259,14 +320,14 @@ func TestUploadScanAndListRaceFree(t *testing.T) {
 	}
 	wg.Wait()
 	scanAll(t, l)
-	if got, want := len(l.List()), len(dirEntries(t, root)); got != 4 || got != want {
+	if got, want := len(l.List()), len(uploadEntries(t, root)); got != 4 || got != want {
 		t.Errorf("listed %d files, %d on disk, want 4 each", got, want)
 	}
 }
 
 func TestDeleteCannotEscapeThroughASwappedParent(t *testing.T) {
 	up, victim := t.TempDir(), t.TempDir()
-	write(t, filepath.Join(up, "a", "x.ts"), fixture.Bytes())
+	write(t, filepath.Join(up, "uploads", "a", "x.ts"), fixture.Bytes())
 	write(t, filepath.Join(victim, "x.ts"), fixture.Bytes())
 	l := newLib(t, Options{Roots: []string{up}})
 	scanAll(t, l)
@@ -275,10 +336,10 @@ func TestDeleteCannotEscapeThroughASwappedParent(t *testing.T) {
 		t.Fatalf("entries = %v", names(l))
 	}
 	id := es[0].ID
-	if err := os.RemoveAll(filepath.Join(up, "a")); err != nil {
+	if err := os.RemoveAll(filepath.Join(up, "uploads", "a")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(victim, filepath.Join(up, "a")); err != nil {
+	if err := os.Symlink(victim, filepath.Join(up, "uploads", "a")); err != nil {
 		t.Fatal(err)
 	}
 	scanAll(t, l) // the entry must not survive being reached through a link
@@ -292,15 +353,15 @@ func TestDeleteCannotEscapeThroughASwappedParent(t *testing.T) {
 
 func TestDeleteThroughASwappedParentWithoutRescan(t *testing.T) {
 	up, victim := t.TempDir(), t.TempDir()
-	write(t, filepath.Join(up, "a", "x.ts"), fixture.Bytes())
+	write(t, filepath.Join(up, "uploads", "a", "x.ts"), fixture.Bytes())
 	write(t, filepath.Join(victim, "x.ts"), fixture.Bytes())
 	l := newLib(t, Options{Roots: []string{up}})
 	scanAll(t, l)
 	id := l.List()[0].ID
-	if err := os.RemoveAll(filepath.Join(up, "a")); err != nil {
+	if err := os.RemoveAll(filepath.Join(up, "uploads", "a")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(victim, filepath.Join(up, "a")); err != nil {
+	if err := os.Symlink(victim, filepath.Join(up, "uploads", "a")); err != nil {
 		t.Fatal(err)
 	}
 	_ = l.Delete(id)
@@ -320,15 +381,18 @@ func TestUploadNeverFollowsAnInRootSymlink(t *testing.T) {
 			l, root := upLib(t, 0)
 			outside := filepath.Join(t.TempDir(), "target.ts")
 			write(t, outside, []byte("precious"))
-			if err := os.Symlink(outside, filepath.Join(root, "clip.ts")); err != nil {
+			if err := os.MkdirAll(filepath.Join(root, "uploads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, filepath.Join(root, "uploads", "clip.ts")); err != nil {
 				t.Fatal(err)
 			}
 			e, err := l.Upload(context.Background(), "clip.ts", bytes.NewReader(fixture.Bytes()))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if e.Name != "clip-1.ts" {
-				t.Errorf("name = %q, want clip-1.ts", e.Name)
+			if e.Name != "uploads/clip-1.ts" {
+				t.Errorf("name = %q, want uploads/clip-1.ts", e.Name)
 			}
 			if b, _ := os.ReadFile(outside); string(b) != "precious" {
 				t.Errorf("the file behind the symlink was overwritten: %q", b)
@@ -349,7 +413,7 @@ func TestUploadFallsBackWhenHardLinksAreUnsupported(t *testing.T) {
 		}
 	}
 	want := []string{"clip-1.ts", "clip.ts"}
-	if got := dirEntries(t, root); strings.Join(got, ",") != strings.Join(want, ",") {
+	if got := uploadEntries(t, root); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("directory = %v, want %v", got, want)
 	}
 	for _, e := range l.List() {
@@ -366,7 +430,7 @@ func TestCancelledUploadPlacesNothing(t *testing.T) {
 	if _, err := l.Upload(ctx, "c.ts", bytes.NewReader(fixture.Bytes())); !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v", err)
 	}
-	if got := dirEntries(t, root); len(got) != 0 || len(l.List()) != 0 {
+	if got := uploadEntries(t, root); len(got) != 0 || len(l.List()) != 0 {
 		t.Errorf("directory = %v, entries = %v", got, names(l))
 	}
 }
@@ -379,7 +443,7 @@ func TestUploadValidatesThePartFileBeforePlacingIt(t *testing.T) {
 		if b := filepath.Base(path); !strings.HasPrefix(b, ".upload-") || !strings.HasSuffix(b, ".part") {
 			t.Errorf("analysed %q, want the part file", b)
 		}
-		if _, err := os.Lstat(filepath.Join(dir, "c.ts")); !os.IsNotExist(err) {
+		if _, err := os.Lstat(filepath.Join(dir, "uploads", "c.ts")); !os.IsNotExist(err) {
 			t.Errorf("the final name already exists during validation: %v", err)
 		}
 		return media.AnalyzeFile(path)

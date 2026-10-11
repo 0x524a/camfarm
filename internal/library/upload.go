@@ -16,6 +16,10 @@ import (
 
 const maxNameLen = 200
 
+// uploadsDirName is the subdirectory of the first writable media directory that
+// receives uploads and is the only place Delete reaches.
+const uploadsDirName = "uploads"
+
 // cleanName reduces an uploaded file name to a safe base name.
 func cleanName(name string) (string, error) {
 	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
@@ -95,12 +99,16 @@ func place(part, dir, name string) (string, error) {
 // The part file is validated before it is placed, so the final name never
 // exists while it is being checked.
 func (l *Library) Upload(ctx context.Context, name string, r io.Reader) (Entry, error) {
-	dir, ok := l.uploadRoot()
+	rootPath, ok := l.uploadRoot()
 	if !ok {
 		return Entry{}, ErrReadOnly
 	}
 	base, err := cleanName(name)
 	if err != nil {
+		return Entry{}, err
+	}
+	dir := filepath.Join(rootPath, uploadsDirName)
+	if err := ensureUploadsDir(dir); err != nil {
 		return Entry{}, err
 	}
 
@@ -144,19 +152,37 @@ func (l *Library) Upload(ctx context.Context, name string, r io.Reader) (Entry, 
 		_ = os.Remove(final)
 		return Entry{}, fmt.Errorf("library: placed upload %q is unusable: %w", base, err)
 	}
-	name = filepath.Base(final)
+	name = filepath.Join(uploadsDirName, filepath.Base(final))
 	e := Entry{
-		ID: idFor(dir, name), Root: dir, Path: final, Name: name,
+		ID: idFor(rootPath, name), Root: rootPath, Path: final, Name: name,
 		Size: st.Size(), Modified: st.ModTime(), Report: rep,
 	}
 	l.store(e)
 	return e, nil
 }
 
-// Delete removes a file from disk and from the library. Only files in the
-// upload root can be deleted. The caller refuses first if a camera uses it.
-// The removal goes through an os.Root, so a directory swapped for a symlink
-// since the scan cannot lead it outside the upload root.
+// ensureUploadsDir creates the uploads directory on first use. A symlink or a
+// plain file where it should be is refused rather than followed.
+func ensureUploadsDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("library: creating the upload directory: %w", err)
+	}
+	st, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("library: checking the upload directory: %w", err)
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("library: %q is not a directory", dir)
+	}
+	return nil
+}
+
+// Delete removes a file from disk and from the library. Only files inside the
+// uploads/ directory of the first writable media directory can be deleted, so
+// the operator's own originals are never touched; anything placed in uploads/
+// by hand counts as an upload. The caller refuses first if a camera uses it.
+// The removal goes through an os.Root on uploads/, so a directory swapped for a
+// symlink since the scan cannot lead it outside.
 func (l *Library) Delete(id string) error {
 	e, ok := l.Resolve(id)
 	if !ok {
@@ -166,11 +192,12 @@ func (l *Library) Delete(id string) error {
 	if !ok || e.Root != up {
 		return ErrNotDeletable
 	}
-	rel, err := filepath.Rel(up, e.Path)
+	updir := filepath.Join(up, uploadsDirName)
+	rel, err := filepath.Rel(updir, e.Path)
 	if err != nil || !filepath.IsLocal(rel) {
 		return ErrNotDeletable
 	}
-	root, err := os.OpenRoot(up)
+	root, err := os.OpenRoot(updir)
 	if err != nil {
 		return fmt.Errorf("library: deleting %q: %w", e.Name, err)
 	}

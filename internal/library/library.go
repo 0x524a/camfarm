@@ -111,7 +111,7 @@ func New(opt Options) (*Library, error) {
 		}
 	}
 	if up, ok := l.uploadRoot(); ok {
-		cleanPartFiles(up)
+		cleanPartFiles(filepath.Join(up, uploadsDirName))
 	}
 	return l, nil
 }

@@ -127,7 +127,7 @@ func TestUploadEndpoint(t *testing.T) {
 	}
 	var f fileDTO
 	_ = json.NewDecoder(resp.Body).Decode(&f)
-	if f.Name != "clip.ts" || f.Report.Status != "valid" {
+	if f.Name != "uploads/clip.ts" || f.Report.Status != "valid" {
 		t.Errorf("file = %+v", f)
 	}
 
@@ -229,6 +229,19 @@ func TestDeleteEndpoint(t *testing.T) {
 	}
 	if r := do(t, "DELETE", ts.URL+"/api/v1/library/files/"+f.ID, ""); r.StatusCode != 404 {
 		t.Errorf("second delete = %d, want 404", r.StatusCode)
+	}
+}
+
+// TestDeleteRefusesAScannedOriginalInTheWritableRoot: the writable root holds
+// the operator's own files; only uploads/ is deletable.
+func TestDeleteRefusesAScannedOriginalInTheWritableRoot(t *testing.T) {
+	ts, _, root := libServer(t, library.Options{})
+	id := stage(t, ts.URL, root, "original.ts", fixture.Bytes())
+	if r := do(t, "DELETE", ts.URL+"/api/v1/library/files/"+id, ""); r.StatusCode != 403 {
+		t.Errorf("delete of a scanned original = %d, want 403", r.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(root, "original.ts")); err != nil {
+		t.Errorf("the original was removed: %v", err)
 	}
 }
 
@@ -389,8 +402,8 @@ func TestInUseMatchesCameraPathsThatAreNotCanonical(t *testing.T) {
 		t.Skip("symlinks unavailable:", err)
 	}
 	for i, typed := range []string{
-		filepath.Join(root, ".", "sub", "..", "clip.ts"),
-		filepath.Join(link, "clip.ts"),
+		root + "/./sub/../uploads/clip.ts",
+		filepath.Join(link, "uploads", "clip.ts"),
 	} {
 		id := fmt.Sprintf("cam%d", i)
 		body := `{"id":"` + id + `","source":{"kind":"file","path":"` + typed + `"}}`

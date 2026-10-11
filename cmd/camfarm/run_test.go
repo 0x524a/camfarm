@@ -303,7 +303,7 @@ func TestRunAcceptsAnUploadIntoTheFirstMediaDir(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("upload = %d %s", resp.StatusCode, b)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "up.ts")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "uploads", "up.ts")); err != nil {
 		t.Errorf("uploaded file missing from the media dir: %v", err)
 	}
 }
