@@ -4,7 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,6 +17,23 @@ import (
 
 // multipartSlack is how much framing a multipart body may add beyond the file.
 const multipartSlack = 1 << 20
+
+// uploadIdleTimeout is how long an upload may go without delivering a byte
+// before it is cut off. It is a variable so tests can shorten it.
+var uploadIdleTimeout = 30 * time.Second
+
+// idleReader pushes the connection's read deadline out before every read, so a
+// slow upload that keeps making progress survives the server's ReadTimeout while
+// a stalled one is cut off after uploadIdleTimeout.
+type idleReader struct {
+	io.ReadCloser
+	rc *http.ResponseController
+}
+
+func (r idleReader) Read(p []byte) (int, error) {
+	_ = r.rc.SetReadDeadline(time.Now().Add(uploadIdleTimeout))
+	return r.ReadCloser.Read(p)
+}
 
 type fileDTO struct {
 	library.Entry
@@ -42,10 +63,24 @@ func (s *server) inUse() map[string][]string {
 	out := map[string][]string{}
 	for _, st := range s.fleet.List() {
 		if p, ok := strings.CutPrefix(st.Source, "file:"); ok {
+			p = canonicalPath(p)
 			out[p] = append(out[p], st.ID)
 		}
 	}
 	return out
+}
+
+// canonicalPath makes a camera's typed path comparable with a library entry's
+// path, which is absolute and symlink-resolved.
+func canonicalPath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return abs
 }
 
 func (s *server) fileView(e library.Entry, inUse map[string][]string) fileDTO {
@@ -63,8 +98,12 @@ func (s *server) libraryView() libraryDTO {
 	for _, e := range entries {
 		files = append(files, s.fileView(e, inUse))
 	}
+	roots := s.lib.Roots()
+	if roots == nil {
+		roots = []library.RootInfo{}
+	}
 	return libraryDTO{
-		Roots: s.lib.Roots(), UploadEnabled: s.lib.UploadEnabled(), AllowUIPaths: s.lib.AllowUIPaths(),
+		Roots: roots, UploadEnabled: s.lib.UploadEnabled(), AllowUIPaths: s.lib.AllowUIPaths(),
 		MaxUpload: s.lib.MaxUpload(), Scanning: s.lib.Scanning(), Files: files,
 	}
 }
@@ -72,15 +111,20 @@ func (s *server) libraryView() libraryDTO {
 // writeLibraryErr maps a library error to an HTTP status.
 func writeLibraryErr(w http.ResponseWriter, err error) {
 	var tooBig *http.MaxBytesError
+	var netErr net.Error
 	switch {
 	case errors.As(err, &tooBig), errors.Is(err, library.ErrTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+	case errors.Is(err, os.ErrDeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+		writeError(w, http.StatusRequestTimeout, "the upload stalled")
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		writeError(w, http.StatusBadRequest, "the upload body ended early")
 	case errors.Is(err, library.ErrBadName), errors.Is(err, library.ErrNotDirectory):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, library.ErrReadOnly), errors.Is(err, library.ErrUIPathsDisabled), errors.Is(err, library.ErrNotDeletable):
 		writeError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, library.ErrNotFound):
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "unknown library file")
 	default:
 		writeErr(w, err)
 	}
@@ -109,6 +153,10 @@ func (s *server) scanLibrary(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, err)
 			return
 		}
+		if errors.Is(err, library.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "unknown media directory")
+			return
+		}
 		writeLibraryErr(w, err)
 		return
 	}
@@ -120,9 +168,9 @@ func (s *server) uploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The binary's ReadTimeout bounds slow request bodies; a large upload over a
-	// slow link must not be cut off by it. The size cap below still bounds it.
-	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
-	r.Body = http.MaxBytesReader(w, r.Body, s.lib.MaxUpload()+multipartSlack)
+	// slow link must not be cut off by it. The idle reader replaces it with a
+	// per-read deadline, and the size cap bounds the total bytes.
+	r.Body = idleReader{http.MaxBytesReader(w, r.Body, s.lib.MaxUpload()+multipartSlack), http.NewResponseController(w)}
 
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -191,12 +239,25 @@ func (s *server) addRoot(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if !s.lib.AllowUIPaths() {
+		writeLibraryErr(w, library.ErrUIPathsDisabled)
+		return
+	}
+	if !filepath.IsAbs(req.Path) {
+		writeError(w, http.StatusBadRequest, "path must be an absolute directory path")
+		return
+	}
 	if err := s.lib.AddRoot(req.Path); err != nil {
-		if errors.Is(err, library.ErrUIPathsDisabled) {
+		switch {
+		case errors.Is(err, library.ErrUIPathsDisabled):
 			writeLibraryErr(w, err)
-			return
+		case errors.Is(err, fs.ErrNotExist), errors.Is(err, fs.ErrPermission):
+			writeError(w, http.StatusBadRequest, "that path does not exist or is not readable")
+		case errors.Is(err, library.ErrNotDirectory):
+			writeError(w, http.StatusBadRequest, "that path is not a directory")
+		default:
+			writeError(w, http.StatusBadRequest, "that path cannot be used as a media directory")
 		}
-		writeError(w, http.StatusBadRequest, "cannot use that directory: "+err.Error())
 		return
 	}
 	if err := s.lib.Scan(r.Context(), "", false); err != nil {

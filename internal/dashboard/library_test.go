@@ -1,10 +1,13 @@
 package dashboard
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -69,6 +72,7 @@ func TestLibraryRoutesAre404WhenDisabled(t *testing.T) {
 	for _, c := range [][2]string{
 		{"GET", "/api/v1/library"}, {"POST", "/api/v1/library/scan"},
 		{"POST", "/api/v1/library/roots"}, {"DELETE", "/api/v1/library/files/x"},
+		{"POST", "/api/v1/library/upload"},
 	} {
 		resp := do(t, c[0], ts.URL+c[1], "")
 		if resp.StatusCode != 404 {
@@ -265,6 +269,141 @@ func TestAddRootEndpoint(t *testing.T) {
 	}
 	if r := do(t, "POST", on.URL+"/api/v1/library/roots", `{"path":"`+filepath.Join(extra, "e.ts")+`"}`); r.StatusCode != 400 {
 		t.Errorf("a file = %d, want 400", r.StatusCode)
+	}
+}
+
+func TestAddRootRejectsEmptyAndRelativePaths(t *testing.T) {
+	ts, _, _ := libServer(t, library.Options{AllowUIPaths: true})
+	for _, body := range []string{`{}`, `{"path":""}`, `{"path":"relative/dir"}`, `{"path":"."}`} {
+		if r := do(t, "POST", ts.URL+"/api/v1/library/roots", body); r.StatusCode != 400 {
+			t.Errorf("%s = %d, want 400", body, r.StatusCode)
+		}
+	}
+	if v := decodeLibrary(t, do(t, "GET", ts.URL+"/api/v1/library", "")); len(v.Roots) != 1 {
+		t.Errorf("roots after rejected adds = %+v, want the original one", v.Roots)
+	}
+}
+
+func TestEmptyLibraryEncodesRootsAsAnArray(t *testing.T) {
+	lib, err := library.New(library.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts, _ := newServer(t, Options{Library: lib})
+	b, _ := io.ReadAll(do(t, "GET", ts.URL+"/api/v1/library", "").Body)
+	if !strings.Contains(string(b), `"roots":[]`) || !strings.Contains(string(b), `"files":[]`) {
+		t.Errorf("body = %s", b)
+	}
+}
+
+func TestLibraryErrorsDoNotEchoTypedPaths(t *testing.T) {
+	ts, _, _ := libServer(t, library.Options{AllowUIPaths: true})
+	missing := filepath.Join(t.TempDir(), "typed-missing-dir")
+	file := filepath.Join(t.TempDir(), "typed-file.ts")
+	_ = os.WriteFile(file, fixture.Bytes(), 0o644)
+	for _, c := range []struct {
+		url, body string
+		want      int
+	}{
+		{"/api/v1/library/roots", `{"path":"` + missing + `"}`, 400},
+		{"/api/v1/library/roots", `{"path":"` + file + `"}`, 400},
+		{"/api/v1/library/scan", `{"root":"` + missing + `"}`, 404},
+	} {
+		resp := do(t, "POST", ts.URL+c.url, c.body)
+		b, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != c.want || strings.Contains(string(b), "typed-") {
+			t.Errorf("%s %s = %d %s", c.url, c.body, resp.StatusCode, b)
+		}
+	}
+}
+
+// rawUpload sends an upload request whose body is cut after sent bytes,
+// declaring the full length, and returns the response (or nil if none arrived
+// before the deadline).
+func rawUpload(t *testing.T, addr string, cut func(body []byte) int, then func(*net.TCPConn)) *http.Response {
+	t.Helper()
+	body, ct := multipartBody(t, "cut.ts", fixture.Bytes())
+	conn, err := net.Dial("tcp", strings.TrimPrefix(addr, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	tc := conn.(*net.TCPConn)
+	_ = tc.SetDeadline(time.Now().Add(5 * time.Second))
+	fmt.Fprintf(tc, "POST /api/v1/library/upload HTTP/1.1\r\nHost: x\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", ct, body.Len())
+	_, _ = tc.Write(body.Bytes()[:cut(body.Bytes())])
+	then(tc)
+	resp, err := http.ReadResponse(bufio.NewReader(tc), nil)
+	if err != nil {
+		t.Fatalf("no response: %v", err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+func noPartFiles(t *testing.T, root string) {
+	t.Helper()
+	entries, _ := os.ReadDir(root)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".upload-") {
+			t.Errorf("leftover part file %s", e.Name())
+		}
+	}
+}
+
+func TestTruncatedUploadBodyIs400(t *testing.T) {
+	ts, _, root := libServer(t, library.Options{})
+	resp := rawUpload(t, ts.URL, func(b []byte) int { return len(b) / 2 },
+		func(tc *net.TCPConn) { _ = tc.CloseWrite() })
+	if resp.StatusCode != 400 {
+		t.Errorf("truncated body = %d, want 400", resp.StatusCode)
+	}
+	noPartFiles(t, root)
+}
+
+func TestStalledUploadIsCutOff(t *testing.T) {
+	old := uploadIdleTimeout
+	uploadIdleTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { uploadIdleTimeout = old })
+
+	root := t.TempDir()
+	lib, err := library.New(library.Options{Roots: []string{root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts, _ := newServer(t, Options{Library: lib})
+	resp := rawUpload(t, ts.URL, func(b []byte) int { return len(b) / 2 }, func(*net.TCPConn) {})
+	if resp.StatusCode != 408 {
+		t.Errorf("stalled upload = %d, want 408", resp.StatusCode)
+	}
+	noPartFiles(t, root)
+}
+
+func TestInUseMatchesCameraPathsThatAreNotCanonical(t *testing.T) {
+	ts, _, root := libServer(t, library.Options{})
+	var f fileDTO
+	_ = json.NewDecoder(postFile(t, ts.URL, "clip.ts", fixture.Bytes()).Body).Decode(&f)
+	_ = os.Mkdir(filepath.Join(root, "sub"), 0o755)
+	link := filepath.Join(t.TempDir(), "rootlink")
+	if err := os.Symlink(root, link); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	for i, typed := range []string{
+		filepath.Join(root, ".", "sub", "..", "clip.ts"),
+		filepath.Join(link, "clip.ts"),
+	} {
+		id := fmt.Sprintf("cam%d", i)
+		body := `{"id":"` + id + `","source":{"kind":"file","path":"` + typed + `"}}`
+		if r := do(t, "POST", ts.URL+"/api/v1/cameras", body); r.StatusCode != 201 {
+			t.Fatalf("add camera via %s = %d", typed, r.StatusCode)
+		}
+	}
+	v := decodeLibrary(t, do(t, "GET", ts.URL+"/api/v1/library", ""))
+	if len(v.Files) != 1 || len(v.Files[0].InUseBy) != 2 {
+		t.Fatalf("inUseBy = %+v, want both cameras", v.Files)
+	}
+	if r := do(t, "DELETE", ts.URL+"/api/v1/library/files/"+f.ID, ""); r.StatusCode != 409 {
+		t.Errorf("delete of an in-use file = %d, want 409", r.StatusCode)
 	}
 }
 
