@@ -125,6 +125,9 @@ func (l *Library) Upload(ctx context.Context, name string, r io.Reader) (Entry, 
 		return Entry{}, fmt.Errorf("%w (%d bytes)", ErrTooLarge, l.opt.MaxUpload)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return Entry{}, err
+	}
 	rep, ok := l.analyze(ctx, partPath)
 	if !ok {
 		return Entry{}, ctx.Err()

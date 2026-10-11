@@ -310,21 +310,30 @@ func TestDeleteThroughASwappedParentWithoutRescan(t *testing.T) {
 }
 
 func TestUploadNeverFollowsAnInRootSymlink(t *testing.T) {
-	l, root := upLib(t, 0)
-	outside := filepath.Join(t.TempDir(), "target.ts")
-	write(t, outside, []byte("precious"))
-	if err := os.Symlink(outside, filepath.Join(root, "clip.ts")); err != nil {
-		t.Fatal(err)
-	}
-	e, err := l.Upload(context.Background(), "clip.ts", bytes.NewReader(fixture.Bytes()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if e.Name != "clip-1.ts" {
-		t.Errorf("name = %q, want clip-1.ts", e.Name)
-	}
-	if b, _ := os.ReadFile(outside); string(b) != "precious" {
-		t.Errorf("the file behind the symlink was overwritten: %q", b)
+	for _, mode := range []string{"link", "no-hardlinks-fallback"} {
+		t.Run(mode, func(t *testing.T) {
+			if mode != "link" {
+				old := linkFile
+				linkFile = func(string, string) error { return &os.LinkError{Op: "link", Err: syscall.EPERM} }
+				t.Cleanup(func() { linkFile = old })
+			}
+			l, root := upLib(t, 0)
+			outside := filepath.Join(t.TempDir(), "target.ts")
+			write(t, outside, []byte("precious"))
+			if err := os.Symlink(outside, filepath.Join(root, "clip.ts")); err != nil {
+				t.Fatal(err)
+			}
+			e, err := l.Upload(context.Background(), "clip.ts", bytes.NewReader(fixture.Bytes()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e.Name != "clip-1.ts" {
+				t.Errorf("name = %q, want clip-1.ts", e.Name)
+			}
+			if b, _ := os.ReadFile(outside); string(b) != "precious" {
+				t.Errorf("the file behind the symlink was overwritten: %q", b)
+			}
+		})
 	}
 }
 
@@ -359,6 +368,27 @@ func TestCancelledUploadPlacesNothing(t *testing.T) {
 	}
 	if got := dirEntries(t, root); len(got) != 0 || len(l.List()) != 0 {
 		t.Errorf("directory = %v, entries = %v", got, names(l))
+	}
+}
+
+func TestUploadValidatesThePartFileBeforePlacingIt(t *testing.T) {
+	dir := t.TempDir()
+	var calls int
+	l := newLib(t, Options{Roots: []string{dir}, Analyze: func(path string) media.Report {
+		calls++
+		if b := filepath.Base(path); !strings.HasPrefix(b, ".upload-") || !strings.HasSuffix(b, ".part") {
+			t.Errorf("analysed %q, want the part file", b)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "c.ts")); !os.IsNotExist(err) {
+			t.Errorf("the final name already exists during validation: %v", err)
+		}
+		return media.AnalyzeFile(path)
+	}})
+	if _, err := l.Upload(context.Background(), "c.ts", bytes.NewReader(fixture.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Errorf("analyzer called %d times, want 1", calls)
 	}
 }
 
