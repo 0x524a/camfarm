@@ -101,6 +101,32 @@ func TestAnalyze(t *testing.T) {
 			return m
 		}(), 1000, StatusWarning, []string{"odd_dimensions"}},
 		{"large file", synth(CodecH264, 30, step, nil), 600 << 20, StatusWarning, []string{"large_file"}},
+		{"file of exactly 512 MiB is fine", synth(CodecH264, 30, step, nil), 512 << 20, StatusValid, nil},
+		{"file one byte over 512 MiB", synth(CodecH264, 30, step, nil), 512<<20 + 1, StatusWarning, []string{"large_file"}},
+		{"step of exactly 4x the median is not a jump", synth(CodecH264, 30, step, func(i int, au *AccessUnit) {
+			if i >= 10 {
+				au.DTS += 3 * step
+				au.PTS += 3 * step
+			}
+		}), 1000, StatusValid, nil},
+		{"step just over 4x the median is a jump", synth(CodecH264, 30, step, func(i int, au *AccessUnit) {
+			if i >= 10 {
+				au.DTS += 3*step + 1
+				au.PTS += 3*step + 1
+			}
+		}), 1000, StatusWarning, []string{"timestamp_jump"}},
+		// Measured fps is 30. 31.55 is 4.9% away, 31.6 is 5.06% away. 60 frames
+		// keep the clip over one second whatever FrameDuration rounds to.
+		{"declared fps just inside 5%", func() *Media {
+			m := synth(CodecH264, 60, step, nil)
+			m.FPS = 31.55
+			return m
+		}(), 1000, StatusValid, nil},
+		{"declared fps just outside 5%", func() *Media {
+			m := synth(CodecH264, 60, step, nil)
+			m.FPS = 31.6
+			return m
+		}(), 1000, StatusWarning, []string{"fps_mismatch"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -143,6 +169,20 @@ func TestAnalyzeReorderDepth(t *testing.T) {
 	})
 	if d := Analyze(m, 1).Facts.ReorderDepth; d != 1 {
 		t.Errorf("ReorderDepth = %d, want 1", d)
+	}
+}
+
+// The last frame sorts before all 39 frames ahead of it in decode order, but
+// only the 32 most recent are examined.
+func TestAnalyzeReorderDepthWindow(t *testing.T) {
+	m := synth(CodecH264, 40, 3000, func(i int, au *AccessUnit) {
+		au.PTS += 3000
+		if i == 39 {
+			au.PTS = 0
+		}
+	})
+	if d := Analyze(m, 1).Facts.ReorderDepth; d != reorderWindow {
+		t.Errorf("ReorderDepth = %d, want %d", d, reorderWindow)
 	}
 }
 

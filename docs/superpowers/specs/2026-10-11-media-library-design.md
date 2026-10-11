@@ -55,18 +55,18 @@ type Issue struct {
 }
 
 type Facts struct {
-    Container     string
-    Codec         Codec
-    Width, Height int
-    FPS           float64 // declared; 0 when the bitstream carries no timing
-    MeasuredFPS   float64
+    Container       string
+    Codec           Codec
+    Width, Height   int
+    FPS             float64 // declared; 0 when the bitstream carries no timing
+    MeasuredFPS     float64
     DurationSeconds float64
-    Frames        int
-    Keyframes     int
-    MaxGOP        int     // longest keyframe-to-keyframe run, in frames
-    ReorderDepth  int     // 0 when decode order equals presentation order
-    BitrateBps    int64
-    SizeBytes     int64
+    Frames          int
+    Keyframes       int
+    MaxGOP          int     // longest keyframe-to-keyframe run, in frames
+    ReorderDepth    int     // 0 when decode order equals presentation order
+    BitrateBps      int64
+    SizeBytes       int64
 }
 
 type Report struct {
@@ -113,8 +113,10 @@ Warning (serves, but behaves unlike a plain IPPP stream):
 | `large_file` | size over 512 MiB: the whole parsed file is held in memory |
 
 H.265 slice types are not parsed: the slice header depends on PPS state, so H.265 reordering is
-reported from PTS≠DTS and the SPS reorder fields only. The `b_frames` message says which evidence
-it used, so the report never claims more than it checked.
+inferred from timestamps alone: a reorder depth above 0, meaning a frame whose PTS is earlier than
+that of a frame decoded before it. A constant PTS-DTS offset is not flagged, and the code does not
+read the SPS reorder fields. The `b_frames` message says which evidence it used, so the report
+never claims more than it checked.
 
 `MaxGOP`, `ReorderDepth`, step statistics and the thresholds above are constants in one file so a
 test pins each one.

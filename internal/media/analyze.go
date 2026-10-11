@@ -22,7 +22,8 @@ const (
 	StatusInvalid = "invalid"
 )
 
-// Thresholds. Each is pinned by a boundary row in analyze_test.go.
+// Thresholds. Each is pinned by a boundary row in TestAnalyze, except
+// reorderWindow, which TestAnalyzeReorderDepthWindow pins.
 const (
 	jumpFactor     = 4.0            // a DTS step this many times the median is a jump
 	vfrSpread      = 0.10           // (p95-p5)/median above this is variable frame rate
@@ -85,7 +86,8 @@ func (r *Report) finish() Report {
 }
 
 // Analyze inspects parsed media. size is the file's size in bytes. It is pure:
-// it never touches the filesystem.
+// it never touches the filesystem. It leaves Facts.Container empty; AnalyzeFile
+// fills it.
 func Analyze(m *Media, size int64) Report {
 	r := Report{Facts: Facts{
 		Codec: m.Codec, Width: m.Width, Height: m.Height, FPS: m.FPS,
