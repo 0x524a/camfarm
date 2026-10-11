@@ -8,7 +8,8 @@ import (
 )
 
 // parseTS and parseMP4 are seams so a test can make a parser panic and
-// exercise AnalyzeFile's recovery.
+// exercise AnalyzeFile's recovery. Tests that swap these must not run in
+// parallel.
 var (
 	parseTS  = parseMPEGTS
 	parseMP4 = parseISOBMFF
@@ -46,18 +47,28 @@ func classifyLoadError(f Facts, err error) Report {
 // failure is reported as an invalid Report; it never panics and never returns
 // an error.
 func AnalyzeFile(path string) (rep Report) {
+	// Stat before Open: opening a FIFO blocks until a writer appears.
+	pre, err := os.Stat(path)
+	if err != nil {
+		return invalidReport(Facts{}, "unreadable", "The file could not be opened.", err.Error())
+	}
+	if !pre.Mode().IsRegular() {
+		return invalidReport(Facts{}, "unreadable", "This is not a regular file.", "")
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return invalidReport(Facts{}, "unreadable", "The file could not be opened.", err.Error())
 	}
 	defer f.Close()
+	// The opened file's own Stat is the single source of Size (and re-checks
+	// the type in case the path was swapped between Stat and Open).
 	st, err := f.Stat()
 	if err != nil {
 		return invalidReport(Facts{}, "unreadable", "The file could not be read.", err.Error())
 	}
 	facts := Facts{SizeBytes: st.Size()}
 	if !st.Mode().IsRegular() {
-		return invalidReport(facts, "unreadable", "This is not a regular file.", "not a regular file")
+		return invalidReport(facts, "unreadable", "This is not a regular file.", "")
 	}
 
 	header := make([]byte, sniffLen)

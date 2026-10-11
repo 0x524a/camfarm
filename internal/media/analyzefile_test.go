@@ -70,7 +70,7 @@ func TestAnalyzeFileFailures(t *testing.T) {
 	// that frame is not a keyframe, so the file is invalid on that ground.
 	t.Run("truncated TS", func(t *testing.T) {
 		r := AnalyzeFile(writeTemp(t, "cut.ts", trunc))
-		if got := firstInvalid(t, r); got.Code != "no_start_keyframe" || r.Facts.Frames >= 30 {
+		if got := firstInvalid(t, r); got.Code != "no_start_keyframe" || r.Facts.Frames != 1 {
 			t.Errorf("code %q frames %d (%+v)", got.Code, r.Facts.Frames, r)
 		}
 	})
@@ -87,7 +87,7 @@ func TestAnalyzeFileFailures(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := firstInvalid(t, AnalyzeFile(writeTemp(t, "half.mp4", b[:len(b)/2])))
-		if got.Code != "loader_error" {
+		if got.Code != "loader_error" || !strings.Contains(got.Detail, "reading MP4 init") {
 			t.Errorf("code = %q (%+v)", got.Code, got)
 		}
 	})
