@@ -426,6 +426,10 @@ func TestScanWithCancelledContextDoesNotPrune(t *testing.T) {
 	write(t, filepath.Join(dir, "a.ts"), fixture.Bytes())
 	l := newLib(t, Options{Roots: []string{dir}})
 	scanAll(t, l)
+	// The file is really gone, so only the cancellation can keep the entry.
+	if err := os.Remove(filepath.Join(dir, "a.ts")); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := l.Scan(ctx, "", true); !errors.Is(err, context.Canceled) {
@@ -433,5 +437,9 @@ func TestScanWithCancelledContextDoesNotPrune(t *testing.T) {
 	}
 	if len(l.List()) != 1 {
 		t.Errorf("a cancelled scan pruned entries: %v", names(l))
+	}
+	scanAll(t, l)
+	if len(l.List()) != 0 {
+		t.Errorf("an uncancelled scan did not drop the vanished file: %v", names(l))
 	}
 }

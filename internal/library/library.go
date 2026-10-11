@@ -374,13 +374,33 @@ func (l *Library) scanRoot(ctx context.Context, root string, force bool) error {
 	// Prune entries the walk did not see, but only those whose file is really
 	// gone: an entry stored after the walk (concurrent scan, upload, refresh)
 	// must survive.
+	// Lstat runs outside the lock so a slow filesystem cannot block List/Resolve.
 	l.mu.Lock()
+	var unseen []Entry
 	for id, e := range l.entries {
-		if e.Root != root || seen[id] {
-			continue
+		if e.Root == root && !seen[id] {
+			unseen = append(unseen, e)
 		}
-		if st, err := os.Lstat(e.Path); err != nil || !st.Mode().IsRegular() {
-			delete(l.entries, id)
+	}
+	l.mu.Unlock()
+
+	var gone []Entry
+	for _, e := range unseen {
+		st, err := os.Lstat(e.Path)
+		// Only a missing or non-regular file counts as gone; EACCES, EIO and the
+		// like say nothing about the file, so the entry stays.
+		if errors.Is(err, fs.ErrNotExist) || (err == nil && !st.Mode().IsRegular()) {
+			gone = append(gone, e)
+		}
+	}
+	if len(gone) == 0 {
+		return nil
+	}
+	l.mu.Lock()
+	for _, e := range gone {
+		// Skip an entry re-stored since the snapshot.
+		if cur, ok := l.entries[e.ID]; ok && cur.Size == e.Size && cur.Modified.Equal(e.Modified) {
+			delete(l.entries, e.ID)
 		}
 	}
 	l.mu.Unlock()
