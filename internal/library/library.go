@@ -32,7 +32,55 @@ var (
 	ErrUIPathsDisabled = errors.New("library: adding directories from the UI is disabled (start with --allow-ui-paths)")
 	ErrNotDirectory    = errors.New("library: not a directory")
 	ErrBusy            = errors.New("library: too many uploads in progress; try again shortly")
+	// ErrRootUnavailable is the cause inside a RootError.
+	ErrRootUnavailable = errors.New("library: media directory unavailable")
 )
+
+// RootError reports that one media directory could not be scanned because the
+// directory itself is missing or unreadable. Its entries are dropped.
+type RootError struct {
+	Root string
+	Err  error
+}
+
+func (e *RootError) Error() string {
+	return fmt.Sprintf("%v: %q: %v", ErrRootUnavailable, e.Root, e.Err)
+}
+
+// Unwrap exposes both ErrRootUnavailable and the underlying cause.
+func (e *RootError) Unwrap() []error { return []error{ErrRootUnavailable, e.Err} }
+
+// SplitScanError separates the per-directory failures in an error returned by
+// Scan, in the order the roots were scanned, from any other error. other is nil
+// when err held only RootErrors.
+func SplitScanError(err error) (roots []*RootError, other error) {
+	var rest []error
+	var walk func(error)
+	walk = func(err error) {
+		if err == nil {
+			return
+		}
+		if re, ok := err.(*RootError); ok {
+			roots = append(roots, re)
+			return
+		}
+		if j, ok := err.(interface{ Unwrap() []error }); ok {
+			for _, c := range j.Unwrap() {
+				walk(c)
+			}
+			return
+		}
+		rest = append(rest, err)
+	}
+	walk(err)
+	return roots, errors.Join(rest...)
+}
+
+// RootErrors lists the RootErrors inside an error returned by Scan.
+func RootErrors(err error) []*RootError {
+	roots, _ := SplitScanError(err)
+	return roots
+}
 
 const (
 	defaultMaxUpload = 2 << 30
@@ -385,7 +433,19 @@ func (l *Library) scanRoot(ctx context.Context, root string, force bool) error {
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("library: scanning %q: %w", root, err)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// The directory itself is gone or unreadable: from the farm's point of
+		// view its files are gone too, so none may stay listed.
+		l.mu.Lock()
+		for id, e := range l.entries {
+			if e.Root == root {
+				delete(l.entries, id)
+			}
+		}
+		l.mu.Unlock()
+		return &RootError{Root: root, Err: err}
 	}
 
 	seen := make(map[string]bool, len(cands))

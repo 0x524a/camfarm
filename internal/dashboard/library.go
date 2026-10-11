@@ -50,6 +50,9 @@ type libraryDTO struct {
 	MaxUpload     int64              `json:"maxUpload"`
 	Scanning      bool               `json:"scanning"`
 	Files         []fileDTO          `json:"files"`
+	// ScanErrors names media directories the last scan could not read, in fixed
+	// wording. Empty, never null.
+	ScanErrors []string `json:"scanErrors"`
 }
 
 // sameOrigin refuses a request a browser sent on behalf of another origin.
@@ -124,7 +127,24 @@ func (s *server) fileView(e library.Entry, inUse map[string][]string) fileDTO {
 	return fileDTO{Entry: e, InUseBy: users}
 }
 
-func (s *server) libraryView() libraryDTO {
+// scanFailure turns an error from Library.Scan into scanErrors text. ok is
+// false when err holds anything besides unreadable media directories, which the
+// caller maps to an error status as before.
+func scanFailure(err error) (texts []string, ok bool) {
+	roots, other := library.SplitScanError(err)
+	if other != nil {
+		return nil, false
+	}
+	for _, re := range roots {
+		texts = append(texts, "media directory unavailable: "+re.Root)
+	}
+	return texts, true
+}
+
+func (s *server) libraryView(scanErrors ...string) libraryDTO {
+	if scanErrors == nil {
+		scanErrors = []string{}
+	}
 	inUse := s.inUse()
 	entries := s.lib.List()
 	files := make([]fileDTO, 0, len(entries))
@@ -138,6 +158,7 @@ func (s *server) libraryView() libraryDTO {
 	return libraryDTO{
 		Roots: roots, UploadEnabled: s.lib.UploadEnabled(), AllowUIPaths: s.lib.AllowUIPaths(),
 		MaxUpload: s.lib.MaxUpload(), Scanning: s.lib.Scanning(), Files: files,
+		ScanErrors: scanErrors,
 	}
 }
 
@@ -184,7 +205,8 @@ func (s *server) scanLibrary(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength != 0 && !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.lib.Scan(r.Context(), req.Root, req.Force); err != nil {
+	err := s.lib.Scan(r.Context(), req.Root, req.Force)
+	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			writeErr(w, err)
 			return
@@ -193,10 +215,23 @@ func (s *server) scanLibrary(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "unknown media directory")
 			return
 		}
-		writeLibraryErr(w, err)
-		return
 	}
-	writeJSON(w, http.StatusOK, s.libraryView())
+	s.writeScanResult(w, err)
+}
+
+// writeScanResult answers a request that ran a scan: the library view, with any
+// unreadable media directories listed in scanErrors, or an error status when
+// the scan failed for another reason.
+func (s *server) writeScanResult(w http.ResponseWriter, err error) {
+	var texts []string
+	if err != nil {
+		var ok bool
+		if texts, ok = scanFailure(err); !ok {
+			writeLibraryErr(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, s.libraryView(texts...))
 }
 
 func (s *server) uploadFile(w http.ResponseWriter, r *http.Request) {
@@ -368,9 +403,5 @@ func (s *server) addRoot(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if err := s.lib.Scan(r.Context(), "", false); err != nil {
-		writeLibraryErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.libraryView())
+	s.writeScanResult(w, s.lib.Scan(r.Context(), "", false))
 }
