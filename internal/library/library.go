@@ -34,8 +34,10 @@ var (
 
 const (
 	defaultMaxUpload = 2 << 30
-	defaultWorkers   = 2
-	defaultTimeout   = 30 * time.Second
+	// maxMaxUpload keeps MaxUpload+1 and later additions from overflowing int64.
+	maxMaxUpload   = 1 << 62
+	defaultWorkers = 2
+	defaultTimeout = 30 * time.Second
 	// maxDepth is how many path components below a root a file may sit.
 	maxDepth = 3
 )
@@ -95,6 +97,7 @@ func New(opt Options) (*Library, error) {
 	if opt.MaxUpload <= 0 {
 		opt.MaxUpload = defaultMaxUpload
 	}
+	opt.MaxUpload = min(opt.MaxUpload, maxMaxUpload)
 	if opt.Workers <= 0 {
 		opt.Workers = defaultWorkers
 	}
@@ -386,10 +389,7 @@ func (l *Library) scanRoot(ctx context.Context, root string, force bool) error {
 
 	var gone []Entry
 	for _, e := range unseen {
-		st, err := os.Lstat(e.Path)
-		// Only a missing or non-regular file counts as gone; EACCES, EIO and the
-		// like say nothing about the file, so the entry stays.
-		if errors.Is(err, fs.ErrNotExist) || (err == nil && !st.Mode().IsRegular()) {
+		if fileGone(e.Path) {
 			gone = append(gone, e)
 		}
 	}
@@ -405,6 +405,24 @@ func (l *Library) scanRoot(ctx context.Context, root string, force bool) error {
 	}
 	l.mu.Unlock()
 	return nil
+}
+
+// fileGone reports whether path is certainly no longer the regular file that was
+// scanned: missing, not regular, or reached through a symlink. EACCES, EIO and
+// the like say nothing about the file, so they do not count as gone.
+func fileGone(path string) bool {
+	st, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && !st.Mode().IsRegular()) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	real, err := filepath.EvalSymlinks(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	return err == nil && real != path
 }
 
 // Refresh re-checks one file just before it is used. If the file changed since

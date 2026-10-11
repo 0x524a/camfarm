@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/0x524a/camfarm/internal/media"
@@ -150,6 +151,10 @@ func TestUploadNames(t *testing.T) {
 		{"bad\x00name.ts", ""},
 		{"tab\tname.ts", ""},
 		{strings.Repeat("a", 201) + ".ts", ""},
+		{strings.Repeat("a", 197) + ".ts", strings.Repeat("a", 197) + ".ts"},
+		{"  clip.ts ", "clip.ts"},
+		{"evil\u202Egnp.ts", ""},
+		{"bad\xffutf8.ts", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -239,16 +244,139 @@ func TestDeleteRefusesFilesOutsideTheUploadRoot(t *testing.T) {
 }
 
 func TestUploadScanAndListRaceFree(t *testing.T) {
-	l, _ := upLib(t, 0)
+	l, root := upLib(t, 0)
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {
 		wg.Add(3)
 		go func() {
 			defer wg.Done()
-			_, _ = l.Upload(context.Background(), "r.ts", bytes.NewReader(fixture.Bytes()))
+			if _, err := l.Upload(context.Background(), "r.ts", bytes.NewReader(fixture.Bytes())); err != nil {
+				t.Error(err)
+			}
 		}()
 		go func() { defer wg.Done(); _ = l.Scan(context.Background(), "", false) }()
 		go func() { defer wg.Done(); _ = l.List() }()
 	}
 	wg.Wait()
+	scanAll(t, l)
+	if got, want := len(l.List()), len(dirEntries(t, root)); got != 4 || got != want {
+		t.Errorf("listed %d files, %d on disk, want 4 each", got, want)
+	}
+}
+
+func TestDeleteCannotEscapeThroughASwappedParent(t *testing.T) {
+	up, victim := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(up, "a", "x.ts"), fixture.Bytes())
+	write(t, filepath.Join(victim, "x.ts"), fixture.Bytes())
+	l := newLib(t, Options{Roots: []string{up}})
+	scanAll(t, l)
+	es := l.List()
+	if len(es) != 1 {
+		t.Fatalf("entries = %v", names(l))
+	}
+	id := es[0].ID
+	if err := os.RemoveAll(filepath.Join(up, "a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(up, "a")); err != nil {
+		t.Fatal(err)
+	}
+	scanAll(t, l) // the entry must not survive being reached through a link
+	if err := l.Delete(id); err == nil {
+		t.Error("Delete succeeded through a swapped parent directory")
+	}
+	if _, err := os.Stat(filepath.Join(victim, "x.ts")); err != nil {
+		t.Errorf("a file outside the upload root was removed: %v", err)
+	}
+}
+
+func TestDeleteThroughASwappedParentWithoutRescan(t *testing.T) {
+	up, victim := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(up, "a", "x.ts"), fixture.Bytes())
+	write(t, filepath.Join(victim, "x.ts"), fixture.Bytes())
+	l := newLib(t, Options{Roots: []string{up}})
+	scanAll(t, l)
+	id := l.List()[0].ID
+	if err := os.RemoveAll(filepath.Join(up, "a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(up, "a")); err != nil {
+		t.Fatal(err)
+	}
+	_ = l.Delete(id)
+	if _, err := os.Stat(filepath.Join(victim, "x.ts")); err != nil {
+		t.Errorf("a file outside the upload root was removed: %v", err)
+	}
+}
+
+func TestUploadNeverFollowsAnInRootSymlink(t *testing.T) {
+	l, root := upLib(t, 0)
+	outside := filepath.Join(t.TempDir(), "target.ts")
+	write(t, outside, []byte("precious"))
+	if err := os.Symlink(outside, filepath.Join(root, "clip.ts")); err != nil {
+		t.Fatal(err)
+	}
+	e, err := l.Upload(context.Background(), "clip.ts", bytes.NewReader(fixture.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Name != "clip-1.ts" {
+		t.Errorf("name = %q, want clip-1.ts", e.Name)
+	}
+	if b, _ := os.ReadFile(outside); string(b) != "precious" {
+		t.Errorf("the file behind the symlink was overwritten: %q", b)
+	}
+}
+
+func TestUploadFallsBackWhenHardLinksAreUnsupported(t *testing.T) {
+	old := linkFile
+	linkFile = func(string, string) error { return &os.LinkError{Op: "link", Err: syscall.EPERM} }
+	t.Cleanup(func() { linkFile = old })
+
+	l, root := upLib(t, 0)
+	for i := 0; i < 2; i++ {
+		if _, err := l.Upload(context.Background(), "clip.ts", bytes.NewReader(fixture.Bytes())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []string{"clip-1.ts", "clip.ts"}
+	if got := dirEntries(t, root); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("directory = %v, want %v", got, want)
+	}
+	for _, e := range l.List() {
+		if e.Report.Status != media.StatusValid || e.Size != int64(len(fixture.Bytes())) {
+			t.Errorf("entry %s = %+v", e.Name, e)
+		}
+	}
+}
+
+func TestCancelledUploadPlacesNothing(t *testing.T) {
+	l, root := upLib(t, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := l.Upload(ctx, "c.ts", bytes.NewReader(fixture.Bytes())); !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v", err)
+	}
+	if got := dirEntries(t, root); len(got) != 0 || len(l.List()) != 0 {
+		t.Errorf("directory = %v, entries = %v", got, names(l))
+	}
+}
+
+func TestScanKeepsEntriesItCannotStat(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not bind root")
+	}
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	write(t, filepath.Join(sub, "a.ts"), fixture.Bytes())
+	l := newLib(t, Options{Roots: []string{dir}})
+	scanAll(t, l)
+	if err := os.Chmod(sub, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sub, 0o755) })
+	scanAll(t, l)
+	if len(l.List()) != 1 {
+		t.Errorf("an unreadable directory dropped its entries: %v", names(l))
+	}
 }
