@@ -208,6 +208,9 @@ for another origin: `403 {"error":"cross-origin request refused"}` when `Sec-Fet
 `cross-site`, when it is `same-site` without an `Origin` that matches, or when an `Origin` header is
 present whose host does not equal the request `Host`. This runs before any body is read, because
 `multipart/form-data` needs no CORS preflight. Requests with neither header (curl, Go clients) pass.
+This guards against cross-site requests only. It does not defend against DNS rebinding, where the
+`Origin` equals the `Host` and `Sec-Fetch-Site` is `same-origin`; the dashboard still has no
+authentication and no Host-header check.
 Library analyses share one worker pool (`Workers`) across scan, refresh and upload.
 
 The upload body is read with `http.MaxBytesReader`. Upload requests need a longer or disabled

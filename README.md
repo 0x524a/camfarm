@@ -52,9 +52,11 @@ Early:
   `--listen-host`, `--rtsp-port`, `--onvif-port`, `--discovery`, `--discovery-interface`, `--media-dir`, `--allow-ui-paths`, `--max-upload`; run with `-h` for details. **Security:** the
   dashboard can start servers and, with file sources, make the process read local paths, and the
   page shows cameras' Digest credentials. It listens on loopback by default and has *no*
-  authentication, token or Host-header check, and only the library's mutating endpoints (upload,
-  scan, delete, roots) refuse cross-origin browser requests, so a malicious web page can reach the
-  rest of a loopback API through DNS rebinding or CSRF. Do not expose it.
+  authentication, token or Host-header check. Only the library's mutating endpoints (upload, scan,
+  delete, roots) refuse cross-site browser requests (an `Origin` that differs from `Host`, or
+  `Sec-Fetch-Site: cross-site`); every other endpoint accepts them, so a malicious web page can
+  reach those through CSRF. No endpoint, the library included, is protected against DNS
+  rebinding: under rebinding the `Origin` equals `Host`, so the check passes. Do not expose it.
 - **Works:** a media library — point the binary at directories of your own video
   with `--media-dir` (repeatable) and the dashboard API lists, validates and
   serves them. Each file is validated once per change: at startup, on rescan, on

@@ -253,7 +253,7 @@ func TestHelpStatesTheSecurityPosture(t *testing.T) {
 	var out, errb bytes.Buffer
 	_ = run(context.Background(), []string{"--help"}, &out, &errb)
 	got := errb.String() + out.String()
-	for _, want := range []string{"loopback", "authentication", "Host", "CSRF", "local", "Digest", "mutually exclusive", "0x", "octal"} {
+	for _, want := range []string{"loopback", "authentication", "Host", "CSRF", "local", "Digest", "rebinding", "mutually exclusive", "0x", "octal"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage text missing %q:\n%s", want, got)
 		}
