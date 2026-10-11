@@ -7,6 +7,13 @@ import (
 	"os"
 )
 
+// parseTS and parseMP4 are seams so a test can make a parser panic and
+// exercise AnalyzeFile's recovery.
+var (
+	parseTS  = parseMPEGTS
+	parseMP4 = parseISOBMFF
+)
+
 func invalidReport(f Facts, code, msg, detail string) Report {
 	r := Report{Facts: f}
 	r.add(code, SeverityInvalid, msg, detail)
@@ -49,8 +56,8 @@ func AnalyzeFile(path string) (rep Report) {
 		return invalidReport(Facts{}, "unreadable", "The file could not be read.", err.Error())
 	}
 	facts := Facts{SizeBytes: st.Size()}
-	if st.IsDir() {
-		return invalidReport(facts, "unreadable", "This is a directory, not a file.", "")
+	if !st.Mode().IsRegular() {
+		return invalidReport(facts, "unreadable", "This is not a regular file.", "not a regular file")
 	}
 
 	header := make([]byte, sniffLen)
@@ -76,9 +83,9 @@ func AnalyzeFile(path string) (rep Report) {
 	var m *Media
 	switch kind {
 	case containerMPEGTS:
-		m, err = parseMPEGTS(f)
+		m, err = parseTS(f)
 	default:
-		m, err = parseISOBMFF(f)
+		m, err = parseMP4(f)
 	}
 	if err != nil {
 		return classifyLoadError(facts, err)

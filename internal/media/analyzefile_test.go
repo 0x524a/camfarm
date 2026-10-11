@@ -1,9 +1,12 @@
 package media
 
 import (
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/0x524a/camfarm/internal/media/fixture"
@@ -63,10 +66,29 @@ func TestAnalyzeFileFailures(t *testing.T) {
 			}
 		})
 	}
-	t.Run("truncated TS is invalid or valid-with-fewer-frames, never a panic", func(t *testing.T) {
+	// Cut after five packets the TS parser keeps the one frame that survived;
+	// that frame is not a keyframe, so the file is invalid on that ground.
+	t.Run("truncated TS", func(t *testing.T) {
 		r := AnalyzeFile(writeTemp(t, "cut.ts", trunc))
-		if r.Status == "" {
-			t.Fatal("no status")
+		if got := firstInvalid(t, r); got.Code != "no_start_keyframe" || r.Facts.Frames >= 30 {
+			t.Errorf("code %q frames %d (%+v)", got.Code, r.Facts.Frames, r)
+		}
+	})
+	// A moov-less half file cannot be walked: the MP4 init parse fails.
+	t.Run("truncated MP4", func(t *testing.T) {
+		dir := t.TempDir()
+		ts := writeTemp(t, "in.ts", fixture.Bytes())
+		mp4 := filepath.Join(dir, "full.mp4")
+		if b, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", ts, "-c", "copy", mp4).CombinedOutput(); err != nil {
+			t.Fatalf("ffmpeg: %v\n%s", err, b)
+		}
+		b, err := os.ReadFile(mp4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := firstInvalid(t, AnalyzeFile(writeTemp(t, "half.mp4", b[:len(b)/2])))
+		if got.Code != "loader_error" {
+			t.Errorf("code = %q (%+v)", got.Code, got)
 		}
 	})
 }
@@ -146,12 +168,37 @@ func TestClassifyLoadError(t *testing.T) {
 			t.Errorf("%v: code = %q, want %q", err, got.Code, code)
 		}
 	}
+	extra := []struct {
+		err  error
+		code string
+	}{
+		{ErrNoParameterSetsH265, "missing_parameter_sets"},
+		{errNoSamples, "no_video"},
+		{fmt.Errorf("x: %w", ErrNoVideoTrack), "no_video"},
+	}
+	for _, c := range extra {
+		if got := firstInvalid(t, classifyLoadError(Facts{}, c.err)); got.Code != c.code {
+			t.Errorf("%v: code = %q, want %q", c.err, got.Code, c.code)
+		}
+	}
 }
 
 func TestRecoverFromParserPanic(t *testing.T) {
 	r := reportFromPanic(Facts{Container: "MPEG-TS"}, "boom")
 	got := firstInvalid(t, r)
 	if got.Code != "loader_error" || got.Detail != "boom" || r.Facts.Container != "MPEG-TS" {
+		t.Errorf("%+v", r)
+	}
+}
+
+// Removing the defer/recover in AnalyzeFile must fail this test.
+func TestAnalyzeFileRecoversFromParserPanic(t *testing.T) {
+	old := parseTS
+	t.Cleanup(func() { parseTS = old })
+	parseTS = func(io.Reader) (*Media, error) { panic("boom") }
+	r := AnalyzeFile(writeTemp(t, "p.ts", fixture.Bytes()))
+	got := firstInvalid(t, r)
+	if got.Code != "loader_error" || !strings.Contains(got.Detail, "boom") || r.Facts.Container != string(containerMPEGTS) {
 		t.Errorf("%+v", r)
 	}
 }
