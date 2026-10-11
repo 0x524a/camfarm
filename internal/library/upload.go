@@ -172,7 +172,9 @@ func (l *Library) Upload(ctx context.Context, name string, r io.Reader) (Entry, 
 // ensureUploadsDir creates the uploads directory on first use. A symlink or a
 // plain file where it should be is refused rather than followed.
 func ensureUploadsDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// Mkdir, not MkdirAll: the media directory must already exist. Recreating
+	// it would write onto the mount point of a volume that is not mounted.
+	if err := os.Mkdir(dir, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
 		return fmt.Errorf("library: creating the upload directory: %w", err)
 	}
 	st, err := os.Lstat(dir)
@@ -189,7 +191,7 @@ func ensureUploadsDir(dir string) error {
 // uploads/ directory of the first writable media directory can be deleted, so
 // the operator's own originals are never touched; anything placed in uploads/
 // by hand counts as an upload. The caller refuses first if a camera uses it.
-// The removal goes through an os.Root on uploads/, so a directory swapped for a
+// The removal goes through an os.Root on the media directory, so any directory (uploads/ included) swapped for a
 // symlink since the scan cannot lead it outside.
 func (l *Library) Delete(id string) error {
 	e, ok := l.Resolve(id)
@@ -205,12 +207,14 @@ func (l *Library) Delete(id string) error {
 	if err != nil || !filepath.IsLocal(rel) {
 		return ErrNotDeletable
 	}
-	root, err := os.OpenRoot(updir)
+	// The os.Root is the media directory, not uploads/, so uploads itself is
+	// resolved inside the root too: a symlink swapped in for it cannot lead out.
+	root, err := os.OpenRoot(up)
 	if err != nil {
 		return fmt.Errorf("library: deleting %q: %w", e.Name, err)
 	}
 	defer root.Close()
-	if err := root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := root.Remove(filepath.Join(uploadsDirName, rel)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("library: deleting %q: %w", e.Name, err)
 	}
 	l.mu.Lock()
