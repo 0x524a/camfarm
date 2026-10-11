@@ -14,11 +14,13 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/0x524a/camfarm"
 	"github.com/0x524a/camfarm/internal/fault"
 	"github.com/0x524a/camfarm/internal/library"
+	"github.com/0x524a/camfarm/internal/media"
 )
 
 // Options configures the dashboard.
@@ -42,6 +44,10 @@ type server struct {
 	fleet *camfarm.Fleet
 	snap  *snapshotter
 	lib   *library.Library
+	// libMu makes "is this library file in use?" and "use this library file"
+	// atomic with respect to each other: held by deleteFile across its in-use
+	// check and Delete, and by addCamera across Refresh and AddCamera.
+	libMu sync.Mutex
 }
 
 // Handler returns the dashboard for a fleet.
@@ -78,6 +84,8 @@ type cameraDTO struct {
 	ONVIFEndpoint string              `json:"onvifEndpoint"`
 	ONVIFUUID     string              `json:"onvifUuid"`
 	Source        string              `json:"source"`
+	LibraryID     string              `json:"libraryId,omitempty"`
+	Warnings      []media.Issue       `json:"warnings,omitempty"`
 	Codec         string              `json:"codec"`
 	Width         int                 `json:"width"`
 	Height        int                 `json:"height"`
@@ -111,7 +119,7 @@ func (s *server) dto(cam *camfarm.Camera, st camfarm.Status) cameraDTO {
 	if faults == nil {
 		faults = []camfarm.FaultSpec{}
 	}
-	return cameraDTO{
+	d := cameraDTO{
 		ID: st.ID, RTSPURL: st.RTSPURL, ONVIFEndpoint: cam.ONVIFEndpoint(), ONVIFUUID: cam.ONVIFUUID(),
 		Source: st.Source, Codec: st.Codec, Width: st.Width, Height: st.Height, FPS: st.FPS,
 		Readers: st.Readers, Seed: strconv.FormatUint(stats.Seed, 10), Username: u, Password: p,
@@ -123,6 +131,8 @@ func (s *server) dto(cam *camfarm.Camera, st camfarm.Status) cameraDTO {
 			Readers: stats.Readers,
 		},
 	}
+	d.LibraryID, d.Warnings = s.libraryInfo(st.Source)
+	return d
 }
 
 // getFaultCatalogue serves the fault catalogue that drives validation and the
@@ -167,11 +177,27 @@ func (s *server) getCamera(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) addCamera(w http.ResponseWriter, r *http.Request) {
-	var spec camfarm.CameraSpec
-	if !decodeJSON(w, r, &spec) {
+	var req addCameraReq
+	if !decodeJSON(w, r, &req) {
 		return
 	}
-	cam, err := s.fleet.AddCamera(spec)
+	var cam *camfarm.Camera
+	var err error
+	if req.LibraryID != "" {
+		// libMu spans the re-check and the add, so deleteFile cannot remove the
+		// file between them.
+		s.libMu.Lock()
+		spec, ok := s.specFromLibrary(w, r, req)
+		if ok {
+			cam, err = s.fleet.AddCamera(spec)
+		}
+		s.libMu.Unlock()
+		if !ok {
+			return
+		}
+	} else {
+		cam, err = s.fleet.AddCamera(req.CameraSpec)
+	}
 	if err != nil {
 		writeErr(w, err)
 		return

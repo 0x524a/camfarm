@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/0x524a/camfarm"
 	"github.com/0x524a/camfarm/internal/library"
+	"github.com/0x524a/camfarm/internal/media"
 )
 
 // multipartSlack is how much framing a multipart body may add beyond the file.
@@ -210,6 +212,10 @@ func (s *server) deleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	// libMu makes the in-use check and the delete atomic with respect to
+	// addCamera's re-check and add.
+	s.libMu.Lock()
+	defer s.libMu.Unlock()
 	e, ok := s.lib.Resolve(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "unknown library file")
@@ -227,6 +233,70 @@ func (s *server) deleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// addCameraReq is the body of POST /cameras: a CameraSpec plus an optional
+// libraryId. libraryId is a sibling of source, not part of it, because
+// SourceSpec is public library API and the library is a dashboard concern.
+type addCameraReq struct {
+	camfarm.CameraSpec
+	LibraryID string `json:"libraryId,omitempty"`
+}
+
+// specFromLibrary resolves req.LibraryID to a file source. It replies and
+// returns false when the file is unusable. The file is re-checked first, so a
+// report that went stale between the scan and the click is never trusted. The
+// caller holds libMu.
+func (s *server) specFromLibrary(w http.ResponseWriter, r *http.Request, req addCameraReq) (camfarm.CameraSpec, bool) {
+	spec := req.CameraSpec
+	if !s.needLibrary(w) {
+		return spec, false
+	}
+	if spec.Source.Path != "" || (spec.Source.Kind != "" && spec.Source.Kind != camfarm.SourceFile) {
+		writeError(w, http.StatusBadRequest, "libraryId cannot be combined with source.path or a source kind other than file")
+		return spec, false
+	}
+	e, err := s.lib.Refresh(r.Context(), req.LibraryID)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			writeErr(w, err)
+			return spec, false
+		}
+		writeLibraryErr(w, err)
+		return spec, false
+	}
+	if e.Report.Status == media.StatusInvalid {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":  "this file is invalid and cannot be used as a camera",
+			"report": e.Report,
+		})
+		return spec, false
+	}
+	spec.Source = camfarm.SourceSpec{Kind: camfarm.SourceFile, Path: e.Path}
+	return spec, true
+}
+
+// libraryInfo links a camera's source to its library entry, if it has one, and
+// returns that entry's warnings so the camera card can show them.
+func (s *server) libraryInfo(source string) (string, []media.Issue) {
+	if s.lib == nil {
+		return "", nil
+	}
+	p, ok := strings.CutPrefix(source, "file:")
+	if !ok {
+		return "", nil
+	}
+	e, ok := s.lib.ByPath(canonicalPath(p))
+	if !ok {
+		return "", nil
+	}
+	var warns []media.Issue
+	for _, is := range e.Report.Issues {
+		if is.Severity == media.SeverityWarning {
+			warns = append(warns, is)
+		}
+	}
+	return e.ID, warns
 }
 
 func (s *server) addRoot(w http.ResponseWriter, r *http.Request) {
