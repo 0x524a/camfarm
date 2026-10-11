@@ -288,16 +288,19 @@ func (l *Library) Resolve(id string) (Entry, bool) {
 	return e, ok
 }
 
-// ByPath finds an entry by absolute path.
+// ByPath finds an entry by absolute path. When overlapping roots list the same
+// file twice it returns the lowest id, so a camera's libraryId is stable.
 func (l *Library) ByPath(path string) (Entry, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	var best Entry
+	found := false
 	for _, e := range l.entries {
-		if e.Path == path {
-			return e, true
+		if e.Path == path && (!found || e.ID < best.ID) {
+			best, found = e, true
 		}
 	}
-	return Entry{}, false
+	return best, found
 }
 
 // idFor derives a stable id from the root and the path relative to it, so the
@@ -340,6 +343,10 @@ func (l *Library) analyze(ctx context.Context, path string) (media.Report, bool)
 			Message: "Checking the file took too long and was stopped.",
 			Detail:  "limit " + l.opt.Timeout.String(),
 		}}}
+		// The parse never finished, so every fact but the size is unknown.
+		if st, err := os.Stat(path); err == nil {
+			r.Facts.SizeBytes = st.Size()
+		}
 		return r, true
 	case <-ctx.Done():
 		return media.Report{}, false
@@ -388,6 +395,9 @@ func (l *Library) Scan(ctx context.Context, root string, force bool) error {
 	return errors.Join(errs...)
 }
 
+// walkVisit, when set, is called for every entry the scan walk visits. Tests only.
+var walkVisit func(path string)
+
 type candidate struct {
 	path, name string
 	size       int64
@@ -397,6 +407,12 @@ type candidate struct {
 func (l *Library) scanRoot(ctx context.Context, root string, force bool) error {
 	var cands []candidate
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if walkVisit != nil {
+			walkVisit(p)
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr // a slow or huge tree must not hold up shutdown
+		}
 		if err != nil {
 			if p == root {
 				return err
@@ -562,10 +578,17 @@ func (l *Library) Refresh(ctx context.Context, id string) (Entry, error) {
 	return e, nil
 }
 
+// partGrace is how old an upload part file must be before startup treats it as
+// a crash leftover. Two processes may share a directory, so a recent part file
+// may be another process's upload in progress.
+const partGrace = time.Hour
+
 // cleanPartFiles removes upload temp files left by a crash.
 func cleanPartFiles(dir string) {
 	parts, _ := filepath.Glob(filepath.Join(dir, ".upload-*.part"))
 	for _, p := range parts {
-		_ = os.Remove(p)
+		if st, err := os.Lstat(p); err == nil && time.Since(st.ModTime()) > partGrace {
+			_ = os.Remove(p)
+		}
 	}
 }

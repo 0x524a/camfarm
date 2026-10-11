@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/0x524a/camfarm/internal/media"
 	"github.com/0x524a/camfarm/internal/media/fixture"
@@ -256,7 +257,12 @@ func TestUploadReadOnlyLibrary(t *testing.T) {
 
 func TestNewRemovesLeftoverPartFiles(t *testing.T) {
 	dir := t.TempDir()
-	write(t, filepath.Join(dir, "uploads", ".upload-123.part"), []byte("partial"))
+	part := filepath.Join(dir, "uploads", ".upload-123.part")
+	write(t, part, []byte("partial"))
+	past := time.Now().Add(-2 * time.Hour) // only parts older than the grace period are leftovers
+	if err := os.Chtimes(part, past, past); err != nil {
+		t.Fatal(err)
+	}
 	write(t, filepath.Join(dir, "uploads", "keep.ts"), fixture.Bytes())
 	newLib(t, Options{Roots: []string{dir}})
 	if got := uploadEntries(t, dir); len(got) != 1 || got[0] != "keep.ts" {
