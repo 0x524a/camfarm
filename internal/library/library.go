@@ -224,8 +224,10 @@ func (l *Library) ByPath(path string) (Entry, bool) {
 	return Entry{}, false
 }
 
-func idFor(path string) string {
-	h := sha256.Sum256([]byte(path))
+// idFor derives a stable id from the root and the path relative to it, so the
+// same file seen through two overlapping roots gets two distinct entries.
+func idFor(root, rel string) string {
+	h := sha256.Sum256([]byte(root + "\x00" + rel))
 	return hex.EncodeToString(h[:8])
 }
 
@@ -238,6 +240,10 @@ func (l *Library) store(e Entry) {
 // analyze validates one file with a time limit. ok is false only when ctx ended
 // first; a timeout is an ordinary invalid report. The abandoned goroutine
 // finishes on its own: AnalyzeFile cannot be interrupted.
+//
+// Trade-off: the caller's semaphore token is released once analyze gives up on
+// a hung file, so hung files can briefly exceed Workers, and Refresh and Upload
+// call analyze without taking the semaphore at all.
 func (l *Library) analyze(ctx context.Context, path string) (media.Report, bool) {
 	fn := l.opt.Analyze
 	if fn == nil {
@@ -276,12 +282,16 @@ func (l *Library) Scan(ctx context.Context, root string, force bool) error {
 	}
 	l.scanning.Add(1)
 	defer l.scanning.Add(-1)
+	var errs []error
 	for _, r := range roots {
 		if err := l.scanRoot(ctx, r.Path, force); err != nil {
-			return err
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 type candidate struct {
@@ -335,7 +345,7 @@ func (l *Library) scanRoot(ctx context.Context, root string, force bool) error {
 	seen := make(map[string]bool, len(cands))
 	var wg sync.WaitGroup
 	for _, c := range cands {
-		id := idFor(c.path)
+		id := idFor(root, c.name)
 		seen[id] = true
 		if old, ok := l.Resolve(id); ok && !force && old.Size == c.size && old.Modified.Equal(c.mod) {
 			continue
@@ -361,9 +371,15 @@ func (l *Library) scanRoot(ctx context.Context, root string, force bool) error {
 		return err
 	}
 
+	// Prune entries the walk did not see, but only those whose file is really
+	// gone: an entry stored after the walk (concurrent scan, upload, refresh)
+	// must survive.
 	l.mu.Lock()
 	for id, e := range l.entries {
-		if e.Root == root && !seen[id] {
+		if e.Root != root || seen[id] {
+			continue
+		}
+		if st, err := os.Lstat(e.Path); err != nil || !st.Mode().IsRegular() {
 			delete(l.entries, id)
 		}
 	}
@@ -379,7 +395,14 @@ func (l *Library) Refresh(ctx context.Context, id string) (Entry, error) {
 	if !ok {
 		return Entry{}, ErrNotFound
 	}
-	st, err := os.Stat(e.Path)
+	// Lstat plus an exact real-path check: a file swapped for a symlink (or a
+	// parent directory swapped for one) must not be served from outside the root.
+	st, err := os.Lstat(e.Path)
+	if err == nil && st.Mode().IsRegular() {
+		if real, rerr := filepath.EvalSymlinks(e.Path); rerr != nil || real != e.Path {
+			err = errors.New("path no longer resolves to itself")
+		}
+	}
 	if err != nil || !st.Mode().IsRegular() {
 		l.mu.Lock()
 		delete(l.entries, id)

@@ -179,7 +179,7 @@ func TestAnalyzeTimeoutIsAnInvalidEntry(t *testing.T) {
 		Analyze: func(string) media.Report { <-release; return media.Report{} }})
 	scanAll(t, l)
 	es := l.List()
-	if len(es) != 1 || es[0].Report.Status != media.StatusInvalid || es[0].Report.Issues[0].Code != "loader_error" {
+	if len(es) != 1 || es[0].Report.Status != media.StatusInvalid || len(es[0].Report.Issues) == 0 || es[0].Report.Issues[0].Code != "loader_error" {
 		t.Errorf("List = %+v", es)
 	}
 }
@@ -294,5 +294,144 @@ func TestConcurrentScanAndListIsRaceFree(t *testing.T) {
 	wg.Wait()
 	if len(l.List()) != 3 {
 		t.Errorf("List = %v", names(l))
+	}
+}
+
+func TestRefreshRejectsSymlinkSwap(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	p := filepath.Join(dir, "a.ts")
+	write(t, p, fixture.Bytes())
+	write(t, filepath.Join(outside, "secret.ts"), fixture.Bytes())
+	l := newLib(t, Options{Roots: []string{dir}})
+	scanAll(t, l)
+	id := l.List()[0].ID
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.ts"), p); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := l.Refresh(context.Background(), id); !errors.Is(err, ErrNotFound) {
+		t.Errorf("symlink swap: %v", err)
+	}
+	if _, ok := l.Resolve(id); ok {
+		t.Error("entry stayed after the file became a symlink")
+	}
+}
+
+func TestRefreshRejectsSwappedParentDirectory(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(dir, "sub", "a.ts"), fixture.Bytes())
+	write(t, filepath.Join(outside, "a.ts"), fixture.Bytes())
+	l := newLib(t, Options{Roots: []string{dir}})
+	scanAll(t, l)
+	id := l.List()[0].ID
+	if err := os.RemoveAll(filepath.Join(dir, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "sub")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := l.Refresh(context.Background(), id); !errors.Is(err, ErrNotFound) {
+		t.Errorf("parent swap: %v", err)
+	}
+}
+
+func TestScanPruneKeepsEntriesWhoseFileStillExists(t *testing.T) {
+	dir := t.TempDir()
+	l := newLib(t, Options{Roots: []string{dir}})
+	root := l.Roots()[0].Path
+	p := filepath.Join(root, "keep.xyz") // not a scanned extension
+	write(t, p, []byte("x"))
+	st, _ := os.Stat(p)
+	l.store(Entry{ID: idFor(root, "keep.xyz"), Root: root, Path: p, Name: "keep.xyz", Size: st.Size(), Modified: st.ModTime()})
+	scanAll(t, l)
+	if len(l.List()) != 1 {
+		t.Fatalf("entry for an existing file was pruned: %v", names(l))
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	scanAll(t, l)
+	if len(l.List()) != 0 {
+		t.Errorf("entry for a removed file survived: %v", names(l))
+	}
+}
+
+func TestScanContinuesPastFailingRoot(t *testing.T) {
+	a, b := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(b, "b.ts"), fixture.Bytes())
+	l := newLib(t, Options{Roots: []string{a, b}})
+	if err := os.RemoveAll(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Scan(context.Background(), "", false); err == nil {
+		t.Error("want an error for the deleted root")
+	}
+	if got := names(l); len(got) != 1 || got[0] != "b.ts" {
+		t.Errorf("names = %v, want b.ts despite the failing root", got)
+	}
+}
+
+func TestOverlappingRootsGetDistinctIDs(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "sub", "v.ts"), fixture.Bytes())
+	l := newLib(t, Options{Roots: []string{dir}, AllowUIPaths: true})
+	if err := l.AddRoot(filepath.Join(dir, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	scanAll(t, l)
+	es := l.List()
+	if len(es) != 2 || es[0].ID == es[1].ID {
+		t.Fatalf("entries = %+v", es)
+	}
+	roots := l.Roots()
+	for _, e := range es {
+		switch e.Root {
+		case roots[0].Path:
+			if e.Name != filepath.Join("sub", "v.ts") {
+				t.Errorf("outer entry name %q", e.Name)
+			}
+		case roots[1].Path:
+			if e.Name != "v.ts" {
+				t.Errorf("inner entry name %q", e.Name)
+			}
+		default:
+			t.Errorf("entry root %q is neither configured root", e.Root)
+		}
+	}
+}
+
+func TestSymlinkedRootIsResolved(t *testing.T) {
+	real := t.TempDir()
+	write(t, filepath.Join(real, "a.ts"), fixture.Bytes())
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	l := newLib(t, Options{Roots: []string{link}})
+	want, _ := filepath.EvalSymlinks(real)
+	if got := l.Roots()[0].Path; got != want {
+		t.Errorf("root path = %q, want %q", got, want)
+	}
+	scanAll(t, l)
+	es := l.List()
+	if len(es) != 1 || es[0].Path != filepath.Join(want, "a.ts") {
+		t.Errorf("entries = %+v", es)
+	}
+}
+
+func TestScanWithCancelledContextDoesNotPrune(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "a.ts"), fixture.Bytes())
+	l := newLib(t, Options{Roots: []string{dir}})
+	scanAll(t, l)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := l.Scan(ctx, "", true); !errors.Is(err, context.Canceled) {
+		t.Errorf("Scan = %v, want context.Canceled", err)
+	}
+	if len(l.List()) != 1 {
+		t.Errorf("a cancelled scan pruned entries: %v", names(l))
 	}
 }
