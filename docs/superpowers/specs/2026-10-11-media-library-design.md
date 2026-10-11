@@ -162,9 +162,11 @@ func (l *Library) Resolve(id string) (Entry, bool)
 
 ### Upload and delete
 
-- `Upload` streams to `<root>/.<name>.part`, enforcing `--max-upload` (default 2 GiB; exceeding it
-  aborts and removes the part file with `ErrTooLarge`). It then validates the part file, renames
-  it into place and records the entry.
+- `Upload` streams to `<root>/.upload-*.part`, enforcing `--max-upload` (default 2 GiB; exceeding it
+  aborts and removes the part file with `ErrTooLarge`). It then validates the part file, places
+  it and records the entry. Placement is a hard link (which fails rather than overwrite), falling
+  back to reserving the name with an exclusive create and renaming over it on filesystems without
+  hard links (FAT, exFAT, some network and FUSE mounts).
 - The name is reduced to its base, rejects empty names, `.`/`..`, control characters and path
   separators, and must carry a listed video extension. An existing file is never overwritten: a
   numeric suffix is added (`clip-1.mp4`).
