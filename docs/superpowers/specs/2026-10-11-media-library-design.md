@@ -60,7 +60,7 @@ type Facts struct {
     Width, Height int
     FPS           float64 // declared; 0 when the bitstream carries no timing
     MeasuredFPS   float64
-    Duration      time.Duration
+    DurationSeconds float64
     Frames        int
     Keyframes     int
     MaxGOP        int     // longest keyframe-to-keyframe run, in frames
@@ -91,8 +91,7 @@ Invalid (the loader would fail or serve nothing useful):
 |---|---|
 | `unreadable` | open or read failed |
 | `unsupported_container` | `sniff` does not recognise it (message names the first bytes and the supported containers) |
-| `no_video` | container parsed, no H.264/H.265 video track |
-| `unsupported_codec` | video track present, codec not H.264/H.265 |
+| `no_video` | container parsed, no H.264/H.265 video track; this also covers a video track in any other codec, because the loader reports both the same way |
 | `missing_parameter_sets` | no SPS/PPS (H.264) or VPS/SPS/PPS (H.265) |
 | `no_frames` | zero access units |
 | `no_start_keyframe` | first access unit is not a random access point |
@@ -103,11 +102,11 @@ Warning (serves, but behaves unlike a plain IPPP stream):
 | Code | Condition |
 |---|---|
 | `b_frames` | an H.264 slice is type B (parsed from the slice header), or reordering exists in an H.265 stream |
-| `pts_dts_reordering` | PTS ≠ DTS for some access units; detail carries the reorder depth |
+| `pts_dts_reordering` | some access unit has an earlier PTS than one before it in decode order (a constant PTS offset is not reordering); detail carries the reorder depth |
 | `dts_not_monotonic` | DTS goes backwards or repeats |
 | `timestamp_jump` | a DTS step is over 4× the median step |
-| `variable_frame_rate` | step spread over 10% of the median |
-| `fps_mismatch` | declared fps differs from measured by more than 5% |
+| `variable_frame_rate` | (95th minus 5th percentile DTS step) over 10% of the median step, with timestamp jumps excluded from the sample |
+| `fps_mismatch` | declared fps differs by more than 5% from the fps implied by the median DTS step |
 | `long_gop` | longest keyframe gap over 10 seconds |
 | `short_clip` | duration under 1 second (it loops every second) |
 | `odd_dimensions` | width or height is odd |
@@ -146,7 +145,7 @@ func (l *Library) Resolve(id string) (Entry, bool)
 ### Roots and scan
 
 - `Options.Roots` come from `--media-dir` (repeatable). The first writable root is the upload
-  target. With no writable root, upload and delete return `ErrReadOnly` and the UI hides them.
+  target. Roots added from the UI (`AddRoot`) never receive uploads, even when writable. With no writable root, upload and delete return `ErrReadOnly` and the UI hides them.
 - `AddRoot` works only when `Options.AllowUIPaths` is set (flag `--allow-ui-paths`). The path must
   exist and be a directory.
 - Scan walks at most 3 levels deep, lists regular files only, and never follows symlinks (a
@@ -184,12 +183,14 @@ All handlers are thin: parse, call the library, encode. JSON field names are low
 | `DELETE /api/v1/library/files/{id}` | 204; 404 unknown; 409 when a camera uses it; 403 outside the upload root. |
 | `POST /api/v1/library/roots` | Body `{path}`. 403 unless `--allow-ui-paths`; 400 if not an existing directory. |
 
-`POST /api/v1/cameras` accepts `source: {kind: "file", libraryId: "<id>"}`. The server resolves it
-to the library path and returns **422** with the report when its status is `invalid`; a `warning`
-file proceeds. The existing typed `source.path` keeps working unchanged. A camera's DTO gains
+`POST /api/v1/cameras` accepts a top-level `libraryId: "<id>"` alongside `source: {kind: "file"}`
+(it is not a field of `source`). The server resolves it to the library path, and re-checks the
+file's size and mtime at creation time, re-validating if it changed since the last scan. It returns
+**422** with the report when the status is `invalid`; a `warning` file proceeds. The existing typed `source.path` keeps working unchanged. A camera's DTO gains
 `libraryId` and `warnings: [Issue…]` when it came from the library, so the card can show them.
 
-The upload body is read with `http.MaxBytesReader`. Responses never include the contents of a file
+The upload body is read with `http.MaxBytesReader`. Upload requests need a longer or disabled
+`ReadTimeout` than the server's default, or a large file on a slow link is cut off mid-transfer. Responses never include the contents of a file
 or any path outside a configured root.
 
 ## 4. Binary: `cmd/camfarm`
