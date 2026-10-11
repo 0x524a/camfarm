@@ -49,11 +49,17 @@ Early:
   `/api/v1/` (`fleet`, `cameras`, `cameras/{id}`, `cameras/{id}/snapshot.jpg`,
   `cameras/{id}/faults`, and the `events` stream). Seeds are decimal strings in the API. Flags:
   `--spec`, `--seed`, `--cameras` (mutually exclusive with `--spec`), `--http-addr`,
-  `--listen-host`, `--rtsp-port`, `--onvif-port`, `--discovery`, `--discovery-interface`; run with `-h` for details. **Security:** the
+  `--listen-host`, `--rtsp-port`, `--onvif-port`, `--discovery`, `--discovery-interface`, `--media-dir`, `--allow-ui-paths`, `--max-upload`; run with `-h` for details. **Security:** the
   dashboard can start servers and, with file sources, make the process read local paths, and the
   page shows cameras' Digest credentials. It listens on loopback by default and has *no*
   authentication, token, Host-header check or CSRF protection, so a malicious web page can reach a
   loopback API through DNS rebinding or CSRF. Do not expose it.
+- **Works:** a media library — point the binary at directories of your own video
+  with `--media-dir` (repeatable) and the dashboard API lists, validates and
+  serves them. Each file is checked once, on startup, on rescan and on upload;
+  the report says whether it is `valid`, `warning` (for example B-frames,
+  reordered timestamps, a variable frame rate) or `invalid` and why. Invalid
+  files cannot become cameras; files with warnings can.
 - **Works:** ten fault effects, each tied to a real field bug (table below): the frame-path faults
   `frame_drop`, `packet_loss` and `keyframe_starvation`, the timing faults `jitter`,
   `burst_delivery`, `pts_dts_mismatch` and `pts_delayed`, and the control-plane faults
@@ -197,6 +203,36 @@ Kept in step with the catalogue in `internal/fault` by a test that fails if this
 | `pts_delayed` | yes | Camera whose timestamps lag capture, constantly or by drift: what a latency profiler such as framelag meets. |
 | `accept_then_silence` | no | Camera that accepts the TCP connection and never answers. |
 <!-- fault-table:end -->
+
+## Bring your own video
+
+```sh
+camfarm --media-dir /srv/clips --media-dir ./more-clips
+```
+
+A Docker volume or bind mount is just a directory, so inside a container point
+`--media-dir` at the mount path.
+
+- Files with a video extension (`.ts .mp4 .m4v .mov .mkv .avi .h264 .h265 .mpg`)
+  are listed, up to three directories deep (`root/a/b/file.mp4` is listed,
+  `root/a/b/c/file.mp4` is not). Symlinks and dot-files are skipped.
+  The container is judged from content, so a `.mkv` is reported as an
+  unsupported container rather than ignored. Only MPEG-TS and MP4/MOV carrying
+  H.264 or H.265 can be served.
+- Dashboard uploads go to the first writable `--media-dir`, capped by
+  `--max-upload` (default 2GiB). An upload that fails validation is kept so its
+  report stays visible; delete it with `DELETE /api/v1/library/files/{id}`.
+- `--allow-ui-paths` lets the dashboard add directories by typed path. It is off
+  by default because the dashboard has no authentication and the option lets
+  anyone who can reach it point the process at any directory it can read.
+- A camera takes a library file with `{"id": "cam", "libraryId": "<id from GET
+  /api/v1/library>"}`. The file is re-checked first, since it may have changed
+  since the scan.
+
+What the validator can and cannot see: it reports what camfarm's own parser
+loads. B-frames are read from H.264 slice headers; for H.265 they are inferred
+from timestamp reordering, because H.265 slice types are not parsed. It does not
+repair or transcode anything.
 
 ## Use as a library
 

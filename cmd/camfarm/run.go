@@ -19,6 +19,7 @@ import (
 
 	"github.com/0x524a/camfarm"
 	"github.com/0x524a/camfarm/internal/dashboard"
+	"github.com/0x524a/camfarm/internal/library"
 )
 
 const usage = `CamFarm runs a simulated RTSP/ONVIF camera fleet with a web dashboard.
@@ -27,7 +28,11 @@ SECURITY: the dashboard listens on loopback by default and has no
 authentication, no Host-header check and no CSRF protection. Its API can start
 servers, and with file sources make this process read local paths. The
 dashboard also displays cameras' Digest credentials. Do not expose it to a
-network you do not trust.
+network you do not trust. --media-dir makes every video file under that
+directory listable and servable, and uploads (capped by --max-upload) write to the
+first writable one;
+--allow-ui-paths lets anyone who can reach the dashboard point it at any
+readable directory.
 
 Seed: --seed accepts decimal or 0x-prefixed hex (a leading 0 means octal, per
 Go's flag parsing). Without --seed, a --spec file's own seed is used (0 if the
@@ -36,6 +41,12 @@ file has none); with neither, a random seed is drawn and printed on stderr.
 
 Flags:
 `
+
+// stringList is a repeatable string flag.
+type stringList []string
+
+func (l *stringList) String() string     { return strings.Join(*l, ",") }
+func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 
 // exitError carries an exit code from run to main. quiet means the message was
 // already printed (by the flag package) and main must not print it again.
@@ -67,6 +78,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		"multicast needs a non-loopback --listen-host and often fails in Docker and CI; use unicast there.\n"+
 		"replaces the spec file's whole discovery block; unicast takes no interface")
 	discoveryIface := fs.String("discovery-interface", "", "interface (name or IP) that joins the multicast group; only with multicast discovery")
+	var mediaDirs stringList
+	fs.Var(&mediaDirs, "media-dir", "directory of video files for the media library; repeatable.\n"+
+		"the first writable one receives dashboard uploads. Files are validated once, at startup, on rescan and on upload")
+	allowUIPaths := fs.Bool("allow-ui-paths", false, "let the dashboard add more media directories by typed path (any directory this process can read)")
+	maxUpload := fs.String("max-upload", "2GiB", "largest accepted dashboard upload, e.g. 500MB or 2GiB")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -83,6 +99,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	if _, _, err := net.SplitHostPort(*httpAddr); err != nil {
 		return usageErr("invalid --http-addr %q: %v", *httpAddr, err)
+	}
+	maxBytes, err := parseSize(*maxUpload)
+	if err != nil {
+		return usageErr("invalid --max-upload %q: %v", *maxUpload, err)
+	}
+	for _, d := range mediaDirs {
+		if d == "" {
+			return usageErr("--media-dir must not be empty")
+		}
 	}
 	if set["cameras"] && *specPath != "" {
 		return usageErr("--cameras and --spec are mutually exclusive")
@@ -130,6 +155,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return usageErr("%v", err)
 	}
 
+	lib, err := library.New(library.Options{Roots: mediaDirs, AllowUIPaths: *allowUIPaths, MaxUpload: maxBytes})
+	if err != nil {
+		return usageErr("--media-dir: %v", err)
+	}
+
 	ln, err := net.Listen("tcp", *httpAddr)
 	if err != nil {
 		return fmt.Errorf("dashboard listener: %w", err)
@@ -159,7 +189,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	bctx, bcancel := context.WithCancel(context.Background())
 	defer bcancel()
 	srv := &http.Server{
-		Handler:           dashboard.Handler(fleet, dashboard.Options{}),
+		Handler:           dashboard.Handler(fleet, dashboard.Options{Library: lib}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second, // bounds slow request bodies; SSE is response-only
 		IdleTimeout:       60 * time.Second,
@@ -169,6 +199,18 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
 	_, _ = fmt.Fprintf(stdout, "dashboard: http://%s/\n", ln.Addr())
+
+	// Scan in the background; wait for it on the way out so nothing writes to
+	// stderr after run returns.
+	scanCtx, scanCancel := context.WithCancel(ctx)
+	scanDone := make(chan struct{})
+	defer func() { scanCancel(); <-scanDone }()
+	go func() {
+		defer close(scanDone)
+		if err := lib.Scan(scanCtx, "", false); err != nil && scanCtx.Err() == nil {
+			_, _ = fmt.Fprintf(stderr, "warning: scanning the media library: %v\n", err)
+		}
+	}()
 
 	select {
 	case <-ctx.Done():
