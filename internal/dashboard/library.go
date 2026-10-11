@@ -258,8 +258,12 @@ func (s *server) specFromLibrary(w http.ResponseWriter, r *http.Request, req add
 	}
 	e, err := s.lib.Refresh(r.Context(), req.LibraryID)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			writeErr(w, err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeError(w, http.StatusGatewayTimeout, "checking the file timed out")
+			return spec, false
+		}
+		if errors.Is(err, context.Canceled) {
+			writeError(w, 499, "request cancelled")
 			return spec, false
 		}
 		writeLibraryErr(w, err)

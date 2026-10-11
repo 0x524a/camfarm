@@ -46,7 +46,10 @@ type server struct {
 	lib   *library.Library
 	// libMu makes "is this library file in use?" and "use this library file"
 	// atomic with respect to each other: held by deleteFile across its in-use
-	// check and Delete, and by addCamera across Refresh and AddCamera.
+	// check and Delete, and by addCamera across Refresh and AddCamera. Refresh
+	// may re-analyze a changed file, up to the library's analyze timeout, so
+	// library deletes and libraryId adds queue behind it (acceptable for a dev
+	// tool). Typed-path adds do not take it.
 	libMu sync.Mutex
 }
 
@@ -186,12 +189,15 @@ func (s *server) addCamera(w http.ResponseWriter, r *http.Request) {
 	if req.LibraryID != "" {
 		// libMu spans the re-check and the add, so deleteFile cannot remove the
 		// file between them.
-		s.libMu.Lock()
-		spec, ok := s.specFromLibrary(w, r, req)
-		if ok {
-			cam, err = s.fleet.AddCamera(spec)
-		}
-		s.libMu.Unlock()
+		ok := func() bool {
+			s.libMu.Lock()
+			defer s.libMu.Unlock()
+			spec, ok := s.specFromLibrary(w, r, req)
+			if ok {
+				cam, err = s.fleet.AddCamera(spec)
+			}
+			return ok
+		}()
 		if !ok {
 			return
 		}

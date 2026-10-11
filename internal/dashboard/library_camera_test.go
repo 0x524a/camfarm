@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/0x524a/camfarm/internal/library"
 	"github.com/0x524a/camfarm/internal/media"
@@ -218,7 +219,24 @@ func TestTypedNonCanonicalPathStillLinks(t *testing.T) {
 // order the requests land in, no camera may be left serving a deleted file.
 func TestCameraCreationRacingFileDeletion(t *testing.T) {
 	ts, _, root := libServer(t, library.Options{})
-	const rounds, adders = 25, 4
+	const rounds, adders = 60, 4
+	// Goroutines must not call t.Fatal, so they use plain HTTP and report a
+	// status code (or -1 for a transport error).
+	call := func(method, url, body string) int {
+		req, err := http.NewRequest(method, url, strings.NewReader(body))
+		if err != nil {
+			return -1
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return -1
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode
+	}
+	var totalAdds, totalDeletes int
 	for round := 0; round < rounds; round++ {
 		name := fmt.Sprintf("race%d.ts", round)
 		var f fileDTO
@@ -227,38 +245,61 @@ func TestCameraCreationRacingFileDeletion(t *testing.T) {
 			t.Fatalf("upload %s failed", name)
 		}
 
+		// Stagger which side goes first so both outcomes are exercised: the
+		// delete wins some rounds, the adds win others, and some are a true race.
+		var addDelay, delDelay time.Duration
+		switch round % 3 {
+		case 0:
+			delDelay = 3 * time.Millisecond
+		case 1:
+			addDelay = 3 * time.Millisecond
+		}
+
 		var wg sync.WaitGroup
 		start := make(chan struct{})
-		check := func(r *http.Response, ok ...int) {
-			defer r.Body.Close()
-			if r.StatusCode >= 500 {
-				b, _ := io.ReadAll(r.Body)
-				t.Errorf("5xx: %d %s", r.StatusCode, b)
-				return
-			}
-			for _, c := range ok {
-				if r.StatusCode == c {
-					return
-				}
-			}
-			t.Errorf("unexpected status %d", r.StatusCode)
-		}
+		addStatus := make([]int, adders)
+		delStatus := -2
 		for i := 0; i < adders; i++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				<-start
-				check(addFromLibrary(t, ts.URL, fmt.Sprintf("r%d-c%d", round, i), f.ID), 201, 404)
+				time.Sleep(addDelay)
+				addStatus[i] = call("POST", ts.URL+"/api/v1/cameras", fmt.Sprintf(`{"id":"r%d-c%d","libraryId":%q}`, round, i, f.ID))
 			}()
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			<-start
-			check(do(t, "DELETE", ts.URL+"/api/v1/library/files/"+f.ID, ""), 204, 409, 404)
+			time.Sleep(delDelay)
+			delStatus = call("DELETE", ts.URL+"/api/v1/library/files/"+f.ID, "")
 		}()
 		close(start)
 		wg.Wait()
+
+		added := 0
+		for _, c := range addStatus {
+			switch {
+			case c == 201:
+				added++
+			case c == 404:
+			default:
+				t.Errorf("round %d: add status %d", round, c)
+			}
+		}
+		switch delStatus {
+		case 204, 409, 404:
+		default:
+			t.Errorf("round %d: delete status %d", round, delStatus)
+		}
+		totalAdds += added
+		if delStatus == 204 {
+			totalDeletes++
+			if added > 0 {
+				t.Errorf("round %d: %d cameras were created from a file that was also deleted", round, added)
+			}
+		}
 
 		// Invariant: every camera that exists has its file on disk.
 		var cams []cameraDTO
@@ -272,5 +313,48 @@ func TestCameraCreationRacingFileDeletion(t *testing.T) {
 			do(t, "DELETE", ts.URL+"/api/v1/cameras/"+c.ID, "").Body.Close()
 		}
 		_ = os.Remove(filepath.Join(root, name))
+	}
+	if totalAdds == 0 || totalDeletes == 0 {
+		t.Errorf("the race was not exercised: %d successful adds, %d successful deletes", totalAdds, totalDeletes)
+	}
+}
+
+func TestLibraryIDWithUnknownTopLevelFieldIs400(t *testing.T) {
+	ts, _, root := libServer(t, library.Options{})
+	id := stage(t, ts.URL, root, "clip.ts", fixture.Bytes())
+	r := do(t, "POST", ts.URL+"/api/v1/cameras", `{"id":"x","libraryId":"`+id+`","bogus":1}`)
+	if r.StatusCode != 400 {
+		t.Errorf("status = %d, want 400", r.StatusCode)
+	}
+}
+
+func TestCameraWithoutWarningsOmitsTheKey(t *testing.T) {
+	ts, _, root := libServer(t, library.Options{})
+	id := stage(t, ts.URL, root, "clip.ts", fixture.Bytes())
+	resp := addFromLibrary(t, ts.URL, "plain", id)
+	var raw map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&raw)
+	if _, has := raw["warnings"]; has {
+		t.Errorf("warnings key present: %v", raw["warnings"])
+	}
+	if raw["libraryId"] != id {
+		t.Errorf("libraryId = %v", raw["libraryId"])
+	}
+}
+
+func TestLibraryCameraErrorsDoNotEchoPaths(t *testing.T) {
+	ts, _, root := libServer(t, library.Options{})
+	bad := stage(t, ts.URL, root, "junk.mp4", []byte("this is just text"))
+	gone := stage(t, ts.URL, root, "gone.ts", fixture.Bytes())
+	if err := os.Remove(filepath.Join(root, "gone.ts")); err != nil {
+		t.Fatal(err)
+	}
+	for name, libID := range map[string]string{"invalid 422": bad, "vanished 404": gone, "unknown 404": "deadbeef"} {
+		t.Run(name, func(t *testing.T) {
+			b, _ := io.ReadAll(addFromLibrary(t, ts.URL, "e", libID).Body)
+			if strings.Contains(string(b), root) {
+				t.Errorf("response leaks the library path: %s", b)
+			}
+		})
 	}
 }
