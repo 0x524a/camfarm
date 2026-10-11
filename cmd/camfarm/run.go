@@ -25,8 +25,8 @@ import (
 const usage = `CamFarm runs a simulated RTSP/ONVIF camera fleet with a web dashboard.
 
 SECURITY: the dashboard listens on loopback by default and has no
-authentication and no Host-header check, and only the media library's
-mutating endpoints refuse cross-origin browser requests. Its API can start
+authentication and no Host-header check, and no CSRF protection except that the
+media library's mutating endpoints refuse cross-origin browser requests. Its API can start
 servers, and with file sources make this process read local paths (any path
 this process can read, validated or not). The
 dashboard also displays cameras' Digest credentials. Do not expose it to a
