@@ -86,8 +86,8 @@ func (r *Report) finish() Report {
 }
 
 // Analyze inspects parsed media. size is the file's size in bytes. It is pure:
-// it never touches the filesystem. It leaves Facts.Container empty; AnalyzeFile
-// fills it.
+// it never touches the filesystem. It leaves Facts.Container empty; the file-level
+// loader fills it.
 func Analyze(m *Media, size int64) Report {
 	r := Report{Facts: Facts{
 		Codec: m.Codec, Width: m.Width, Height: m.Height, FPS: m.FPS,

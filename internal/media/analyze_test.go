@@ -36,6 +36,20 @@ func codesOf(r Report) []string {
 	return c
 }
 
+// vfrExtra lengthens the steps into frames 10 and 20 by extra ticks each.
+func vfrExtra(extra int64) func(i int, au *AccessUnit) {
+	return func(i int, au *AccessUnit) {
+		d := int64(i) * 3000
+		if i >= 10 {
+			d += extra
+		}
+		if i >= 20 {
+			d += extra
+		}
+		au.DTS, au.PTS = d, d
+	}
+}
+
 func TestAnalyze(t *testing.T) {
 	const step = 3000 // 30 fps
 	onlyFirstKey := func(i int, au *AccessUnit) { au.RandomAccess = i == 0 }
@@ -86,6 +100,10 @@ func TestAnalyze(t *testing.T) {
 			}
 			au.DTS, au.PTS = d, d
 		}), 1000, StatusWarning, []string{"variable_frame_rate"}},
+		// Two steps of 3000+extra among 27 of 3000: p5 = 3000, p95 = 3000+extra,
+		// median 3000, so the spread is extra/3000. 300 is exactly 10%.
+		{"step spread of exactly 10% is fine", synth(CodecH264, 30, step, vfrExtra(300)), 1000, StatusValid, nil},
+		{"step spread just over 10%", synth(CodecH264, 30, step, vfrExtra(301)), 1000, StatusWarning, []string{"variable_frame_rate"}},
 		{"declared fps disagrees with the timestamps", func() *Media {
 			m := synth(CodecH264, 30, step, nil)
 			m.FPS = 25
@@ -115,7 +133,8 @@ func TestAnalyze(t *testing.T) {
 				au.PTS += 3*step + 1
 			}
 		}), 1000, StatusWarning, []string{"timestamp_jump"}},
-		// Measured fps is 30. 31.55 is 4.9% away, 31.6 is 5.06% away. 60 frames
+		// Measured fps is 30. 31.55 is 4.9% away, 31.6 is 5.06% away (both
+		// of the declared fps). 60 frames
 		// keep the clip over one second whatever FrameDuration rounds to.
 		{"declared fps just inside 5%", func() *Media {
 			m := synth(CodecH264, 60, step, nil)
@@ -172,7 +191,7 @@ func TestAnalyzeReorderDepth(t *testing.T) {
 	}
 }
 
-// The last frame sorts before all 39 frames ahead of it in decode order, but
+// The last frame is presented before all 39 frames preceding it in decode order, but
 // only the 32 most recent are examined.
 func TestAnalyzeReorderDepthWindow(t *testing.T) {
 	m := synth(CodecH264, 40, 3000, func(i int, au *AccessUnit) {

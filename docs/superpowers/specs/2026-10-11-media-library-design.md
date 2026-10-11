@@ -118,8 +118,8 @@ that of a frame decoded before it. A constant PTS-DTS offset is not flagged, and
 read the SPS reorder fields. The `b_frames` message says which evidence it used, so the report
 never claims more than it checked.
 
-`MaxGOP`, `ReorderDepth`, step statistics and the thresholds above are constants in one file so a
-test pins each one.
+The thresholds above are constants in one file so a test pins each one. `MaxGOP`, `ReorderDepth`
+and the step statistics are computed from the file, not constants.
 
 ## 2. Library: `internal/library`
 
