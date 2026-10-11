@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -99,12 +100,13 @@ type Fleet struct {
 	closed  bool
 	cameras map[string]*Camera
 	order   []string
-	// sources caches each distinct SourceSpec's parsed media for the fleet's
-	// entire lifetime, so AddCamera can share a source the same way Start
-	// already shares one across cameras present from the beginning. Never
-	// evicted, even after the last camera using an entry is removed: the
-	// bundled fixtures are small, and eviction has no proven need yet.
-	sources map[SourceSpec]*media.Media
+	// sources caches each distinct source's parsed media so AddCamera can
+	// share a source the same way Start shares one across the cameras present
+	// from the beginning. A file source's key includes the file's size and
+	// modification time, so a file changed since it was parsed is parsed again;
+	// its entry is evicted when the last camera using it is removed. Fixture
+	// entries are small and stay for the fleet's lifetime.
+	sources map[sourceKey]*media.Media
 	// nextIndex is the next stable index handed to root.Camera for seed
 	// derivation. It only ever increases, even across RemoveCamera calls, so a
 	// dynamically added camera's seed is a pure function of call order.
@@ -153,7 +155,7 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 		log:      log,
 		rec:      obs.New(maxEvents),
 		cameras:  make(map[string]*Camera, len(valid.Cameras)),
-		sources:  make(map[SourceSpec]*media.Media),
+		sources:  make(map[sourceKey]*media.Media),
 	}
 	f.ev.init()
 
@@ -169,17 +171,9 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 	}
 
 	for i, cs := range valid.Cameras {
-		m, ok := f.sources[cs.Source]
-		if !ok {
-			src, err := newSource(cs.Source)
-			if err != nil {
-				return nil, err
-			}
-			m, err = src.Load()
-			if err != nil {
-				return nil, fmt.Errorf("camfarm: camera %q: %w", cs.ID, err)
-			}
-			f.sources[cs.Source] = m
+		m, err := f.sourceMedia(cs)
+		if err != nil {
+			return nil, err
 		}
 		if err := checkAdvertised(cs, m); err != nil {
 			return nil, err
@@ -285,6 +279,58 @@ func StartT(t TB, spec Spec) *Fleet {
 	return f
 }
 
+// sourceKey identifies one parse of a source. For a file, size and mtime are
+// taken at lookup time, so a file overwritten or replaced since it was last
+// parsed gets a new key and is parsed again.
+type sourceKey struct {
+	spec  SourceSpec
+	size  int64
+	mtime int64
+}
+
+// sourceMedia returns the parsed media for cs's source, parsing it unless the
+// same source (same file, as far as size and mtime can tell) is already
+// cached. Start and AddCamera share it. The caller holds f.mu, or is Start,
+// before the fleet is visible to anyone else.
+func (f *Fleet) sourceMedia(cs CameraSpec) (*media.Media, error) {
+	key := sourceKey{spec: cs.Source}
+	if cs.Source.Kind == SourceFile {
+		info, err := os.Stat(cs.Source.Path)
+		if err != nil {
+			return nil, fmt.Errorf("camfarm: camera %q: %w", cs.ID, err)
+		}
+		key.size, key.mtime = info.Size(), info.ModTime().UnixNano()
+	}
+	if m, ok := f.sources[key]; ok {
+		return m, nil
+	}
+	src, err := newSource(cs.Source)
+	if err != nil {
+		return nil, err
+	}
+	m, err := src.Load()
+	if err != nil {
+		return nil, fmt.Errorf("camfarm: camera %q: %w", cs.ID, err)
+	}
+	f.sources[key] = m
+	return m, nil
+}
+
+// evictUnusedSource drops a file source's cache entries once no camera uses
+// the media. The caller holds f.mu.
+func (f *Fleet) evictUnusedSource(m *media.Media) {
+	for _, c := range f.cameras {
+		if c.media == m {
+			return
+		}
+	}
+	for k, v := range f.sources {
+		if v == m && k.spec.Kind == SourceFile {
+			delete(f.sources, k)
+		}
+	}
+}
+
 // newSource builds a media source from a spec.
 func newSource(s SourceSpec) (media.Source, error) {
 	switch s.Kind {
@@ -380,17 +426,9 @@ func (f *Fleet) AddCamera(spec CameraSpec) (*Camera, error) {
 		return nil, err
 	}
 
-	m, ok := f.sources[cs.Source]
-	if !ok {
-		src, err := newSource(cs.Source)
-		if err != nil {
-			return nil, err
-		}
-		m, err = src.Load()
-		if err != nil {
-			return nil, fmt.Errorf("camfarm: camera %q: %w", cs.ID, err)
-		}
-		f.sources[cs.Source] = m
+	m, err := f.sourceMedia(cs)
+	if err != nil {
+		return nil, err
 	}
 	if err := checkAdvertised(cs, m); err != nil {
 		return nil, err
@@ -458,6 +496,7 @@ func (f *Fleet) RemoveCamera(id string) error {
 			break
 		}
 	}
+	f.evictUnusedSource(cam.media)
 	f.mu.Unlock()
 	f.publish(Event{Type: EventCameraRemoved, Camera: id, FrameIndex: -1})
 

@@ -73,6 +73,47 @@ func TestCameraFromLibraryFileServesIt(t *testing.T) {
 	}
 }
 
+// TestOverwrittenLibraryFileServesTheNewMedia walks the stale-media workflow
+// through the HTTP API: a camera from a file, the camera removed, the file
+// overwritten with different media, rescanned, and a new camera from the same
+// library entry must report the new codec.
+func TestOverwrittenLibraryFileServesTheNewMedia(t *testing.T) {
+	ts, _, root := libServer(t, library.Options{})
+	id := stage(t, ts.URL, root, "clip.ts", fixture.Bytes())
+
+	codecOf := func(cam string) string {
+		t.Helper()
+		resp := do(t, "GET", ts.URL+"/api/v1/cameras/"+cam, "")
+		var dto cameraDTO
+		_ = json.NewDecoder(resp.Body).Decode(&dto)
+		return dto.Codec
+	}
+
+	if resp := addFromLibrary(t, ts.URL, "first", id); resp.StatusCode != 201 {
+		t.Fatalf("add first = %d", resp.StatusCode)
+	}
+	if got := codecOf("first"); got != "H264" {
+		t.Fatalf("first codec = %q", got)
+	}
+	if r := do(t, "DELETE", ts.URL+"/api/v1/cameras/first", ""); r.StatusCode != 204 {
+		t.Fatalf("delete camera = %d", r.StatusCode)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "clip.ts"), fixture.BytesH265(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v := decodeLibrary(t, do(t, "POST", ts.URL+"/api/v1/library/scan", ""))
+	if len(v.Files) != 1 {
+		t.Fatalf("files = %+v", v.Files)
+	}
+	if resp := addFromLibrary(t, ts.URL, "second", v.Files[0].ID); resp.StatusCode != 201 {
+		t.Fatalf("add second = %d", resp.StatusCode)
+	}
+	if got := codecOf("second"); got != "H265" {
+		t.Fatalf("codec after overwrite = %q, want H265", got)
+	}
+}
+
 func TestCameraFromWarningFileCarriesItsWarnings(t *testing.T) {
 	ts, _, root := libServer(t, library.Options{})
 	out := filepath.Join(root, "b.mp4")
