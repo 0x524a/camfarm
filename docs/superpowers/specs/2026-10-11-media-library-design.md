@@ -40,7 +40,7 @@ no employer or client names anywhere.
 | Question | Decision |
 |---|---|
 | How do directories reach the farm? | Startup roots always; UI-typed roots only behind `--allow-ui-paths` (off by default). |
-| How are files validated? | Pure Go, through camfarm's own loader (`internal/media`), plus `mediacommon` SPS/slice parsing. No `ffprobe`. `rtspeek` is not used: it is an RTSP client with no file or B-frame logic. |
+| How are files validated? | Pure Go, through camfarm's own loader (`internal/media`), plus `mediacommon` for SPS parsing and random-access detection. The H.264 slice type is read by camfarm's own parser in `internal/media/slicetype.go` (a small Exp-Golomb reader), not by `mediacommon`. No `ffprobe`. `rtspeek` is not used: it is an RTSP client with no file or B-frame logic. |
 | What may become a camera? | `valid` and `warning` files. `invalid` files are blocked. |
 | What happens to an invalid upload? | It is kept, flagged, with its reason, and can be deleted. |
 
@@ -131,10 +131,11 @@ and the step statistics are computed from the file, not constants.
 type Library struct { /* roots, cache, worker pool, upload dir */ }
 
 type Entry struct {
-    ID       string    // stable: hex of sha256(root path + "\x00" + relative path)
+    ID       string    // stable: first 8 bytes (16 hex chars) of sha256(root path + "\x00" + relative path)
     Root     string
     Path     string    // absolute
     Name     string    // relative to its root
+    Size     int64     // bytes, as of the last check
     Modified time.Time
     Report   media.Report
 }
@@ -151,7 +152,7 @@ func (l *Library) Resolve(id string) (Entry, bool)
 ### Roots and scan
 
 - `Options.Roots` come from `--media-dir` (repeatable). The first writable root is the upload
-  target. Roots added from the UI (`AddRoot`) never receive uploads, even when writable. With no writable root, upload and delete return `ErrReadOnly` and the UI hides them.
+  target. Roots added from the UI (`AddRoot`) never receive uploads, even when writable. With no writable root, `Upload` returns `ErrReadOnly` and `Delete` returns `ErrNotDeletable`, and the UI hides both.
 - `AddRoot` works only when `Options.AllowUIPaths` is set (flag `--allow-ui-paths`). The path must
   exist and be a directory.
 - Scan walks at most 3 levels deep, lists regular files only, and never follows symlinks (a
@@ -191,8 +192,8 @@ All handlers are thin: parse, call the library, encode. JSON field names are low
 | Method and path | Behaviour |
 |---|---|
 | `GET /api/v1/library` | `{roots: [{path, writable, ui}], uploadEnabled, allowUIPaths, files: [Entry…]}`. Each file also carries `inUseBy: [cameraId…]`. |
-| `POST /api/v1/library/scan` | Body `{force?: bool, root?: string}`. Scans one root or all. Returns the same shape as GET. |
-| `POST /api/v1/library/upload` | `multipart/form-data`, one `file` part. Returns the new entry (201), including an `invalid` one. 413 over `--max-upload`; 400 on a bad name; 403 when no root is writable. |
+| `POST /api/v1/library/scan` | Body `{force?: bool, root?: string}`. Scans one root or all. Returns the same shape as GET plus `scanErrors: [string]` (empty, never null). A media directory that has vanished or become unreadable has all its entries dropped and is named there as `media directory unavailable: <path>`; the response is still 200 and the other roots are served. |
+| `POST /api/v1/library/upload` | `multipart/form-data`, one `file` part. Returns the new entry (201), including an `invalid` one. 413 over `--max-upload`; 400 on a bad name; 403 when no root is writable; 429 with `Retry-After` when 4 uploads are already in flight. |
 | `DELETE /api/v1/library/files/{id}` | 204; 404 unknown; 409 when a camera uses it; 403 for any file outside `uploads/`. |
 | `POST /api/v1/library/roots` | Body `{path}`. 403 unless `--allow-ui-paths`; 400 if not an existing directory. |
 
@@ -201,6 +202,13 @@ All handlers are thin: parse, call the library, encode. JSON field names are low
 file's size and mtime at creation time, re-validating if it changed since the last scan. It returns
 **422** with the report when the status is `invalid`; a `warning` file proceeds. The existing typed `source.path` keeps working unchanged. A camera's DTO gains
 `libraryId` and `warnings: [Issue…]` when it came from the library, so the card can show them.
+
+Every mutating library endpoint (upload, scan, delete, roots) first refuses a request a browser sent
+for another origin: `403 {"error":"cross-origin request refused"}` when `Sec-Fetch-Site` is
+`cross-site`, when it is `same-site` without an `Origin` that matches, or when an `Origin` header is
+present whose host does not equal the request `Host`. This runs before any body is read, because
+`multipart/form-data` needs no CORS preflight. Requests with neither header (curl, Go clients) pass.
+Library analyses share one worker pool (`Workers`) across scan, refresh and upload.
 
 The upload body is read with `http.MaxBytesReader`. Upload requests need a longer or disabled
 `ReadTimeout` than the server's default, or a large file on a slow link is cut off mid-transfer. Responses never include the contents of a file
