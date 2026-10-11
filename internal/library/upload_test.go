@@ -144,7 +144,7 @@ func TestUploadNeverOverwrites(t *testing.T) {
 func TestConcurrentUploadsOfOneNameKeepEveryFile(t *testing.T) {
 	l, root := upLib(t, 0)
 	var wg sync.WaitGroup
-	for i := 0; i < 6; i++ {
+	for i := 0; i < maxConcurrentUploads; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -154,11 +154,11 @@ func TestConcurrentUploadsOfOneNameKeepEveryFile(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if got := uploadEntries(t, root); len(got) != 6 {
-		t.Errorf("directory = %v, want 6 distinct files", got)
+	if got := uploadEntries(t, root); len(got) != maxConcurrentUploads {
+		t.Errorf("directory = %v, want %d distinct files", got, maxConcurrentUploads)
 	}
-	if len(l.List()) != 6 {
-		t.Errorf("List has %d entries, want 6", len(l.List()))
+	if len(l.List()) != maxConcurrentUploads {
+		t.Errorf("List has %d entries, want %d", len(l.List()), maxConcurrentUploads)
 	}
 }
 

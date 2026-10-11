@@ -148,6 +148,9 @@ func writeLibraryErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &tooBig), errors.Is(err, library.ErrTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+	case errors.Is(err, library.ErrBusy):
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusTooManyRequests, err.Error())
 	case errors.Is(err, os.ErrDeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
 		writeError(w, http.StatusRequestTimeout, "the upload stalled")
 	case errors.Is(err, io.ErrUnexpectedEOF):

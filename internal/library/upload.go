@@ -107,6 +107,14 @@ func (l *Library) Upload(ctx context.Context, name string, r io.Reader) (Entry, 
 	if err != nil {
 		return Entry{}, err
 	}
+	// A slot is taken without waiting: a caller beyond the cap is told to retry
+	// rather than queued holding a connection and a request body.
+	select {
+	case l.uploadSlots <- struct{}{}:
+		defer func() { <-l.uploadSlots }()
+	default:
+		return Entry{}, ErrBusy
+	}
 	dir := filepath.Join(rootPath, uploadsDirName)
 	if err := ensureUploadsDir(dir); err != nil {
 		return Entry{}, err
@@ -136,7 +144,7 @@ func (l *Library) Upload(ctx context.Context, name string, r io.Reader) (Entry, 
 	if err := ctx.Err(); err != nil {
 		return Entry{}, err
 	}
-	rep, ok := l.analyze(ctx, partPath)
+	rep, ok := l.analyzeLimited(ctx, partPath)
 	if !ok {
 		return Entry{}, ctx.Err()
 	}

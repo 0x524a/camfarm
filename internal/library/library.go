@@ -31,6 +31,7 @@ var (
 	ErrBadName         = errors.New("library: invalid file name")
 	ErrUIPathsDisabled = errors.New("library: adding directories from the UI is disabled (start with --allow-ui-paths)")
 	ErrNotDirectory    = errors.New("library: not a directory")
+	ErrBusy            = errors.New("library: too many uploads in progress; try again shortly")
 )
 
 const (
@@ -41,6 +42,10 @@ const (
 	defaultTimeout = 30 * time.Second
 	// maxDepth is how many path components below a root a file may sit.
 	maxDepth = 3
+	// maxConcurrentUploads caps uploads in flight. Each holds a part file open
+	// and, once received, is parsed fully in memory, so unbounded uploads would
+	// be unbounded memory.
+	maxConcurrentUploads = 4
 )
 
 // videoExt lists the extensions that are scanned. The container is still
@@ -84,6 +89,8 @@ type Entry struct {
 type Library struct {
 	opt Options
 	sem chan struct{}
+	// uploadSlots holds one token per upload in flight; see maxConcurrentUploads.
+	uploadSlots chan struct{}
 
 	scanning atomic.Int32
 
@@ -105,7 +112,10 @@ func New(opt Options) (*Library, error) {
 	if opt.Timeout <= 0 {
 		opt.Timeout = defaultTimeout
 	}
-	l := &Library{opt: opt, sem: make(chan struct{}, opt.Workers), entries: map[string]Entry{}}
+	l := &Library{
+		opt: opt, sem: make(chan struct{}, opt.Workers),
+		uploadSlots: make(chan struct{}, maxConcurrentUploads), entries: map[string]Entry{},
+	}
 	for _, p := range opt.Roots {
 		if err := l.addRoot(p, false); err != nil {
 			return nil, fmt.Errorf("media directory %q: %w", p, err)
@@ -260,8 +270,10 @@ func (l *Library) store(e Entry) {
 // finishes on its own: AnalyzeFile cannot be interrupted.
 //
 // Trade-off: the caller's semaphore token is released once analyze gives up on
-// a hung file, so hung files can briefly exceed Workers, and Refresh and Upload
-// call analyze without taking the semaphore at all.
+// a hung file, while the abandoned parse keeps running and keeps whatever it
+// has loaded in memory until it finishes. Hung files can therefore briefly
+// exceed Workers, and their memory is not bounded by it. Callers other than
+// Scan take the semaphore through analyzeLimited.
 func (l *Library) analyze(ctx context.Context, path string) (media.Report, bool) {
 	fn := l.opt.Analyze
 	if fn == nil {
@@ -285,6 +297,22 @@ func (l *Library) analyze(ctx context.Context, path string) (media.Report, bool)
 		return media.Report{}, false
 	}
 }
+
+// analyzeLimited is analyze under the worker semaphore, so Upload and Refresh
+// share the same bound on concurrent parses as Scan. ok is false when ctx ended
+// while waiting for a slot or for the analysis.
+func (l *Library) analyzeLimited(ctx context.Context, path string) (media.Report, bool) {
+	select {
+	case l.sem <- struct{}{}:
+	case <-ctx.Done():
+		return media.Report{}, false
+	}
+	defer func() { <-l.sem }()
+	return l.analyze(ctx, path)
+}
+
+// uploadsInFlight is the number of uploads holding a slot.
+func (l *Library) uploadsInFlight() int { return len(l.uploadSlots) }
 
 // Scan walks one root (or all, when root is empty) and validates new or changed
 // files. Unchanged files, judged by size and mtime, keep their cached report
@@ -465,7 +493,7 @@ func (l *Library) Refresh(ctx context.Context, id string) (Entry, error) {
 	if st.Size() == e.Size && st.ModTime().Equal(e.Modified) {
 		return e, nil
 	}
-	rep, ok := l.analyze(ctx, e.Path)
+	rep, ok := l.analyzeLimited(ctx, e.Path)
 	if !ok {
 		return Entry{}, ctx.Err()
 	}
