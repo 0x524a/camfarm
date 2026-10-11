@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -131,6 +132,17 @@ func (l *Library) addRoot(p string, ui bool) error {
 	}
 	if !st.IsDir() {
 		return ErrNotDirectory
+	}
+	// Stat succeeds on a directory that cannot be listed; opening it and reading
+	// one name is what proves the scan will work.
+	d, err := os.Open(real)
+	if err != nil {
+		return err
+	}
+	_, err = d.Readdirnames(1)
+	_ = d.Close()
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -201,11 +201,24 @@ func TestRunRejectsBadInput(t *testing.T) {
 		}
 	}
 	const addr = "127.0.0.1:0"
-	for _, tc := range []struct {
+	type badRow struct {
 		name string
 		args []string
 		want string
-	}{
+	}
+	var extra []badRow
+	if os.Geteuid() != 0 { // permission bits do not bind root
+		locked := filepath.Join(dir, "locked")
+		if err := os.Mkdir(locked, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+		extra = append(extra, badRow{"unreadable media dir", []string{"--media-dir", locked, "--http-addr", addr}, "--media-dir"})
+	}
+	for _, tc := range append(extra, []badRow{
 		{"unknown flag", []string{"--nope"}, "flag provided but not defined"},
 		{"zero cameras", []string{"--cameras", "0", "--http-addr", addr}, "--cameras must be at least 1"},
 		{"missing spec", []string{"--spec", "/no/such/file.json", "--http-addr", addr}, "reading spec"},
@@ -219,7 +232,7 @@ func TestRunRejectsBadInput(t *testing.T) {
 		{"bad max-upload", []string{"--max-upload", "lots", "--http-addr", addr}, "invalid --max-upload"},
 		{"bad max-upload before bad media dir", []string{"--max-upload", "lots", "--media-dir", "/no/such/dir", "--http-addr", addr}, "invalid --max-upload"},
 		{"negative port", []string{"--onvif-port", "-1", "--http-addr", addr}, "out of range"},
-	} {
+	}...) {
 		var out, errb bytes.Buffer
 		// A row that wrongly succeeds starts serving; the timeout makes run return
 		// nil so the row fails fast instead of blocking until the test timeout.
