@@ -1,6 +1,6 @@
 # Media library and file validator — design
 
-Date: 2026-10-11. Status: approved design, not yet implemented.
+Date: 2026-10-11. Status: implemented (API and binary; the dashboard UI for the library is the third sub-project).
 
 First of three sub-projects that came from one request to redesign the dashboard:
 
