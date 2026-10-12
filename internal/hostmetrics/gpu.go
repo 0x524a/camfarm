@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"io/fs"
+	"math"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -111,8 +112,8 @@ func parseGPU(out []byte) ([]Device, error) {
 		var bad error
 		num := func(s string) *float64 {
 			s = strings.TrimSpace(s)
-			switch s {
-			case "", "N/A", "[N/A]", "Not Supported", "[Not Supported]":
+			if s == "" || s == "N/A" || s == "Not Supported" ||
+				(strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]")) {
 				return nil
 			}
 			v, err := strconv.ParseFloat(s, 64)
@@ -120,11 +121,14 @@ func parseGPU(out []byte) ([]Device, error) {
 				bad = err
 				return nil
 			}
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return nil
+			}
 			return &v
 		}
 		mib := func(s string) *uint64 {
 			v := num(s)
-			if v == nil || *v < 0 {
+			if v == nil || *v < 0 || *v > 1<<40 {
 				return nil
 			}
 			b := uint64(*v) << 20

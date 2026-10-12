@@ -201,6 +201,9 @@ func parseLoadavg(s string) (a, b, c float64, err error) {
 		if v[i], err = strconv.ParseFloat(f[i], 64); err != nil {
 			return 0, 0, 0, err
 		}
+		if math.IsNaN(v[i]) || math.IsInf(v[i], 0) {
+			return 0, 0, 0, errors.New("non-finite value in /proc/loadavg")
+		}
 	}
 	return v[0], v[1], v[2], nil
 }
@@ -236,10 +239,13 @@ func parseCPUMax(s string) *float64 {
 	}
 	q, err1 := strconv.ParseFloat(f[0], 64)
 	p, err2 := strconv.ParseFloat(f[1], 64)
-	if err1 != nil || err2 != nil || p <= 0 {
+	if err1 != nil || err2 != nil || q <= 0 || p <= 0 {
 		return nil
 	}
 	v := q / p
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return nil
+	}
 	return &v
 }
 
