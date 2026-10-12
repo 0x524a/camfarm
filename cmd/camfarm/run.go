@@ -20,13 +20,15 @@ import (
 	"github.com/0x524a/camfarm"
 	"github.com/0x524a/camfarm/internal/dashboard"
 	"github.com/0x524a/camfarm/internal/library"
+	"github.com/0x524a/camfarm/internal/quality"
 )
 
 const usage = `CamFarm runs a simulated RTSP/ONVIF camera fleet with a web dashboard.
 
 SECURITY: the dashboard listens on loopback by default and has no
 authentication and no Host-header check, and no CSRF protection except that the
-media library's mutating endpoints refuse cross-site browser requests. Nothing
+media library's mutating endpoints and starting or cancelling a stream quality
+test refuse cross-site browser requests. Nothing
 is protected against DNS rebinding, which defeats that check. Its API can start
 servers, and with file sources make this process read local paths (any path
 this process can read, validated or not). The
@@ -178,6 +180,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer fleet.Close()
+	// Deferred after fleet.Close so it runs first: in-flight tests are
+	// cancelled before the cameras they read from go away.
+	qr := quality.New(quality.Options{})
+	defer qr.Close()
 
 	_, _ = fmt.Fprintln(stderr, fleet.ReplayLine())
 	if a := fleet.DiscoveryAddr(); a != "" {
@@ -195,7 +201,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	bctx, bcancel := context.WithCancel(context.Background())
 	defer bcancel()
 	srv := &http.Server{
-		Handler:           dashboard.Handler(fleet, dashboard.Options{Library: lib}),
+		Handler:           dashboard.Handler(fleet, dashboard.Options{Library: lib, Quality: qr}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second, // bounds slow request bodies; SSE is response-only
 		IdleTimeout:       60 * time.Second,
