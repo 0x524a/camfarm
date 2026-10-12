@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/0x524a/camfarm"
+	"github.com/0x524a/camfarm/internal/quality"
 )
 
 func (s *server) getFleet(w http.ResponseWriter, _ *http.Request) {
@@ -23,7 +24,8 @@ func (s *server) getFleet(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// events streams fleet changes as Server-Sent Events. A client that falls
+// events streams fleet changes as Server-Sent Events, merged with "quality"
+// events from the stream quality runner when one is configured. A client that falls
 // behind is dropped by the fleet and sees the stream end; it reconnects and
 // re-lists, which is why nothing is replayed.
 func (s *server) events(w http.ResponseWriter, r *http.Request) {
@@ -32,6 +34,15 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ch := s.fleet.Subscribe(r.Context())
+	// qch is nil (and so never ready) when stream quality tests are disabled.
+	// Quality events come from the runner's own bus, not the fleet's feed: a
+	// measurement is not a fleet change, so it neither enters the journal nor is
+	// published to the fleet's feed (it is still an RTSP client and counts toward
+	// the camera's request index, like Camera.Screenshot).
+	var qch <-chan quality.Event
+	if s.quality != nil {
+		qch = s.quality.Subscribe(r.Context())
+	}
 
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
@@ -67,6 +78,17 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if !send("event: %s\ndata: %s\n\n", ev.Type, b) {
+				return
+			}
+		case qe, ok := <-qch:
+			if !ok {
+				return // dropped or closed: the client reconnects and re-lists
+			}
+			b, err := json.Marshal(qe)
+			if err != nil {
+				continue
+			}
+			if !send("event: quality\ndata: %s\n\n", b) {
 				return
 			}
 		}

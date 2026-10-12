@@ -47,16 +47,20 @@ Early:
   with copyable RTSP and ONVIF URLs, adds and removes cameras, takes on-demand snapshots, and
   injects and clears faults. Changes appear live over Server-Sent Events. The JSON API is under
   `/api/v1/` (`fleet`, `cameras`, `cameras/{id}`, `cameras/{id}/snapshot.jpg`,
-  `cameras/{id}/faults`, and the `events` stream). Seeds are decimal strings in the API. Flags:
+  `cameras/{id}/faults`, `cameras/{id}/quality`, and the `events` stream). Seeds are decimal strings in the API. Flags:
   `--spec`, `--seed`, `--cameras` (mutually exclusive with `--spec`), `--http-addr`,
   `--listen-host`, `--rtsp-port`, `--onvif-port`, `--discovery`, `--discovery-interface`, `--media-dir`, `--allow-ui-paths`, `--max-upload`; run with `-h` for details. **Security:** the
   dashboard can start servers and, with file sources, make the process read local paths, and the
   page shows cameras' Digest credentials. It listens on loopback by default and has *no*
   authentication, token or Host-header check. Only the library's mutating endpoints (upload, scan,
-  delete, roots) refuse cross-site browser requests (an `Origin` that differs from `Host`, or
+  delete, roots) and starting or cancelling a stream quality test refuse cross-site browser requests (an `Origin` that differs from `Host`, or
   `Sec-Fetch-Site: cross-site`); every other endpoint accepts them, so a malicious web page can
   reach those through CSRF. No endpoint, the library included, is protected against DNS
   rebinding: under rebinding the `Origin` equals `Host`, so the check passes. Do not expose it.
+- **Works:** an on-demand stream quality test — `POST /api/v1/cameras/{id}/quality` runs
+  rtspeek against the camera's own RTSP stream for a few seconds and reports packet loss, jitter,
+  bitrate, frame rate, keyframe and timestamp findings. The measured numbers are not reproducible
+  from a seed. See [Stream quality test](#stream-quality-test).
 - **Works:** a media library — point the binary at directories of your own video
   with `--media-dir` (repeatable) and the dashboard API lists, validates and
   serves them. Each file is validated once per change: at startup, on rescan, on
@@ -140,9 +144,9 @@ Early:
   Control-plane faults have their own limits:
   - `rtsp_error`, `sdp_lie` and `teardown` are deterministic for a **single client** only: their
     request counters and draws are per camera and shared across connections, so concurrent
-    clients interleave non-deterministically. `Camera.Screenshot` and the dashboard Snapshot
-    are RTSP clients too and consume control draws, so the single-client claim excludes using
-    them concurrently with a test client.
+    clients interleave non-deterministically. `Camera.Screenshot`, the dashboard Snapshot and a
+    stream quality test are RTSP clients too and consume control draws, so the single-client
+    claim excludes using them concurrently with a test client.
   - The **request index** (the `clock: request` journal index and the event-log index of
     `rtsp_error` and `teardown`) counts DESCRIBE, SETUP and PLAY requests to that camera since
     its creation, including requests answered with an injected error, and excluding OPTIONS and
@@ -247,6 +251,54 @@ What the validator can and cannot see: it reports what camfarm's own parser
 loads. B-frames are read from H.264 slice headers; for H.265 they are inferred
 from timestamp reordering, because H.265 slice types are not parsed. It does not
 repair or transcode anything.
+
+## Stream quality test
+
+```sh
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"durationSeconds": 5, "transport": "auto"}' \
+  http://127.0.0.1:8080/api/v1/cameras/cam-1/quality      # start: 202 and the running test
+curl http://127.0.0.1:8080/api/v1/cameras/cam-1/quality   # latest result
+curl -X DELETE http://127.0.0.1:8080/api/v1/cameras/cam-1/quality   # cancel: 204
+```
+
+A test points [rtspeek](https://github.com/0x524A/rtspeek) (v1.0.0, linked as a library) at a
+camera's own RTSP URL for a short window and reports what a client received: packet loss, jitter,
+bitrate, frame rate, keyframes, timestamp jumps, broken frames and B-frame reordering, as findings
+ranked `info`, `warn` or `error`. The URL is always the camera's own; nothing in the request can
+aim it at another host. It is API-only for now: the dashboard page has no button for it yet.
+
+- Options: `durationSeconds` from 1 to 30, default 5; `transport` `auto` (the default), `udp` or
+  `tcp`. An empty body takes the defaults. The thresholds are rtspeek's own and cannot be changed,
+  so results stay comparable between runs.
+- **TCP hides network loss in transit** (rtspeek's own caveat): TCP retransmits, so loss between
+  camera and client never shows on it. CamFarm serves RTSP over TCP-interleaved transport only
+  today, so `udp` fails with a `setup_failed` finding (the camera answers 461 Unsupported
+  Transport) and `auto` falls back to TCP, adding an `info` `transport_fallback` finding. A
+  `packet_loss` fault still shows over TCP, because it withholds packets at the camera after they
+  have been numbered: the gaps are in the sequence numbers the client receives.
+- The verdict of a finished run is its worst finding: `error` if there is an error finding, `warn`
+  if there is a warning, otherwise `ok` (`info` findings alone are `ok`). A run that cannot finish
+  (connection refused, stream ended, timed out, cancelled) is `failed` with an `error` and no
+  verdict. A cancelled or timed-out run carries no analysis.
+- Results live in memory only, and only the latest per camera is kept: a new test replaces it, a
+  restart loses it, and removing the camera forgets it (cancelling a test still running).
+  `GET /api/v1/cameras/{id}` carries a `quality` summary (`state`, `verdict`, `finishedAt`) once a
+  result exists.
+- A test is a real RTSP client, so it occupies one session on the camera (its reader count rises
+  by one while it runs). At most 2 run at once across the fleet (429 with `Retry-After` beyond
+  that) and one per camera (409).
+- `quality` events (`{camera, state, verdict}`) arrive on `/api/v1/events`. They come from the
+  test runner, not the fleet's event feed, so a test publishes nothing to the fleet's feed and adds
+  no journal entry. It is still an RTSP client: like `Camera.Screenshot` it counts toward the
+  camera's request index and consumes control-plane fault draws, so it can move the `clock: request`
+  index of a later control-plane inject and, with `rtsp_error`, `sdp_lie` or `teardown` active,
+  consume an `onlyRequest: N` request.
+- **The measured numbers are not reproducible from a seed.** Jitter, frame rate, bitrate and the
+  loss percentage depend on timing and on load on the machine, over a window of a few seconds.
+  What does reproduce is the presence of a strong seeded fault: a `packet_loss` at a rate of 0.3
+  produces a `packet_loss` finding. Do not compare figures between runs as if a seed fixed them.
+- `POST` and `DELETE` refuse cross-site browser requests, like the library's mutating endpoints.
 
 ## Use as a library
 
