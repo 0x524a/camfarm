@@ -21,6 +21,7 @@ import (
 	"github.com/0x524a/camfarm/internal/fault"
 	"github.com/0x524a/camfarm/internal/library"
 	"github.com/0x524a/camfarm/internal/media"
+	"github.com/0x524a/camfarm/internal/quality"
 )
 
 // Options configures the dashboard.
@@ -33,6 +34,8 @@ type Options struct {
 	capture func(context.Context, *camfarm.Camera) (image.Image, error)
 	// Library, when non-nil, enables the media library endpoints.
 	Library *library.Library
+	// Quality, when non-nil, enables the stream quality endpoints. The caller closes it.
+	Quality *quality.Runner
 }
 
 //go:embed web
@@ -41,9 +44,10 @@ var webFS embed.FS
 const maxBody = 1 << 20
 
 type server struct {
-	fleet *camfarm.Fleet
-	snap  *snapshotter
-	lib   *library.Library
+	fleet   *camfarm.Fleet
+	snap    *snapshotter
+	lib     *library.Library
+	quality *quality.Runner
 	// libMu makes "is this library file in use?" and "use this library file"
 	// atomic with respect to each other: held by deleteFile across its in-use
 	// check and Delete, and by addCamera across Refresh and AddCamera. Refresh
@@ -55,7 +59,7 @@ type server struct {
 
 // Handler returns the dashboard for a fleet.
 func Handler(f *camfarm.Fleet, opt Options) http.Handler {
-	s := &server{fleet: f, snap: newSnapshotter(opt), lib: opt.Library}
+	s := &server{fleet: f, snap: newSnapshotter(opt), lib: opt.Library, quality: opt.Quality}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/fleet", s.getFleet)
 	mux.HandleFunc("GET /api/v1/cameras", s.listCameras)
@@ -65,6 +69,9 @@ func Handler(f *camfarm.Fleet, opt Options) http.Handler {
 	mux.HandleFunc("GET /api/v1/cameras/{id}/snapshot.jpg", s.snapshot)
 	mux.HandleFunc("POST /api/v1/cameras/{id}/faults", s.injectFault)
 	mux.HandleFunc("DELETE /api/v1/cameras/{id}/faults", s.clearFaults)
+	mux.HandleFunc("POST /api/v1/cameras/{id}/quality", sameOrigin(s.startQuality))
+	mux.HandleFunc("GET /api/v1/cameras/{id}/quality", s.getQuality)
+	mux.HandleFunc("DELETE /api/v1/cameras/{id}/quality", sameOrigin(s.cancelQuality))
 	mux.HandleFunc("GET /api/v1/faults", s.getFaultCatalogue)
 	mux.HandleFunc("GET /api/v1/events", s.events)
 	mux.HandleFunc("GET /api/v1/library", s.getLibrary)
@@ -99,6 +106,7 @@ type cameraDTO struct {
 	Password      string              `json:"password,omitempty"`
 	Faults        []camfarm.FaultSpec `json:"faults"`
 	Stats         statsDTO            `json:"stats"`
+	Quality       *qualitySummary     `json:"quality,omitempty"`
 }
 
 // statsDTO mirrors camfarm.Stats with the seed as a decimal string, since a
@@ -135,6 +143,7 @@ func (s *server) dto(cam *camfarm.Camera, st camfarm.Status) cameraDTO {
 		},
 	}
 	d.LibraryID, d.Warnings = s.libraryInfo(st.Source)
+	d.Quality = s.qualityOf(st.ID)
 	return d
 }
 
@@ -217,9 +226,13 @@ func (s *server) addCamera(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) removeCamera(w http.ResponseWriter, r *http.Request) {
-	if err := s.fleet.RemoveCamera(r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+	if err := s.fleet.RemoveCamera(id); err != nil {
 		writeErr(w, err)
 		return
+	}
+	if s.quality != nil {
+		s.quality.Forget(id)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
