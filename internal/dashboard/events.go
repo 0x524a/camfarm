@@ -36,7 +36,9 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 	ch := s.fleet.Subscribe(r.Context())
 	// qch is nil (and so never ready) when stream quality tests are disabled.
 	// Quality events come from the runner's own bus, not the fleet's feed: a
-	// measurement is not a fleet change and must not reach the journal.
+	// measurement is not a fleet change, so it neither enters the journal nor is
+	// published to the fleet's feed (it is still an RTSP client and counts toward
+	// the camera's request index, like Camera.Screenshot).
 	var qch <-chan quality.Event
 	if s.quality != nil {
 		qch = s.quality.Subscribe(r.Context())

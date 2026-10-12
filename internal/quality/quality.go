@@ -2,8 +2,9 @@
 // and keeps the latest result per camera in memory.
 //
 // A run is a measurement of what a client receives, not a change to the fleet:
-// nothing here publishes to the fleet's event feed, so a run cannot alter a
-// fleet's journal or replay hash. The measured numbers (jitter, fps, bitrate)
+// nothing here publishes to the fleet's event feed or adds a journal entry.
+// It is still an RTSP client, so like Camera.Screenshot it counts toward the
+// camera's request index and consumes control-plane fault draws. The measured numbers (jitter, fps, bitrate)
 // depend on timing and machine load and are not reproducible from a seed.
 package quality
 
@@ -148,6 +149,10 @@ func New(opt Options) *Runner {
 }
 
 // realAnalyze runs rtspeek against url.
+//
+// rtspeek's SetupAll and Play take no context and are bounded only by its read
+// timeout, so Cancel, Forget and Close return promptly only as far as rtspeek
+// honours cancellation. Against camfarm nothing stalls a response.
 func realAnalyze(ctx context.Context, url string, o rtspeek.AnalyzeOptions) (*rtspeek.Analysis, error) {
 	info, err := rtspeek.DescribeStreamWithOptions(ctx, url, rtspeek.Options{Timeout: connectTimeout, Analyze: &o})
 	var a *rtspeek.Analysis

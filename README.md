@@ -144,9 +144,9 @@ Early:
   Control-plane faults have their own limits:
   - `rtsp_error`, `sdp_lie` and `teardown` are deterministic for a **single client** only: their
     request counters and draws are per camera and shared across connections, so concurrent
-    clients interleave non-deterministically. `Camera.Screenshot` and the dashboard Snapshot
-    are RTSP clients too and consume control draws, so the single-client claim excludes using
-    them concurrently with a test client.
+    clients interleave non-deterministically. `Camera.Screenshot`, the dashboard Snapshot and a
+    stream quality test are RTSP clients too and consume control draws, so the single-client
+    claim excludes using them concurrently with a test client.
   - The **request index** (the `clock: request` journal index and the event-log index of
     `rtsp_error` and `teardown`) counts DESCRIBE, SETUP and PLAY requests to that camera since
     its creation, including requests answered with an injected error, and excluding OPTIONS and
@@ -280,7 +280,7 @@ aim it at another host. It is API-only for now: the dashboard page has no button
 - The verdict of a finished run is its worst finding: `error` if there is an error finding, `warn`
   if there is a warning, otherwise `ok` (`info` findings alone are `ok`). A run that cannot finish
   (connection refused, stream ended, timed out, cancelled) is `failed` with an `error` and no
-  verdict, plus whatever analysis rtspeek had made by then.
+  verdict. A cancelled or timed-out run carries no analysis.
 - Results live in memory only, and only the latest per camera is kept: a new test replaces it, a
   restart loses it, and removing the camera forgets it (cancelling a test still running).
   `GET /api/v1/cameras/{id}` carries a `quality` summary (`state`, `verdict`, `finishedAt`) once a
@@ -289,7 +289,11 @@ aim it at another host. It is API-only for now: the dashboard page has no button
   by one while it runs). At most 2 run at once across the fleet (429 with `Retry-After` beyond
   that) and one per camera (409).
 - `quality` events (`{camera, state, verdict}`) arrive on `/api/v1/events`. They come from the
-  test runner, not the fleet's event feed, so a test does not touch the journal or the replay hash.
+  test runner, not the fleet's event feed, so a test publishes nothing to the fleet's feed and adds
+  no journal entry. It is still an RTSP client: like `Camera.Screenshot` it counts toward the
+  camera's request index and consumes control-plane fault draws, so it can move the `clock: request`
+  index of a later control-plane inject and, with `rtsp_error`, `sdp_lie` or `teardown` active,
+  consume an `onlyRequest: N` request.
 - **The measured numbers are not reproducible from a seed.** Jitter, frame rate, bitrate and the
   loss percentage depend on timing and on load on the machine, over a window of a few seconds.
   What does reproduce is the presence of a strong seeded fault: a `packet_loss` at a rate of 0.3

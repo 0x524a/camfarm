@@ -82,9 +82,11 @@ func TestForgetDropsAFinishedResult(t *testing.T) {
 	}
 }
 
-// A run that was forgotten and replaced under the same id must never have its
-// record overwritten by the old run finishing late.
-func TestAForgottenRunCannotOverwriteANewerOne(t *testing.T) {
+// A run restarted after Forget keeps its own result when the forgotten run
+// ends with a failure. Forget waits for the old run, so this cannot overlap a
+// late finish with the new run; the identity guard in execute is a defensive
+// invariant, not something this test exercises.
+func TestARestartedRunSurvivesTheForgottenOnesFailure(t *testing.T) {
 	var calls atomic.Int32
 	second := make(chan struct{})
 	analyze := func(ctx context.Context, _ string, _ rtspeek.AnalyzeOptions) (*rtspeek.Analysis, error) {

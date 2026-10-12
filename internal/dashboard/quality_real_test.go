@@ -115,6 +115,19 @@ func TestRealQualityOnASessionKillingFault(t *testing.T) {
 	if run.State == quality.StateFailed && run.Error == "" {
 		t.Error("a failed run must say why")
 	}
+	// Teardown has an implicit rate of 1, so the session is always killed.
+	if run.Analysis == nil {
+		t.Fatalf("no analysis for a session-killing fault: %+v", run)
+	}
+	killed := hasFinding(run.Analysis, rtspeek.FindingStreamInterrupted)
+	for _, f := range run.Analysis.Findings {
+		if f.Severity == rtspeek.SeverityError {
+			killed = true
+		}
+	}
+	if !killed {
+		t.Errorf("teardown left no stream_interrupted or error finding: %+v", run.Analysis.Findings)
+	}
 }
 
 func TestRealQualityCancelStopsPromptly(t *testing.T) {

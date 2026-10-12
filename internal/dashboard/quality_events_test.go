@@ -87,8 +87,9 @@ func TestQualityEventsArriveOnTheEventStream(t *testing.T) {
 	}
 }
 
-// A quality run is a measurement, not a change to the fleet: it must not touch
-// the journal, the spec hash, the replay line, or the fleet's own feed.
+// The quality handlers and event stream must not touch the fleet: the journal,
+// spec hash, replay line and the fleet's own feed stay as they were. (A real run
+// is still an RTSP client and counts toward the camera's request index.)
 func TestAQualityRunDoesNotTouchTheFleetsReplayIdentity(t *testing.T) {
 	f := newQFake(&rtspeek.Analysis{})
 	close(f.release)
@@ -101,8 +102,8 @@ func TestAQualityRunDoesNotTouchTheFleetsReplayIdentity(t *testing.T) {
 
 	do(t, "POST", qURL(ts, "front-door"), "")
 	waitRun(t, ts, "front-door", quality.StateDone)
-	do(t, "POST", qURL(ts, "back-door"), "")
-	do(t, "DELETE", qURL(ts, "back-door"), "")
+	// (No DELETE here: the fake is pre-released, so a second run would already
+	// be done; cancellation is covered by the lifecycle tests.)
 
 	if fleet.SpecHash() != hash || fleet.ReplayLine() != replay || len(fleet.Journal()) != journal {
 		t.Errorf("a quality run changed the fleet's identity: %q %q %d -> %q %q %d",

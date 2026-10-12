@@ -26,7 +26,7 @@ Success:
 - `POST` starts a test and returns at once; the result is fetched later and survives a page reload.
 - A test on a camera with an injected fault reports the corresponding finding.
 - A test cannot be aimed at anything but the camera it was started for.
-- Nothing about a test changes a fleet's journal, replay hash or injected faults.
+- A test publishes nothing to the fleet's feed and adds no journal entry, and changes no injected fault. It is an RTSP client, so it counts toward the camera's request index and consumes control-plane fault draws, like `Camera.Screenshot`.
 
 Constraints inherited from `CLAUDE.md`: `CGO_ENABLED=0` keeps building; determinism is the product
 (see "What is and is not reproducible"); real sockets in tests; no coverage figure or claim that CI
@@ -43,7 +43,8 @@ did not produce; no employer or client names.
 
 The fleet's feed is excluded on purpose: `Fleet.publish` records journal entries and feeds the
 replay hash. A quality run is a measurement, not a change to the fleet, so routing it there would
-change a fleet's replay identity.
+add journal entries for it. (The run is still an RTSP client: it counts toward the camera's request
+index and consumes control-plane fault draws, exactly like `Camera.Screenshot`.)
 
 ## 1. Package `internal/quality`
 
@@ -97,8 +98,9 @@ already has a test running), `ErrBusy` (the global cap is full).
 - A run whose analysis reports an `Error`, or whose connection fails, is `failed` and carries the
   message. Findings may still be present.
 - `rtspeek` reports a session that dies or never delivers as findings (`no_packets`,
-  `stream_interrupted`, `setup_failed`) inside a normal `done` result. Only a failure to run the
-  analysis at all is `failed`.
+  `stream_interrupted`, `setup_failed`) and also sets the analysis `Error`. The runner marks any
+  analysis with a non-empty `Error` as `failed` and keeps the analysis, so those findings are
+  visible on a `failed` run rather than inside a `done` one. A `done` run has an empty `Error`.
 - A camera fault that breaks the session (`teardown`, `rtsp_error`) therefore shows up as findings
   or a `failed` run. It is never a server error.
 - Results are held in memory, the latest per camera. A new run replaces the previous result once it
@@ -158,8 +160,8 @@ the camera (the camera's reader count rises by one while it runs).
 - **Dashboard handlers:** every status in the table above, including 429 with `Retry-After`, the
   empty body, an unknown field (400), a wrong content type (415), the cross-site refusal, and the
   `quality` summary on the camera DTO. Removing a camera forgets its result and cancels its run.
-  The `quality` SSE event arrives on `/api/v1/events`, and the fleet's journal and replay hash are
-  identical with and without a test run.
+  The `quality` SSE event arrives on `/api/v1/events`, and a test run publishes nothing to the fleet's
+  feed and adds no journal entry.
 - **End to end, real `rtspeek`:** a fixture camera tested over TCP for about 2 s returns tracks, a
   positive frame count and no error-severity finding. The same flow on a camera with a seeded,
   strong `packet_loss` fault returns a `packet_loss` finding. Assertions are coarse (a finding is
