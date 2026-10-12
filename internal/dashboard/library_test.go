@@ -343,7 +343,9 @@ func rawUpload(t *testing.T, addr string, cut func(body []byte) int, then func(*
 	t.Cleanup(func() { conn.Close() })
 	tc := conn.(*net.TCPConn)
 	_ = tc.SetDeadline(time.Now().Add(5 * time.Second))
-	fmt.Fprintf(tc, "POST /api/v1/library/upload HTTP/1.1\r\nHost: x\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", ct, body.Len())
+	if _, err := fmt.Fprintf(tc, "POST /api/v1/library/upload HTTP/1.1\r\nHost: x\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", ct, body.Len()); err != nil {
+		t.Fatal(err)
+	}
 	_, _ = tc.Write(body.Bytes()[:cut(body.Bytes())])
 	then(tc)
 	resp, err := http.ReadResponse(bufio.NewReader(tc), nil)

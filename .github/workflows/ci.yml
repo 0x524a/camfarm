@@ -252,6 +252,16 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
+      # This job runs every test in ./internal/dashboard with the e2e tag, not
+      # only the browser ones, and the media-library tests encode real B-frame
+      # files with ffmpeg. Installed rather than skipped around, as in the
+      # build and race jobs.
+      - name: install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
+
       # playwright-go downloads its driver from azureedge.net, which Microsoft
       # retired (404). The driver is only node plus the playwright-core npm
       # package, so assemble it from npm and point playwright-go at it. Keep
