@@ -161,6 +161,8 @@ func TestSamplerIdlesWhenUnwatched(t *testing.T) {
 	}
 	// Ten seconds without a touch and it goes quiet again.
 	h.clock.Advance(11 * time.Second)
+	h.tick(t)
+	h.tick(t) // barrier: any sample this window allows has landed
 	before, _ := h.s.Latest()
 	h.tick(t)
 	h.tick(t)
@@ -344,5 +346,31 @@ func TestSubscribeEndsWithContext(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("cancelling the context did not end the subscription")
+	}
+}
+
+func TestOlderSampleNeverReplacesNewer(t *testing.T) {
+	h := newHarness(t, okRunner(""))
+	sub := h.s.Subscribe(context.Background())
+	t0 := h.clock.Now()
+
+	h.clock.Advance(2 * time.Second)
+	newer, stored := h.s.collect(context.Background(), false)
+	if !stored {
+		t.Fatal("first sample must be stored")
+	}
+	h.clock.Advance(-2 * time.Second)
+	older, stored := h.s.collect(context.Background(), false)
+	if stored || !older.Time.Equal(t0.UTC()) {
+		t.Fatalf("older sample stored=%v time=%v", stored, older.Time)
+	}
+	got, ok := h.s.Latest()
+	if !ok || !got.Time.Equal(newer.Time) {
+		t.Fatalf("latest %v want %v", got.Time, newer.Time)
+	}
+	select {
+	case s := <-sub:
+		t.Fatalf("nothing should have been published, got %v", s.Time)
+	default:
 	}
 }

@@ -151,7 +151,9 @@ func New(opt Options) *Sampler {
 				return
 			case <-ticks:
 				if s.watched() {
-					s.publish(s.collect(s.ctx, false))
+					if smp, stored := s.collect(s.ctx, false); stored {
+						s.publish(smp)
+					}
 				}
 			}
 		}
@@ -184,23 +186,28 @@ func (s *Sampler) Latest() (Sample, bool) {
 
 // Current marks the sampler wanted and returns a sample no older than 2 s,
 // sampling synchronously if it has to. A cold call waits for the first GPU
-// reading (at most the GPU timeout).
+// reading, which is bounded by the GPU timeout plus the runner's kill delay,
+// and is unbounded if an injected Runner ignores its context.
 func (s *Sampler) Current(ctx context.Context) Sample {
 	s.Touch()
 	if l, ok := s.Latest(); ok && s.now().Sub(l.Time) < freshFor {
 		return l
 	}
-	smp := s.collect(ctx, true)
-	s.publish(smp)
+	smp, stored := s.collect(ctx, true)
+	if stored {
+		s.publish(smp)
+	}
 	return smp
 }
 
-func (s *Sampler) collect(ctx context.Context, waitGPU bool) Sample {
-	now := s.now()
-	smp := Sample{Time: now.UTC()}
+// collect takes a sample. stored is false when a newer sample is already the
+// latest, in which case the caller must not publish this one.
+func (s *Sampler) collect(ctx context.Context, waitGPU bool) (smp Sample, stored bool) {
 	maxAge := 3 * s.interval
 
 	s.cmu.Lock()
+	now := s.now()
+	smp = Sample{Time: now.UTC()}
 	ct, cpu, cerr := s.rd.cpu()
 	if cerr == nil {
 		if p, ok := s.cpuBase.prev(now, maxAge); ok && ct.total > p.total && ct.busy >= p.busy {
@@ -234,9 +241,12 @@ func (s *Sampler) collect(ctx context.Context, waitGPU bool) Sample {
 	smp.GPU = s.gpu(ctx, now, waitGPU)
 
 	s.mu.Lock()
-	s.latest = &smp
+	if s.latest == nil || !smp.Time.Before(s.latest.Time) {
+		s.latest = &smp
+		stored = true
+	}
 	s.mu.Unlock()
-	return smp
+	return smp, stored
 }
 
 // gpu returns the cached GPU reading, starting a refresh when one is due:
