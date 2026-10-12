@@ -60,7 +60,8 @@ Every section is independent: a section that cannot be read is
   `process.cpuPercent` is the delta of `/proc/self/stat`. Both are `null` in the first
   sample after the sampler wakes (no baseline yet).
 - `cpu.limitCPUs` and `memory.limitBytes` come from the cgroup (`cpu.max`,
-  `memory.max`) when one is set, else `null`. Usage stays host-wide; the UI can
+  `memory.max`) when one is set, else `null`. Limits are read from the cgroup v2 root only:
+  right inside a container with its own cgroup namespace, `null` otherwise and on cgroup v1. Usage stays host-wide; the UI can
   show the limit beside it.
 - `gpu.devices[]`, one per GPU: `index`, `name`, `uuid`, `gpuUtilPercent`,
   `memUtilPercent`, `memUsedBytes`, `memTotalBytes`, `encoderUtilPercent`,
@@ -69,15 +70,16 @@ Every section is independent: a section that cannot be read is
   was running, not true SM occupancy (that needs DCGM). The API docs say so. A field
   reported as `[N/A]`, `N/A` or `Not Supported` is `null`, never 0.
 - `reason` values: `nvidia-smi not found`, `nvidia-smi failed: <first stderr line,
-  at most 200 characters>`, `timed out`, `unparseable output`, `unsupported
-  platform`.
+  at most 200 characters>`, `timed out`, `unparseable output`, `nvidia-smi reported no devices`,
+  `pending` (before the first GPU reading lands), `unsupported platform`. For the Linux
+  CPU, memory and process sections the reason is the underlying read error text.
 
 ## Sources
 
 - CPU, memory, process: `/proc/stat`, `/proc/meminfo`, `/proc/loadavg`,
   `/proc/self/stat`, `/proc/self/statm`, `/proc/self/fd`, and `runtime.NumGoroutine()`.
-  The `/proc` and cgroup roots are injectable. Non-Linux builds compile (build tags)
-  and report `unsupported platform` for these sections.
+  The `/proc` and cgroup roots are injectable. Non-Linux builds compile; a runtime `goos` check
+  reports `unsupported platform` for these sections.
 - GPU: one `nvidia-smi --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,utilization.encoder,utilization.decoder,temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits`
   call, 2 s timeout, output capped at 1 MiB, through an injectable runner
   (`func(ctx, name string, args ...string) ([]byte, error)`).
@@ -95,7 +97,7 @@ Every section is independent: a section that cannot be read is
 - GPU backoff: after a failure the sampler retries at most every 15 s and repeats the
   last `reason` in between. `not found` is cached for the process lifetime.
 - `Close()` stops the goroutine and ends subscriber channels.
-- API: `Latest()`, `Touch()`, `Sample(ctx)` (synchronous read), `Subscribe(ctx)`,
+- API: `Latest()`, `Touch()`, `Current(ctx)` (synchronous read), `Subscribe(ctx)`,
   `Close()`.
 
 ## HTTP
@@ -103,8 +105,9 @@ Every section is independent: a section that cannot be read is
 - `GET /api/v1/metrics`: marks the sampler wanted and returns the latest sample. If
   none is younger than 2 s it takes one synchronously, so a first paint is never
   empty. Read-only, so no `sameOrigin` guard. A nil `Options.Metrics` gives 404.
-- `GET /api/v1/events` gains `event: metrics` with the full sample as `data`, merged
-  alongside the fleet and quality channels. A dropped or closed channel ends the
+- `GET /api/v1/events?metrics=1` gains `event: metrics` with the full sample as `data`, merged
+  alongside the fleet and quality channels. The push is opt-in: without `metrics=1` the
+  handler does not subscribe to the sampler. A dropped or closed channel ends the
   stream; the client reconnects and re-lists.
 - `cmd/camfarm` always creates the sampler (`defer Close()`). No flag: it costs nothing
   while unwatched.
@@ -123,7 +126,7 @@ Every section is independent: a section that cannot be read is
 
 ## Testing
 
-- `/proc` fixtures under `testdata/`, including a container-style cgroup and a
+- `/proc` fixtures inline in the tests (no `testdata/`), including a container-style cgroup and a
   malformed file.
 - Captured `nvidia-smi` CSV: one GPU, two GPUs, `[N/A]` and `Not Supported` fields. For
   failures: a missing binary, a nonzero exit with the real mismatch message seen on
@@ -134,3 +137,18 @@ Every section is independent: a section that cannot be read is
 - One real-process test reading this machine's `/proc`, accepting either GPU outcome.
 - The README states that the GPU parser is verified against captured `nvidia-smi`
   output, not live hardware. No GPU figure is claimed beyond what CI produced.
+
+## Changes after review
+
+The shipped code differs from the text above in these ways:
+
+- `Sample(ctx)` is `Current(ctx)`.
+- Non-Linux handling is a runtime `goos` check, not build tags; everything still compiles.
+- Fixtures are inline in the tests, not under `testdata/`.
+- The `reason` list gains `pending` and `nvidia-smi reported no devices`; for the Linux CPU,
+  memory and process sections the reason is the underlying read error text.
+- The event-stream push is opt-in via `?metrics=1`; without it the sampler is not subscribed to.
+- Cgroup limits come from the cgroup v2 root only.
+- GPU values printed as bracketed errors (`[Unknown Error]`, `[Insufficient Permissions]`) and
+  non-finite values are `null`; degenerate `cpu.max` and non-finite `loadavg` are rejected.
+- A sample older than the stored latest is never stored or published.
