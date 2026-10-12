@@ -127,7 +127,7 @@ func TestMetricsSectionFailureIsStill200(t *testing.T) {
 func TestMetricsEventArrivesOnTheEventStreamAndTouchesNothingElse(t *testing.T) {
 	env := metricsServer(t, procFixture(t), gpuOK)
 	journalBefore := len(env.fleet.Journal())
-	frames := sseFrames(t, env.ts.URL)
+	frames := sseFramesAt(t, env.ts.URL+"/api/v1/events?metrics=1")
 
 	select {
 	case env.ticks <- time.Now():
@@ -148,7 +148,7 @@ func TestMetricsEventArrivesOnTheEventStreamAndTouchesNothingElse(t *testing.T) 
 
 func TestMetricsStreamEndsWhenTheSamplerCloses(t *testing.T) {
 	env := metricsServer(t, procFixture(t), gpuOK)
-	frames := sseFrames(t, env.ts.URL)
+	frames := sseFramesAt(t, env.ts.URL+"/api/v1/events?metrics=1")
 	env.s.Close()
 	select {
 	case _, ok := <-frames:
@@ -157,5 +157,29 @@ func TestMetricsStreamEndsWhenTheSamplerCloses(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the event stream did not end when the sampler closed")
+	}
+}
+
+func TestMetricsEventIsOptIn(t *testing.T) {
+	env := metricsServer(t, procFixture(t), gpuOK)
+	frames := sseFrames(t, env.ts.URL) // no metrics=1
+
+	select {
+	case env.ticks <- time.Now():
+	case <-time.After(5 * time.Second):
+		t.Fatal("sampler loop did not take the tick")
+	}
+	select {
+	case env.ticks <- time.Now(): // barrier: the first tick is fully processed
+	case <-time.After(5 * time.Second):
+		t.Fatal("sampler loop did not take the second tick")
+	}
+	if _, ok := env.s.Latest(); ok {
+		t.Fatal("the sampler must stay idle when no client asked for metrics")
+	}
+	select {
+	case f := <-frames:
+		t.Fatalf("unexpected frame without metrics=1: %v", f)
+	default:
 	}
 }

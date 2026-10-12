@@ -185,7 +185,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	// cancelled before the cameras they read from go away.
 	qr := quality.New(quality.Options{})
 	defer qr.Close()
-	// Samples only while someone is watching, so it costs nothing otherwise.
+	// Samples only while watched: an events client that asked for metrics=1, or
+	// a recent /api/v1/metrics request. Otherwise it does nothing.
 	hm := hostmetrics.New(hostmetrics.Options{})
 	defer hm.Close()
 

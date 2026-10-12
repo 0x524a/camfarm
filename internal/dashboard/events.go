@@ -26,9 +26,12 @@ func (s *server) getFleet(w http.ResponseWriter, _ *http.Request) {
 }
 
 // events streams fleet changes as Server-Sent Events, merged with "quality"
-// and "metrics" events from the stream quality runner and host sampler when configured. A client that falls
-// behind is dropped by the fleet and sees the stream end; it reconnects and
-// re-lists, which is why nothing is replayed.
+// events from the stream quality runner when configured. With the query
+// metrics=1 (exactly that value) and a host sampler configured it also streams
+// "metrics" events; without it the handler never subscribes to the sampler, so
+// the sampler stays idle. A client that falls behind is dropped by the fleet
+// and sees the stream end; it reconnects and re-lists, which is why nothing is
+// replayed.
 func (s *server) events(w http.ResponseWriter, r *http.Request) {
 	if _, ok := w.(http.Flusher); !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
@@ -44,10 +47,11 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 	if s.quality != nil {
 		qch = s.quality.Subscribe(r.Context())
 	}
-	// mch is nil (and so never ready) when host metrics are disabled. Samples
-	// come from the sampler's own bus and never touch the fleet's feed or journal.
+	// mch is nil (and so never ready) unless host metrics are enabled and the
+	// client asked for them with metrics=1. Samples come from the sampler's own
+	// bus and never touch the fleet's feed or journal.
 	var mch <-chan hostmetrics.Sample
-	if s.metrics != nil {
+	if s.metrics != nil && r.URL.Query().Get("metrics") == "1" {
 		mch = s.metrics.Subscribe(r.Context())
 	}
 
@@ -100,7 +104,7 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 			}
 		case ms, ok := <-mch:
 			if !ok {
-				return // dropped or closed: the client reconnects and re-lists
+				return // dropped or closed: the stream ends and the client reconnects
 			}
 			b, err := json.Marshal(ms)
 			if err != nil {

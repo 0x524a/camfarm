@@ -61,7 +61,8 @@ Early:
   rtspeek against the camera's own RTSP stream for a few seconds and reports packet loss, jitter,
   bitrate, frame rate, keyframe and timestamp findings. The measured numbers are not reproducible
   from a seed. See [Stream quality test](#stream-quality-test).
-- **Works:** host metrics — `GET /api/v1/metrics` and a `metrics` event on `/api/v1/events` report
+- **Works:** host metrics — `GET /api/v1/metrics`, and an opt-in `metrics` event on
+  `/api/v1/events?metrics=1`, report
   host CPU, memory, GPU (via `nvidia-smi`) and camfarm's own process usage. Not part of the replay
   hash. See [Host metrics](#host-metrics).
 - **Works:** a media library — point the binary at directories of your own video
@@ -310,7 +311,9 @@ curl http://127.0.0.1:8080/api/v1/metrics
 ```
 
 `GET /api/v1/metrics` returns one sample of the machine camfarm runs on, no older than two seconds.
-The same sample arrives as a `metrics` event on `/api/v1/events`.
+The same sample arrives as a `metrics` event on `/api/v1/events`, but only when the request asks
+for it with `?metrics=1` (exactly that value); without it the stream carries no metrics events and
+subscribing never wakes the sampler.
 
 ```json
 {
@@ -324,19 +327,23 @@ The same sample arrives as a `metrics` event on `/api/v1/events`.
 
 - Sections are independent. One that cannot be read has `"available": false` and a `reason`; the
   others are unaffected and the response is still 200. For `cpu`, `memory` and `process` on Linux
-  the reason is the underlying read error text. For `gpu` it is one of several things: `nvidia-smi`
-  not found, `nvidia-smi` failing (a driver or library mismatch prints its own message), a timeout,
-  or `nvidia-smi reported no devices`.
+  the reason is the underlying read error text. For `gpu` it is one of: `nvidia-smi not found`,
+  `nvidia-smi failed: <first output line>` (a driver or library mismatch prints its own message),
+  `timed out`, `unparseable output`, `nvidia-smi reported no devices`, or `pending` before the
+  first reading has landed.
 - `null` means "not reported", never 0: the first CPU reading after the sampler wakes has no
   baseline, a limit is `null` when no cgroup limit applies, and a value `nvidia-smi` prints as
-  `N/A` or `Not Supported` is `null`.
+  `N/A`, `Not Supported` or a bracketed error such as `[Unknown Error]` is `null`.
+- Cgroup limits are read from the cgroup v2 root only: they are right inside a container with its
+  own cgroup namespace, and `null` elsewhere and on cgroup v1.
 - `gpuUtilPercent` is `nvidia-smi`'s `utilization.gpu`: the share of time a kernel was running, not
   SM occupancy.
 - CPU, memory and process readings are Linux only; other systems report `unsupported platform`.
   The GPU section needs `nvidia-smi` on the `PATH`.
-- The sampler runs only while an event-stream client is connected or the endpoint was fetched in
-  the last 10 seconds; otherwise it is idle.
+- The sampler runs only while an event-stream client that passed `?metrics=1` is connected or the
+  endpoint was fetched in the last 10 seconds; otherwise it is idle.
 - **The endpoint exposes host details and the dashboard has no authentication.** Do not expose it.
+  Like the rest of the dashboard, it is not protected against DNS rebinding.
 - Metrics publish nothing to the fleet's feed, add no journal entry and are not part of the replay
   hash.
 - The GPU parser is verified against captured `nvidia-smi` output, not live hardware.
