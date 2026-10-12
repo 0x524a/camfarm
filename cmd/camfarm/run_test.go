@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/0x524a/camfarm/internal/media/fixture"
 )
 
 // syncBuf is a goroutine-safe writer the test can poll.
@@ -197,11 +201,24 @@ func TestRunRejectsBadInput(t *testing.T) {
 		}
 	}
 	const addr = "127.0.0.1:0"
-	for _, tc := range []struct {
+	type badRow struct {
 		name string
 		args []string
 		want string
-	}{
+	}
+	var extra []badRow
+	if os.Geteuid() != 0 { // permission bits do not bind root
+		locked := filepath.Join(dir, "locked")
+		if err := os.Mkdir(locked, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+		extra = append(extra, badRow{"unreadable media dir", []string{"--media-dir", locked, "--http-addr", addr}, "--media-dir"})
+	}
+	for _, tc := range append(extra, []badRow{
 		{"unknown flag", []string{"--nope"}, "flag provided but not defined"},
 		{"zero cameras", []string{"--cameras", "0", "--http-addr", addr}, "--cameras must be at least 1"},
 		{"missing spec", []string{"--spec", "/no/such/file.json", "--http-addr", addr}, "reading spec"},
@@ -210,10 +227,18 @@ func TestRunRejectsBadInput(t *testing.T) {
 		{"bad http addr", []string{"--http-addr", "not-an-address"}, "invalid --http-addr"},
 		{"cameras with spec", []string{"--spec", valid, "--cameras", "2", "--http-addr", addr}, "mutually exclusive"},
 		{"port too big", []string{"--rtsp-port", "70000", "--http-addr", addr}, "out of range"},
+		{"missing media dir", []string{"--media-dir", "/no/such/dir", "--http-addr", addr}, "--media-dir"},
+		{"empty media dir", []string{"--media-dir", "", "--http-addr", addr}, "--media-dir"},
+		{"bad max-upload", []string{"--max-upload", "lots", "--http-addr", addr}, "invalid --max-upload"},
+		{"bad max-upload before bad media dir", []string{"--max-upload", "lots", "--media-dir", "/no/such/dir", "--http-addr", addr}, "invalid --max-upload"},
 		{"negative port", []string{"--onvif-port", "-1", "--http-addr", addr}, "out of range"},
-	} {
+	}...) {
 		var out, errb bytes.Buffer
-		err := run(context.Background(), tc.args, &out, &errb)
+		// A row that wrongly succeeds starts serving; the timeout makes run return
+		// nil so the row fails fast instead of blocking until the test timeout.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := run(ctx, tc.args, &out, &errb)
+		cancel()
 		if err == nil {
 			t.Errorf("%s: run succeeded, want an error", tc.name)
 			continue
@@ -228,9 +253,96 @@ func TestHelpStatesTheSecurityPosture(t *testing.T) {
 	var out, errb bytes.Buffer
 	_ = run(context.Background(), []string{"--help"}, &out, &errb)
 	got := errb.String() + out.String()
-	for _, want := range []string{"loopback", "authentication", "Host", "CSRF", "local", "Digest", "mutually exclusive", "0x", "octal"} {
+	for _, want := range []string{"loopback", "authentication", "Host", "CSRF", "local", "Digest", "rebinding", "mutually exclusive", "0x", "octal"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage text missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func getLibraryFiles(t *testing.T, url string) []map[string]any {
+	t.Helper()
+	resp, err := http.Get(url + "/api/v1/library")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var v struct {
+		Files []map[string]any `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+		t.Fatal(err)
+	}
+	return v.Files
+}
+
+func TestRunScansMediaDirsInTheBackground(t *testing.T) {
+	a, b := t.TempDir(), t.TempDir()
+	_ = os.WriteFile(filepath.Join(a, "one.ts"), fixture.Bytes(), 0o600)
+	_ = os.WriteFile(filepath.Join(b, "two.ts"), fixture.Bytes(), 0o600)
+	url, stop, _ := start(t, "--cameras", "1", "--http-addr", "127.0.0.1:0", "--media-dir", a, "--media-dir", b)
+
+	deadline := time.Now().Add(10 * time.Second)
+	var files []map[string]any
+	for time.Now().Before(deadline) {
+		if files = getLibraryFiles(t, url); len(files) == 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(files) != 2 {
+		t.Fatalf("library files = %v, want both directories scanned", files)
+	}
+	if err := stop(); err != nil {
+		t.Errorf("run = %v", err)
+	}
+}
+
+func TestRunAcceptsAnUploadIntoTheFirstMediaDir(t *testing.T) {
+	dir := t.TempDir()
+	url, _, _ := start(t, "--cameras", "1", "--http-addr", "127.0.0.1:0", "--media-dir", dir, "--max-upload", "1MiB")
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("file", "up.ts")
+	_, _ = fw.Write(fixture.Bytes())
+	_ = mw.Close()
+	resp, err := http.Post(url+"/api/v1/library/upload", mw.FormDataContentType(), &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("upload = %d %s", resp.StatusCode, b)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "uploads", "up.ts")); err != nil {
+		t.Errorf("uploaded file missing from the media dir: %v", err)
+	}
+}
+
+func TestRunWithoutMediaDirHasAnEmptyLibrary(t *testing.T) {
+	url, _, _ := start(t, "--cameras", "1", "--http-addr", "127.0.0.1:0")
+	if files := getLibraryFiles(t, url); len(files) != 0 {
+		t.Errorf("files = %v", files)
+	}
+	resp, err := http.Post(url+"/api/v1/library/roots", "application/json", strings.NewReader(`{"path":"/tmp"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Errorf("adding a root without --allow-ui-paths = %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestHelpMentionsTheMediaLibrary(t *testing.T) {
+	var out, errb bytes.Buffer
+	_ = run(context.Background(), []string{"--help"}, &out, &errb)
+	got := errb.String() + out.String()
+	for _, want := range []string{"--media-dir", "--allow-ui-paths", "--max-upload"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("usage text missing %q", want)
 		}
 	}
 }

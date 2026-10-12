@@ -14,10 +14,13 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/0x524a/camfarm"
 	"github.com/0x524a/camfarm/internal/fault"
+	"github.com/0x524a/camfarm/internal/library"
+	"github.com/0x524a/camfarm/internal/media"
 )
 
 // Options configures the dashboard.
@@ -28,6 +31,8 @@ type Options struct {
 	MaxConcurrentSnapshots int
 	// capture is the capture seam; nil means Camera.Screenshot. Tests only.
 	capture func(context.Context, *camfarm.Camera) (image.Image, error)
+	// Library, when non-nil, enables the media library endpoints.
+	Library *library.Library
 }
 
 //go:embed web
@@ -38,11 +43,19 @@ const maxBody = 1 << 20
 type server struct {
 	fleet *camfarm.Fleet
 	snap  *snapshotter
+	lib   *library.Library
+	// libMu makes "is this library file in use?" and "use this library file"
+	// atomic with respect to each other: held by deleteFile across its in-use
+	// check and Delete, and by addCamera across Refresh and AddCamera. Refresh
+	// may re-analyze a changed file, up to the library's analyze timeout, so
+	// library deletes and libraryId adds queue behind it (acceptable for a dev
+	// tool). Typed-path adds do not take it.
+	libMu sync.Mutex
 }
 
 // Handler returns the dashboard for a fleet.
 func Handler(f *camfarm.Fleet, opt Options) http.Handler {
-	s := &server{fleet: f, snap: newSnapshotter(opt)}
+	s := &server{fleet: f, snap: newSnapshotter(opt), lib: opt.Library}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/fleet", s.getFleet)
 	mux.HandleFunc("GET /api/v1/cameras", s.listCameras)
@@ -54,6 +67,11 @@ func Handler(f *camfarm.Fleet, opt Options) http.Handler {
 	mux.HandleFunc("DELETE /api/v1/cameras/{id}/faults", s.clearFaults)
 	mux.HandleFunc("GET /api/v1/faults", s.getFaultCatalogue)
 	mux.HandleFunc("GET /api/v1/events", s.events)
+	mux.HandleFunc("GET /api/v1/library", s.getLibrary)
+	mux.HandleFunc("POST /api/v1/library/scan", sameOrigin(s.scanLibrary))
+	mux.HandleFunc("POST /api/v1/library/upload", sameOrigin(s.uploadFile))
+	mux.HandleFunc("DELETE /api/v1/library/files/{id}", sameOrigin(s.deleteFile))
+	mux.HandleFunc("POST /api/v1/library/roots", sameOrigin(s.addRoot))
 
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -69,6 +87,8 @@ type cameraDTO struct {
 	ONVIFEndpoint string              `json:"onvifEndpoint"`
 	ONVIFUUID     string              `json:"onvifUuid"`
 	Source        string              `json:"source"`
+	LibraryID     string              `json:"libraryId,omitempty"`
+	Warnings      []media.Issue       `json:"warnings,omitempty"`
 	Codec         string              `json:"codec"`
 	Width         int                 `json:"width"`
 	Height        int                 `json:"height"`
@@ -102,7 +122,7 @@ func (s *server) dto(cam *camfarm.Camera, st camfarm.Status) cameraDTO {
 	if faults == nil {
 		faults = []camfarm.FaultSpec{}
 	}
-	return cameraDTO{
+	d := cameraDTO{
 		ID: st.ID, RTSPURL: st.RTSPURL, ONVIFEndpoint: cam.ONVIFEndpoint(), ONVIFUUID: cam.ONVIFUUID(),
 		Source: st.Source, Codec: st.Codec, Width: st.Width, Height: st.Height, FPS: st.FPS,
 		Readers: st.Readers, Seed: strconv.FormatUint(stats.Seed, 10), Username: u, Password: p,
@@ -114,6 +134,8 @@ func (s *server) dto(cam *camfarm.Camera, st camfarm.Status) cameraDTO {
 			Readers: stats.Readers,
 		},
 	}
+	d.LibraryID, d.Warnings = s.libraryInfo(st.Source)
+	return d
 }
 
 // getFaultCatalogue serves the fault catalogue that drives validation and the
@@ -158,11 +180,30 @@ func (s *server) getCamera(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) addCamera(w http.ResponseWriter, r *http.Request) {
-	var spec camfarm.CameraSpec
-	if !decodeJSON(w, r, &spec) {
+	var req addCameraReq
+	if !decodeJSON(w, r, &req) {
 		return
 	}
-	cam, err := s.fleet.AddCamera(spec)
+	var cam *camfarm.Camera
+	var err error
+	if req.LibraryID != "" {
+		// libMu spans the re-check and the add, so deleteFile cannot remove the
+		// file between them.
+		ok := func() bool {
+			s.libMu.Lock()
+			defer s.libMu.Unlock()
+			spec, ok := s.specFromLibrary(w, r, req)
+			if ok {
+				cam, err = s.fleet.AddCamera(spec)
+			}
+			return ok
+		}()
+		if !ok {
+			return
+		}
+	} else {
+		cam, err = s.fleet.AddCamera(req.CameraSpec)
+	}
 	if err != nil {
 		writeErr(w, err)
 		return

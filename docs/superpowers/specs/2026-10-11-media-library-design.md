@@ -1,0 +1,261 @@
+# Media library and file validator — design
+
+Date: 2026-10-11. Status: implemented (API and binary; the dashboard UI for the library is the third sub-project).
+
+First of three sub-projects that came from one request to redesign the dashboard:
+
+1. **Media library and validator** (this spec): directories of video the farm can serve, upload,
+   and a one-time per-file validity report.
+2. **Host metrics**: CPU, memory and GPU panels (separate spec).
+3. **Dashboard redesign and UI**: the Library tab, upload, snapshot thumbnails on camera cards,
+   the metrics panel and "use this file" when adding a camera (separate spec, written after 1 and 2
+   so it builds on real endpoints).
+
+## Purpose
+
+A developer brings their own video into the farm and needs to trust it. Before a camera serves a
+file they should see whether it is valid, and if it is risky (B-frames, reordered timestamps and
+so on), why. Those quirks are often exactly what they want to test, so they must be visible, not
+hidden.
+
+Success:
+
+- A file uploaded through the dashboard, or dropped in a configured directory, appears in the
+  library with a status: `valid`, `warning` or `invalid`, and a list of issues in plain language.
+- Validation happens once per change to a file: on startup, on rescan, on upload, and again when a
+  camera is created from the file if it changed. It never runs continuously.
+- An `invalid` file cannot become a camera through `libraryId`. A `warning` file can, and the
+  warning stays visible. A typed `source.path` is not validated.
+- The library endpoints do not list or read arbitrary parts of the filesystem unless the operator
+  started the binary with `--allow-ui-paths`. This does not cover the pre-existing typed
+  `source.path` on `POST /api/v1/cameras`, which stays ungated and can read any file this process
+  can read; the library does not change that.
+
+Constraints inherited from `CLAUDE.md`: `CGO_ENABLED=0` keeps building; determinism is the
+product; real sockets and real files in tests; no coverage figure stated that CI did not produce;
+no employer or client names anywhere.
+
+## Decisions
+
+| Question | Decision |
+|---|---|
+| How do directories reach the farm? | Startup roots always; UI-typed roots only behind `--allow-ui-paths` (off by default). |
+| How are files validated? | Pure Go, through camfarm's own loader (`internal/media`), plus `mediacommon` for SPS parsing and random-access detection. The H.264 slice type is read by camfarm's own parser in `internal/media/slicetype.go` (a small Exp-Golomb reader), not by `mediacommon`. No `ffprobe`. `rtspeek` is not used: it is an RTSP client with no file or B-frame logic. |
+| What may become a camera? | `valid` and `warning` files. `invalid` files are blocked. |
+| What happens to an invalid upload? | It is kept, flagged, with its reason, and can be deleted. |
+
+## 1. Validator: `internal/media/analyze.go`
+
+`Analyze` lives next to the parser because it inspects access units.
+
+```go
+type Severity string // "warning" | "invalid"
+
+type Issue struct {
+    Code     string   // stable, see table
+    Severity Severity
+    Message  string   // plain language, one sentence
+    Detail   string   // numbers behind the message, may be empty
+}
+
+type Facts struct {
+    Container       string
+    Codec           Codec
+    Width, Height   int
+    FPS             float64 // declared; 0 when the bitstream carries no timing
+    MeasuredFPS     float64
+    DurationSeconds float64
+    Frames          int
+    Keyframes       int
+    MaxGOP          int     // longest keyframe-to-keyframe run, in frames
+    ReorderDepth    int     // 0 when decode order equals presentation order
+    BitrateBps      int64
+    SizeBytes       int64
+}
+
+type Report struct {
+    Status string // "valid" | "warning" | "invalid"
+    Facts  Facts
+    Issues []Issue
+}
+
+func AnalyzeFile(path string) Report            // sniff, load, then Analyze
+func Analyze(m *Media, size int64) Report       // pure, for tests
+```
+
+`Status` is `invalid` if any issue is invalid, else `warning` if any issue exists, else `valid`.
+`AnalyzeFile` recovers from a panic in the parser and reports it as `loader_error`: a hostile or
+corrupt file must not take the dashboard down.
+
+### Issue codes
+
+Invalid (the loader would fail or serve nothing useful):
+
+| Code | Condition |
+|---|---|
+| `unreadable` | open or read failed |
+| `unsupported_container` | `sniff` does not recognise it (message names the first bytes and the supported containers) |
+| `no_video` | container parsed, no H.264/H.265 video track; this also covers a video track in any other codec, because the loader reports both the same way |
+| `missing_parameter_sets` | no SPS/PPS (H.264) or VPS/SPS/PPS (H.265) |
+| `no_frames` | zero access units |
+| `no_start_keyframe` | first access unit is not a random access point |
+| `loader_error` | the loader returned an error or panicked; the error text is the detail |
+
+Warning (serves, but behaves unlike a plain IPPP stream):
+
+| Code | Condition |
+|---|---|
+| `b_frames` | an H.264 slice is type B (parsed from the slice header), or reordering exists in an H.265 stream |
+| `pts_dts_reordering` | some access unit has an earlier PTS than one before it in decode order (a constant PTS offset is not reordering); detail carries the reorder depth |
+| `dts_not_monotonic` | DTS goes backwards or repeats |
+| `timestamp_jump` | a DTS step is over 4× the median step |
+| `variable_frame_rate` | (95th minus 5th percentile DTS step) over 10% of the median step, with timestamp jumps excluded from the sample |
+| `fps_mismatch` | declared fps differs by more than 5% from the fps implied by the median DTS step |
+| `long_gop` | longest keyframe gap over 10 seconds |
+| `short_clip` | duration under 1 second (it loops every second) |
+| `odd_dimensions` | width or height is odd |
+| `large_file` | size over 512 MiB: the whole parsed file is held in memory |
+
+H.265 slice types are not parsed: the slice header depends on PPS state, so H.265 reordering is
+inferred from timestamps alone: a reorder depth above 0, meaning a frame whose PTS is earlier than
+that of a frame decoded before it. A constant PTS-DTS offset is not flagged, and the code does not
+read the SPS reorder fields. The `b_frames` message says which evidence it used, so the report
+never claims more than it checked.
+
+The thresholds above are constants in one file so a test pins each one. `MaxGOP`, `ReorderDepth`
+and the step statistics are computed from the file, not constants.
+
+## 2. Library: `internal/library`
+
+```go
+type Library struct { /* roots, cache, worker pool, upload dir */ }
+
+type Entry struct {
+    ID       string    // stable: first 8 bytes (16 hex chars) of sha256(root path + "\x00" + relative path)
+    Root     string
+    Path     string    // absolute
+    Name     string    // relative to its root
+    Size     int64     // bytes, as of the last check
+    Modified time.Time
+    Report   media.Report
+}
+
+func New(opts Options) (*Library, error)
+func (l *Library) List() []Entry
+func (l *Library) Scan(ctx context.Context, root string, force bool) error
+func (l *Library) Upload(ctx context.Context, name string, r io.Reader) (Entry, error)
+func (l *Library) Delete(id string) error
+func (l *Library) AddRoot(path string) error   // errors unless AllowUIPaths
+func (l *Library) Resolve(id string) (Entry, bool)
+```
+
+### Roots and scan
+
+- `Options.Roots` come from `--media-dir` (repeatable). The first writable root is the upload
+  target. Roots added from the UI (`AddRoot`) never receive uploads, even when writable. With no writable root, `Upload` returns `ErrReadOnly` and `Delete` returns `ErrNotDeletable`, and the UI hides both.
+- `AddRoot` works only when `Options.AllowUIPaths` is set (flag `--allow-ui-paths`). The path must
+  exist and be a directory.
+- Scan walks at most 3 levels deep, lists regular files only, and never follows symlinks (a
+  symlink is skipped, which also stops a link escaping the root).
+- Only files with a video extension (`.ts .mp4 .m4v .mov .mkv .avi .h264 .h265 .mpg`) are listed.
+  The container is still decided from content, so a `.mkv` is reported as
+  `unsupported_container`, not skipped.
+- Results are cached by path, size and mtime. A normal scan re-validates only changed files;
+  `force` re-validates everything. Files that disappeared are dropped.
+- A pool of 2 workers runs `AnalyzeFile`, with a 30 s timeout per file. A timeout is `loader_error`.
+  `Scan` returns when the whole directory is done; entries appear in `List` as they finish.
+
+### Upload and delete
+
+- Uploads live in a dedicated `uploads/` subdirectory of the first writable root, created on first
+  use. A scanned entry for an upload is therefore named `uploads/<file>` (depth 2, inside the scan
+  depth limit).
+- `Upload` streams to `<root>/uploads/.upload-*.part`, enforcing `--max-upload` (default 2 GiB; exceeding it
+  aborts and removes the part file with `ErrTooLarge`). It then validates the part file, places
+  it and records the entry. Placement is a hard link (which fails rather than overwrite), falling
+  back to reserving the name with an exclusive create and renaming over it on filesystems without
+  hard links (FAT, exFAT, some network and FUSE mounts).
+- The name is reduced to its base, rejects empty names, `.`/`..`, control characters and path
+  separators, and must carry a listed video extension. An existing file is never overwritten: a
+  numeric suffix is added (`clip-1.mp4`).
+- `Delete` removes only a file inside `uploads/` of the first writable root (anything in that
+  directory counts, including a file placed there by hand); every other id, including the
+  operator's own originals elsewhere in the same root, returns `ErrNotDeletable`. It
+  refuses a file a running camera is serving (the dashboard checks the fleet and passes the set of
+  in-use paths; see §3).
+- Part files left by a crash are removed at startup, from `uploads/` only.
+
+## 3. Dashboard API (`internal/dashboard`)
+
+All handlers are thin: parse, call the library, encode. JSON field names are lower camel case.
+
+| Method and path | Behaviour |
+|---|---|
+| `GET /api/v1/library` | `{roots: [{path, writable, ui}], uploadEnabled, allowUIPaths, files: [Entry…]}`. Each file also carries `inUseBy: [cameraId…]`. |
+| `POST /api/v1/library/scan` | Body `{force?: bool, root?: string}`. Scans one root or all. Returns the same shape as GET plus `scanErrors: [string]` (empty, never null). A media directory that has vanished or become unreadable has all its entries dropped and is named there as `media directory unavailable: <path>`; the response is still 200 and the other roots are served. |
+| `POST /api/v1/library/upload` | `multipart/form-data`, one `file` part. Returns the new entry (201), including an `invalid` one. 413 over `--max-upload`; 400 on a bad name; 403 when no root is writable; 429 with `Retry-After` when 4 uploads are already in flight. |
+| `DELETE /api/v1/library/files/{id}` | 204; 404 unknown; 409 when a camera uses it; 403 for any file outside `uploads/`. |
+| `POST /api/v1/library/roots` | Body `{path}`. 403 unless `--allow-ui-paths`; 400 if not an existing directory. |
+
+`POST /api/v1/cameras` accepts a top-level `libraryId: "<id>"` alongside `source: {kind: "file"}`
+(it is not a field of `source`). The server resolves it to the library path, and re-checks the
+file's size and mtime at creation time, re-validating if it changed since the last scan. It returns
+**422** with the report when the status is `invalid`; a `warning` file proceeds. The existing typed `source.path` keeps working unchanged. A camera's DTO gains
+`libraryId` and `warnings: [Issue…]` when it came from the library, so the card can show them.
+
+Every mutating library endpoint (upload, scan, delete, roots) first refuses a request a browser sent
+for another origin: `403 {"error":"cross-origin request refused"}` when `Sec-Fetch-Site` is
+`cross-site`, when it is `same-site` without an `Origin` that matches, or when an `Origin` header is
+present whose host does not equal the request `Host`. This runs before any body is read, because
+`multipart/form-data` needs no CORS preflight. Requests with neither header (curl, Go clients) pass.
+This guards against cross-site requests only. It does not defend against DNS rebinding, where the
+`Origin` equals the `Host` and `Sec-Fetch-Site` is `same-origin`; the dashboard still has no
+authentication and no Host-header check.
+Library analyses share one worker pool (`Workers`) across scan, refresh and upload.
+
+The upload body is read with `http.MaxBytesReader`. Upload requests need a longer or disabled
+`ReadTimeout` than the server's default, or a large file on a slow link is cut off mid-transfer. Responses never include the contents of a file
+or any path outside a configured root.
+
+## 4. Binary: `cmd/camfarm`
+
+- `--media-dir <path>` (repeatable) adds a root. A directory that does not exist or is not
+  readable stops startup with a clear message.
+- `--allow-ui-paths` (bool, default false).
+- `--max-upload <size>` (default `2GiB`).
+- The scan at startup runs in the background so a large directory does not delay the dashboard;
+  the UI shows "scanning" until it finishes.
+- A Docker volume is just a `--media-dir` pointing at the mount. The README gains a short example.
+
+## 5. Testing
+
+- **`media.Analyze`**: table-driven over generated media for every issue code, with one fixture
+  or synthetic `Media` per row; a row asserts both status and issue code. Boundary values for
+  each threshold (just under, just over). The bundled H.264 and H.265 fixtures must report `valid`.
+- **`AnalyzeFile`**: real files — truncated, empty, random bytes, an MP4 renamed `.ts`, a
+  parser-panic input — each ending in `invalid` with the right code and no panic.
+- **`library`**: scan depth limit, symlink skipped, extension filter, cache hit and `force`,
+  disappearing file, upload cap, name rules (traversal, separators, control characters, no
+  extension), no-overwrite suffix, `.part` cleanup, delete outside the upload root refused,
+  `AddRoot` refused without the flag, worker timeout. Run under `-race`.
+- **Dashboard**: a handler test per endpoint on a real listener, including 413, 422, 409 and 403,
+  and a camera created from a library id.
+- **E2E**: upload a file, scan, create a camera from it, read it over RTSP.
+- Path-traversal and symlink-escape tests cover scan, upload and delete.
+- Coverage is whatever CI reports. No figure is written into the README.
+
+## 6. Out of scope
+
+- Transcoding or repairing a file; the validator only reports.
+- H.265 slice-level parsing; ffprobe integration; hot-watching a directory for changes (rescan is
+  an explicit user action).
+- Authentication for the dashboard. The mitigation here is that arbitrary paths are off by default.
+- Containers other than MPEG-TS and MP4/MOV.
+
+## 7. Risks
+
+- Parsing an untrusted file with the existing parsers is the main exposure. The panic recovery,
+  per-file timeout and the `large_file` warning contain it; the tests above cover each.
+- A file that is valid but huge is held fully in memory once a camera uses it. The warning is
+  advisory; a hard limit is deliberately not added here.
+- `b_frames` for H.265 is weaker evidence than for H.264. The report says so.
