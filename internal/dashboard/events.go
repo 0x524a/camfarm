@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/0x524a/camfarm"
+	"github.com/0x524a/camfarm/internal/hostmetrics"
 	"github.com/0x524a/camfarm/internal/quality"
 )
 
@@ -25,7 +26,7 @@ func (s *server) getFleet(w http.ResponseWriter, _ *http.Request) {
 }
 
 // events streams fleet changes as Server-Sent Events, merged with "quality"
-// events from the stream quality runner when one is configured. A client that falls
+// and "metrics" events from the stream quality runner and host sampler when configured. A client that falls
 // behind is dropped by the fleet and sees the stream end; it reconnects and
 // re-lists, which is why nothing is replayed.
 func (s *server) events(w http.ResponseWriter, r *http.Request) {
@@ -42,6 +43,12 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 	var qch <-chan quality.Event
 	if s.quality != nil {
 		qch = s.quality.Subscribe(r.Context())
+	}
+	// mch is nil (and so never ready) when host metrics are disabled. Samples
+	// come from the sampler's own bus and never touch the fleet's feed or journal.
+	var mch <-chan hostmetrics.Sample
+	if s.metrics != nil {
+		mch = s.metrics.Subscribe(r.Context())
 	}
 
 	h := w.Header()
@@ -89,6 +96,17 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if !send("event: quality\ndata: %s\n\n", b) {
+				return
+			}
+		case ms, ok := <-mch:
+			if !ok {
+				return // dropped or closed: the client reconnects and re-lists
+			}
+			b, err := json.Marshal(ms)
+			if err != nil {
+				continue
+			}
+			if !send("event: metrics\ndata: %s\n\n", b) {
 				return
 			}
 		}

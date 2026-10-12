@@ -61,6 +61,9 @@ Early:
   rtspeek against the camera's own RTSP stream for a few seconds and reports packet loss, jitter,
   bitrate, frame rate, keyframe and timestamp findings. The measured numbers are not reproducible
   from a seed. See [Stream quality test](#stream-quality-test).
+- **Works:** host metrics — `GET /api/v1/metrics` and a `metrics` event on `/api/v1/events` report
+  host CPU, memory, GPU (via `nvidia-smi`) and camfarm's own process usage. Not part of the replay
+  hash. See [Host metrics](#host-metrics).
 - **Works:** a media library — point the binary at directories of your own video
   with `--media-dir` (repeatable) and the dashboard API lists, validates and
   serves them. Each file is validated once per change: at startup, on rescan, on
@@ -299,6 +302,44 @@ aim it at another host. It is API-only for now: the dashboard page has no button
   What does reproduce is the presence of a strong seeded fault: a `packet_loss` at a rate of 0.3
   produces a `packet_loss` finding. Do not compare figures between runs as if a seed fixed them.
 - `POST` and `DELETE` refuse cross-site browser requests, like the library's mutating endpoints.
+
+## Host metrics
+
+```sh
+curl http://127.0.0.1:8080/api/v1/metrics
+```
+
+`GET /api/v1/metrics` returns one sample of the machine camfarm runs on, no older than two seconds.
+The same sample arrives as a `metrics` event on `/api/v1/events`.
+
+```json
+{
+  "time": "2026-10-12T09:00:00Z",
+  "cpu": {"available": true, "usagePercent": 12.5, "logicalCPUs": 16, "load1": 0.5, "load5": 0.4, "load15": 0.3, "limitCPUs": null},
+  "memory": {"available": true, "totalBytes": 66560000000, "usedBytes": 26000000000, "availableBytes": 40560000000, "swapTotalBytes": 0, "swapUsedBytes": 0, "limitBytes": null},
+  "gpu": {"available": true, "devices": [{"index": 0, "name": "NVIDIA GeForce RTX 4090", "uuid": "GPU-aaaa-1111", "gpuUtilPercent": 37, "memUtilPercent": 12, "memUsedBytes": 1073741824, "memTotalBytes": 25757220864, "encoderUtilPercent": 5, "decoderUtilPercent": 0, "temperatureC": 54, "powerWatts": 78.43, "powerLimitWatts": 450}]},
+  "process": {"available": true, "cpuPercent": 3.1, "rssBytes": 41943040, "goroutines": 52, "openFDs": 18}
+}
+```
+
+- Sections are independent. One that cannot be read has `"available": false` and a `reason`; the
+  others are unaffected and the response is still 200. For `cpu`, `memory` and `process` on Linux
+  the reason is the underlying read error text. For `gpu` it is one of several things: `nvidia-smi`
+  not found, `nvidia-smi` failing (a driver or library mismatch prints its own message), a timeout,
+  or `nvidia-smi reported no devices`.
+- `null` means "not reported", never 0: the first CPU reading after the sampler wakes has no
+  baseline, a limit is `null` when no cgroup limit applies, and a value `nvidia-smi` prints as
+  `N/A` or `Not Supported` is `null`.
+- `gpuUtilPercent` is `nvidia-smi`'s `utilization.gpu`: the share of time a kernel was running, not
+  SM occupancy.
+- CPU, memory and process readings are Linux only; other systems report `unsupported platform`.
+  The GPU section needs `nvidia-smi` on the `PATH`.
+- The sampler runs only while an event-stream client is connected or the endpoint was fetched in
+  the last 10 seconds; otherwise it is idle.
+- **The endpoint exposes host details and the dashboard has no authentication.** Do not expose it.
+- Metrics publish nothing to the fleet's feed, add no journal entry and are not part of the replay
+  hash.
+- The GPU parser is verified against captured `nvidia-smi` output, not live hardware.
 
 ## Use as a library
 
