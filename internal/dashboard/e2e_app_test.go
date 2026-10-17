@@ -513,12 +513,107 @@ func TestAppUnimplementedFaultKindsAreDisabled(t *testing.T) {
 		t.Fatalf("no kinds listed (n=%d err=%v)", n, err)
 	}
 	// Every option the server marks unimplemented must be disabled.
-	res, err := s.page.Evaluate(`fetch("/api/v1/faults").then(r => r.json()).then(c => c.filter(k => !k.implemented).every(k => {
-		const o = document.querySelector('#fault-kind option[value="' + k.kind + '"]');
-		return !o || o.disabled;
-	}))`)
+	res, err := s.page.Evaluate(`fetch("/api/v1/faults").then(r => r.json()).then(c => {
+		const un = c.filter(k => !k.implemented);
+		return un.length > 0 && un.every(k => {
+			const o = document.querySelector('#fault-kind option[value="' + k.kind + '"]');
+			return o && o.disabled;
+		});
+	})`)
 	if err != nil || res != true {
 		t.Fatalf("an unimplemented kind is selectable (res=%v err=%v)", res, err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppFaultDrawerKeepsFocusAfterApplyAndTrapsTab(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	open := s.camCard("front-door").Locator(".btn-faults")
+	for round := 0; round < 2; round++ {
+		mustClick(t, open)
+		if err := expect().Locator(s.page.Locator("#drawer")).ToBeVisible(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.page.Locator("#fault-kind").SelectOption(playwright.SelectOptionValues{Values: &[]string{"frame_drop"}}); err != nil {
+			t.Fatal(err)
+		}
+		mustFill(t, s.page.Locator(`.fault-param[data-name="rate"]`), "0.5")
+		mustClick(t, s.page.Locator("#fault-apply"))
+		if err := expect().Locator(s.camCard("front-door").Locator(".chip").First()).ToContainText("frame_drop"); err != nil {
+			t.Fatal(err)
+		}
+		inside, err := s.page.Evaluate(`document.getElementById("drawer").contains(document.activeElement)`)
+		if err != nil || inside != true {
+			t.Fatalf("round %d: focus left the drawer after Apply (inside=%v err=%v)", round, inside, err)
+		}
+		mustClick(t, s.page.Locator("#fault-clear"))
+		if err := expect().Locator(s.camCard("front-door").Locator(".chip").First()).ToContainText("no faults"); err != nil {
+			t.Fatal(err)
+		}
+		inside, err = s.page.Evaluate(`document.getElementById("drawer").contains(document.activeElement)`)
+		if err != nil || inside != true {
+			t.Fatalf("round %d: focus left the drawer after Clear (inside=%v err=%v)", round, inside, err)
+		}
+		if round == 0 {
+			// Tab from the last control wraps to the first, Shift+Tab the reverse.
+			if _, err := s.page.Evaluate(`(() => { const f = [...document.querySelectorAll("#drawer button, #drawer select, #drawer input")].filter(n => !n.disabled); f[f.length-1].focus(); })()`); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.page.Keyboard().Press("Tab"); err != nil {
+				t.Fatal(err)
+			}
+			v, err := s.page.Evaluate(`(() => { const f = [...document.querySelectorAll("#drawer button, #drawer select, #drawer input")].filter(n => !n.disabled); return document.activeElement === f[0]; })()`)
+			if err != nil || v != true {
+				t.Fatalf("Tab did not wrap to the first control (v=%v err=%v)", v, err)
+			}
+			if err := s.page.Keyboard().Press("Shift+Tab"); err != nil {
+				t.Fatal(err)
+			}
+			v, err = s.page.Evaluate(`(() => { const f = [...document.querySelectorAll("#drawer button, #drawer select, #drawer input")].filter(n => !n.disabled); return document.activeElement === f[f.length-1]; })()`)
+			if err != nil || v != true {
+				t.Fatalf("Shift+Tab did not wrap to the last control (v=%v err=%v)", v, err)
+			}
+		}
+		if err := s.page.Keyboard().Press("Escape"); err != nil {
+			t.Fatal(err)
+		}
+		if err := expect().Locator(s.page.Locator("#drawer")).ToBeHidden(); err != nil {
+			t.Fatalf("round %d: Escape did not close after Apply/Clear: %v", round, err)
+		}
+		back, err := s.page.Evaluate(`document.activeElement && document.activeElement.classList.contains("btn-faults")`)
+		if err != nil || back != true {
+			t.Fatalf("round %d: focus did not return (back=%v err=%v)", round, back, err)
+		}
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppFaultDrawerClosesWhenItsCameraIsRemoved(t *testing.T) {
+	url, f := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	// Let the thumbnail finish so removal does not race an in-flight snapshot.
+	if err := expect().Locator(s.camCard("front-door").Locator("img.snap")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	mustClick(t, s.camCard("front-door").Locator(".btn-faults"))
+	if err := expect().Locator(s.page.Locator("#drawer")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.RemoveCamera("front-door"); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(s.page.Locator("#drawer")).ToBeHidden(); err != nil {
+		t.Fatalf("drawer stayed open for a removed camera: %v", err)
+	}
+	if n, err := s.page.Locator("#drawer *").Count(); err != nil || n != 0 {
+		t.Fatalf("drawer left content behind (n=%d err=%v)", n, err)
+	}
+	inert, err := s.page.Evaluate(`document.querySelector("main").inert`)
+	if err != nil || inert != false {
+		t.Fatalf("page left inert (inert=%v err=%v)", inert, err)
 	}
 	s.requireCleanApp(t)
 }

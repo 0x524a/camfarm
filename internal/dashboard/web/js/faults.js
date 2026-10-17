@@ -3,6 +3,8 @@ import { el } from "./dom.js";
 export function mount(drawer, ctx) {
   const { store, api, fail } = ctx;
   let opener = null; // the element that opened the drawer, for returning focus
+  let busy = false; // an Apply or Clear is in flight; the focused button is never disabled
+  const page = document.querySelector("main");
 
   async function ensureCatalogue() {
     if (store.get().catalogue.length) return;
@@ -42,7 +44,7 @@ export function mount(drawer, ctx) {
   function render(id) {
     const st = store.get();
     const cam = st.cameras.find((c) => c.id === id);
-    if (!cam) { close(); return; }
+    if (!cam) { close(); return false; }
     const kinds = st.catalogue;
     const kind = el("select", { id: "fault-kind" }, kinds.map((k) => el("option", {
       value: k.kind, text: k.kind + (k.implemented ? "" : " (not implemented)"), disabled: !k.implemented,
@@ -74,18 +76,22 @@ export function mount(drawer, ctx) {
         if (input.value === "") return;
         spec[name] = input.type === "number" ? Number(input.value) : input.value;
       });
-      apply.disabled = true;
+      if (busy) return;
+      busy = true;
+      apply.setAttribute("aria-disabled", "true");
       try {
         await api.injectFault(id, spec);
         store.set({ error: "", cameras: await api.cameras() });
-      } catch (e) { fail(e); } finally { apply.disabled = false; }
+      } catch (e) { fail(e); } finally { busy = false; apply.removeAttribute("aria-disabled"); }
     });
     clear.addEventListener("click", async () => {
-      clear.disabled = true;
+      if (busy) return;
+      busy = true;
+      clear.setAttribute("aria-disabled", "true");
       try {
         await api.clearFaults(id);
         store.set({ error: "", cameras: await api.cameras() });
-      } catch (e) { fail(e); } finally { clear.disabled = false; }
+      } catch (e) { fail(e); } finally { busy = false; clear.removeAttribute("aria-disabled"); }
     });
 
     drawer.replaceChildren(
@@ -95,11 +101,16 @@ export function mount(drawer, ctx) {
       models, params,
       el("div", { class: "row" }, [apply, clear]),
     );
+    return true;
   }
+
+  // Escape is heard on the document while the drawer is open, wherever focus is.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !drawer.hidden) { e.preventDefault(); close(); }
+  });
 
   // Keep Tab inside the drawer while it is open.
   drawer.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { e.preventDefault(); close(); return; }
     if (e.key !== "Tab") return;
     const f = [...drawer.querySelectorAll("button, select, input")].filter((n) => !n.disabled);
     if (!f.length) return;
@@ -111,14 +122,18 @@ export function mount(drawer, ctx) {
   store.subscribe(async (st, patch) => {
     if ("faultsFor" in patch) {
       if (st.faultsFor) {
+        const id = st.faultsFor;
         opener = document.activeElement;
         await ensureCatalogue();
-        render(st.faultsFor);
+        if (store.get().faultsFor !== id) return; // closed or switched while loading
+        if (!render(id)) return;
         drawer.hidden = false;
+        if (page) page.inert = true;
         const first = drawer.querySelector("#fault-kind");
         if (first) first.focus();
       } else {
         drawer.hidden = true;
+        if (page) page.inert = false;
         drawer.replaceChildren();
         if (opener && opener.isConnected) opener.focus();
         opener = null;
