@@ -64,7 +64,6 @@ label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color:
 .tab { background: none; color: var(--muted); border-radius: 0; border-bottom: 2px solid transparent; padding: 9px 14px; white-space: nowrap; }
 .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
 .count { margin-inline-start: 4px; color: var(--muted); font-variant-numeric: tabular-nums; }
-[role="tabpanel"] { min-height: 1px; } /* an empty panel still has a box, so it reads as visible */
 .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
 /* metrics */
 #metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
@@ -103,6 +102,7 @@ label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color:
 .drawer .params { display: grid; gap: 8px; }
 .fault-active { color: var(--ok); font-size: 12px; }
 /* library */
+.lib-body { display: flex; flex-direction: column; gap: 10px; }
 .stats { display: flex; flex-wrap: wrap; gap: 8px; }
 .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; text-align: left; color: var(--text); min-width: 110px; }
 .stat[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }

@@ -2,6 +2,7 @@ import { api } from "./api.js";
 import { createStore } from "./state.js";
 import { mount as mountCameras } from "./cameras.js";
 import { mount as mountFaults } from "./faults.js";
+import { mount as mountLibrary } from "./library.js";
 
 const store = createStore({
   cameras: [], catalogue: [], library: null, metrics: null,
@@ -87,6 +88,7 @@ function refreshSoon() {
 // --- feature modules (each task adds its line) ---
 mountCameras($("#panel-cameras"), ctx);
 mountFaults($("#drawer"), ctx);
+mountLibrary($("#panel-library"), ctx);
 
 // --- event stream ---
 if (window.EventSource) {

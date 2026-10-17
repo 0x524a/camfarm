@@ -6,8 +6,11 @@
 package dashboard
 
 import (
+	"context"
 	"fmt"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -19,6 +22,8 @@ import (
 	"github.com/0x524a/camfarm"
 	"github.com/0x524a/camfarm/internal/hostmetrics"
 	"github.com/0x524a/camfarm/internal/library"
+	"github.com/0x524a/camfarm/internal/media"
+	"github.com/0x524a/camfarm/internal/media/fixture"
 	"github.com/0x524a/camfarm/internal/quality"
 )
 
@@ -681,6 +686,322 @@ func TestAppStreamQualityButtonIsAbsentWhenNotEnabled(t *testing.T) {
 		if err != nil || n != 0 {
 			t.Fatalf("%s present although the server has quality disabled (n=%d err=%v)", sel, n, err)
 		}
+	}
+	s.requireCleanApp(t)
+}
+
+func mustSelect(t *testing.T, l playwright.Locator, v string) {
+	t.Helper()
+	if _, err := l.SelectOption(playwright.SelectOptionValues{Values: &[]string{v}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// libraryFixture builds a library over a temp dir seeded with a valid file, a
+// file that reports B-frames and out-of-order timestamps, and an invalid file.
+// The Analyze seam gives the second file its issues; the other two are
+// analysed for real, so "Use for camera" really serves the valid file.
+func libraryFixture(t *testing.T, opt library.Options) (*library.Library, string) {
+	t.Helper()
+	return libraryFixtureMode(t, opt, 0o755)
+}
+
+// libraryFixtureMode is libraryFixture with the media directory's permission
+// bits set before the library probes it, so 0o555 yields a read-only root.
+func libraryFixtureMode(t *testing.T, opt library.Options, mode os.FileMode) (*library.Library, string) {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(name string, b []byte) {
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("clean.ts", fixture.Bytes())
+	write("bframes.ts", fixture.Bytes())
+	write("broken.mp4", []byte("this is not a video"))
+	opt.Roots = append([]string{dir}, opt.Roots...)
+	opt.Analyze = func(path string) media.Report {
+		r := media.AnalyzeFile(path)
+		if filepath.Base(path) == "bframes.ts" {
+			r.Issues = append(r.Issues,
+				media.Issue{Code: "b_frames", Severity: media.SeverityWarning, Message: "The video uses B-frames.", Detail: "Decode order differs from display order."},
+				media.Issue{Code: "dts_not_monotonic", Severity: media.SeverityWarning, Message: "Decode timestamps go backwards or repeat."})
+			r.Status = media.StatusWarning
+		}
+		return r
+	}
+	if err := os.Chmod(dir, mode); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) }) // let TempDir remove it
+	lib, err := library.New(opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return lib, dir
+}
+
+func libRow(s *session, name string) playwright.Locator {
+	return s.page.Locator(fmt.Sprintf(`#files tbody tr[data-name=%q]`, name))
+}
+
+func openLibrary(t *testing.T, s *session, url string) {
+	t.Helper()
+	s.openApp(t, url)
+	mustClick(t, s.page.Locator(`button.tab[data-tab="library"]`))
+}
+
+func TestAppLibraryShowsEveryFilesStatusAndFindings(t *testing.T) {
+	lib, _ := libraryFixture(t, library.Options{})
+	if err := lib.Scan(context.Background(), "", false); err != nil {
+		t.Fatal(err)
+	}
+	url, _ := appServer(t, appOpts{lib: lib})
+	s := newSession(t)
+	openLibrary(t, s, url)
+
+	if err := expect().Locator(libRow(s, "clean.ts").Locator(".status")).ToHaveText("Valid"); err != nil {
+		t.Fatal(err)
+	}
+	b := libRow(s, "bframes.ts")
+	if err := expect().Locator(b.Locator(".status")).ToHaveText("Valid, with warnings"); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(b).ToContainText("The video uses B-frames."); err != nil {
+		t.Fatalf("B-frames finding not spelled out: %v", err)
+	}
+	if err := expect().Locator(b).ToContainText("Decode timestamps go backwards"); err != nil {
+		t.Fatalf("timestamp finding not spelled out: %v", err)
+	}
+	if err := expect().Locator(libRow(s, "broken.mp4").Locator(".status")).ToHaveText("Invalid"); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(libRow(s, "broken.mp4").Locator(".btn-use")).ToBeDisabled(); err != nil {
+		t.Fatal("an invalid file can be used for a camera")
+	}
+	// Filter chips with counts.
+	if err := expect().Locator(s.page.Locator(`.stat[data-f="all"] b`)).ToHaveText("3"); err != nil {
+		t.Fatal(err)
+	}
+	mustClick(t, s.page.Locator(`.stat[data-f="invalid"]`))
+	if err := expect().Locator(s.page.Locator("#files tbody tr")).ToHaveCount(1); err != nil {
+		t.Fatalf("invalid filter: %v", err)
+	}
+	if err := expect().Locator(s.page.Locator("#count-library")).ToHaveText("2"); err != nil {
+		t.Fatalf("tab count of files needing attention: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppLibraryRescanFindsNewFilesAndRefreshDoesNotValidate(t *testing.T) {
+	lib, dir := libraryFixture(t, library.Options{})
+	if err := lib.Scan(context.Background(), "", false); err != nil {
+		t.Fatal(err)
+	}
+	url, _ := appServer(t, appOpts{lib: lib})
+	s := newSession(t)
+	openLibrary(t, s, url)
+	if err := expect().Locator(libRow(s, "clean.ts")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "dropped.ts"), fixture.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustClick(t, s.page.Locator("#lib-refresh"))
+	time.Sleep(500 * time.Millisecond)
+	if n, _ := libRow(s, "dropped.ts").Count(); n != 0 {
+		t.Fatal("Refresh validated a new file; only Rescan should")
+	}
+	mustClick(t, s.page.Locator("#lib-rescan"))
+	if err := expect().Locator(libRow(s, "dropped.ts").Locator(".status")).ToHaveText("Valid"); err != nil {
+		t.Fatalf("Rescan did not show the new file: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppLibraryUploadShowsTheValidatedFile(t *testing.T) {
+	// The first root is writable, so uploads are enabled.
+	lib, err := library.New(library.Options{Roots: []string{t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	url, _ := appServer(t, appOpts{lib: lib})
+	s := newSession(t)
+	openLibrary(t, s, url)
+	good := filepath.Join(t.TempDir(), "uploaded-good.ts")
+	bad := filepath.Join(t.TempDir(), "uploaded-bad.mp4")
+	if err := os.WriteFile(good, fixture.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bad, []byte("nope"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.page.Locator("#file-input").SetInputFiles([]string{good}); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(libRow(s, "uploads/uploaded-good.ts").Locator(".status")).ToHaveText("Valid"); err != nil {
+		t.Fatalf("good upload: %v", err)
+	}
+	if err := s.page.Locator("#file-input").SetInputFiles([]string{bad}); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(libRow(s, "uploads/uploaded-bad.mp4").Locator(".status")).ToHaveText("Invalid"); err != nil {
+		t.Fatalf("bad upload: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppLibraryUseForCameraPreselectsTheFileAndStreams(t *testing.T) {
+	lib, _ := libraryFixture(t, library.Options{})
+	if err := lib.Scan(context.Background(), "", false); err != nil {
+		t.Fatal(err)
+	}
+	url, f := appServer(t, appOpts{lib: lib})
+	s := newSession(t)
+	openLibrary(t, s, url)
+	mustClick(t, libRow(s, "clean.ts").Locator(".btn-use"))
+	if err := expect().Locator(s.page.Locator("#add-form")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(s.page.Locator("#add-source")).ToHaveValue("library"); err != nil {
+		t.Fatal(err)
+	}
+	opt, err := s.page.Locator("#add-lib option:checked").TextContent()
+	if err != nil || !strings.Contains(opt, "clean.ts") {
+		t.Fatalf("file not preselected: %q err=%v", opt, err)
+	}
+	mustFill(t, s.page.Locator("#add-id"), "from-file")
+	mustClick(t, s.page.Locator("#add-submit"))
+	if err := expect().Locator(s.camCard("from-file")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Camera("from-file"); err != nil {
+		t.Fatalf("camera not in the fleet: %v", err)
+	}
+	// The file now shows who uses it, and cannot be deleted.
+	mustClick(t, s.page.Locator(`button.tab[data-tab="library"]`))
+	mustClick(t, s.page.Locator("#lib-refresh"))
+	if err := expect().Locator(libRow(s, "clean.ts")).ToContainText("from-file"); err != nil {
+		t.Fatalf("in-use camera not shown: %v", err)
+	}
+	if err := expect().Locator(libRow(s, "clean.ts").Locator(".btn-del")).ToBeDisabled(); err != nil {
+		t.Fatal("a file in use can be deleted")
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppLibraryAddSharedPath(t *testing.T) {
+	lib, _ := libraryFixture(t, library.Options{AllowUIPaths: true})
+	extra := t.TempDir()
+	if err := os.WriteFile(filepath.Join(extra, "extra.ts"), fixture.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	url, _ := appServer(t, appOpts{lib: lib})
+	s := newSession(t)
+	openLibrary(t, s, url)
+	mustFill(t, s.page.Locator("#root-path"), extra)
+	mustClick(t, s.page.Locator(`#root-form button[type="submit"]`))
+	if err := expect().Locator(libRow(s, "extra.ts").Locator(".status")).ToHaveText("Valid"); err != nil {
+		t.Fatalf("shared path not scanned: %v", err)
+	}
+	mustFill(t, s.page.Locator("#root-path"), "/does/not/exist")
+	mustClick(t, s.page.Locator(`#root-form button[type="submit"]`))
+	if err := expect().Locator(s.page.Locator("#error")).ToContainText("does not exist"); err != nil {
+		t.Fatalf("bad path error not shown: %v", err)
+	}
+	s.requireCleanApp(t, 400)
+}
+
+// Review Focus 3.
+func TestAppLibraryHidesDisabledControlsWithAReason(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions, so no root can be read-only")
+	}
+	lib, _ := libraryFixtureMode(t, library.Options{}, 0o555) // no writable root, no UI paths
+	url, _ := appServer(t, appOpts{lib: lib})
+	s := newSession(t)
+	openLibrary(t, s, url)
+	if err := expect().Locator(s.page.Locator("#drop")).ToHaveCount(0); err != nil {
+		t.Fatal("upload area shown although uploads are disabled")
+	}
+	if err := expect().Locator(s.page.Locator("#root-form")).ToHaveCount(0); err != nil {
+		t.Fatal("add-path form shown although UI paths are disabled")
+	}
+	if err := expect().Locator(s.page.Locator("#panel-library")).ToContainText("Uploads are off"); err != nil {
+		t.Fatalf("no reason for the missing upload area: %v", err)
+	}
+	if err := expect().Locator(s.page.Locator("#panel-library")).ToContainText("Adding paths is off"); err != nil {
+		t.Fatalf("no reason for the missing path form: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppLibraryEmptyAndInvalidOnly(t *testing.T) {
+	dir := t.TempDir()
+	lib, err := library.New(library.Options{Roots: []string{dir}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	url, _ := appServer(t, appOpts{lib: lib})
+	s := newSession(t)
+	openLibrary(t, s, url)
+	if err := expect().Locator(s.page.Locator("#lib-empty")).ToContainText("No video files"); err != nil {
+		t.Fatalf("empty library not explained: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.mp4"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustClick(t, s.page.Locator("#lib-rescan"))
+	if err := expect().Locator(libRow(s, "a.mp4").Locator(".status")).ToHaveText("Invalid"); err != nil {
+		t.Fatal(err)
+	}
+	mustClick(t, s.page.Locator(`button.tab[data-tab="cameras"]`))
+	mustClick(t, s.page.Locator("#add-open"))
+	mustSelect(t, s.page.Locator("#add-source"), "library")
+	n, err := s.page.Locator("#add-lib option").Count()
+	if err != nil || n != 0 {
+		t.Fatalf("an invalid file is offered in the add form (n=%d err=%v)", n, err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppLibraryDisabledServerShowsNoLibraryTab(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	openLibrary(t, s, url)
+	if err := expect().Locator(s.page.Locator("#panel-library")).ToContainText("not enabled"); err != nil {
+		t.Fatalf("a server without a library should say so: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppLibraryDeleteAsksFirst(t *testing.T) {
+	up := t.TempDir()
+	lib, err := library.New(library.Options{Roots: []string{up}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	url, _ := appServer(t, appOpts{lib: lib})
+	s := newSession(t)
+	openLibrary(t, s, url)
+	f := filepath.Join(t.TempDir(), "gone.ts")
+	if err := os.WriteFile(f, fixture.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.page.Locator("#file-input").SetInputFiles([]string{f}); err != nil {
+		t.Fatal(err)
+	}
+	row := libRow(s, "uploads/gone.ts")
+	if err := expect().Locator(row).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	mustClick(t, row.Locator(".btn-del"))
+	if err := expect().Locator(row).ToBeVisible(); err != nil {
+		t.Fatal("deleted without confirming")
+	}
+	mustClick(t, row.Locator(".btn-del-confirm"))
+	if err := expect().Locator(row).ToHaveCount(0); err != nil {
+		t.Fatalf("file still listed after delete: %v", err)
 	}
 	s.requireCleanApp(t)
 }
