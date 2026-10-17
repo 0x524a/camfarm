@@ -26,7 +26,8 @@ export function mount(drawer, ctx) {
         step: p.type === "integer" ? "1" : "any",
         min: p.min !== undefined ? p.min : false, max: p.max !== undefined ? p.max : false,
       });
-      if (p.default !== undefined) input.value = p.default;
+      // A default of 0 under a positive minimum means "unset" (onlyRequest); leave it empty.
+      if (p.default !== undefined && !(p.default === 0 && p.min > 0)) input.value = p.default;
     }
     return el("label", { title: p.help || "" }, [p.name + (p.required ? " *" : ""), input]);
   }

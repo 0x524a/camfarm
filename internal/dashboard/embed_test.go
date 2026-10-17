@@ -19,15 +19,13 @@ func TestEmbeddedPageReferencesExist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, page := range []string{"app.html", "index.html"} {
-		b, err := fs.ReadFile(web, page)
-		if err != nil {
-			continue // app.html is renamed to index.html in the last task
-		}
-		for _, m := range htmlRef.FindAllStringSubmatch(string(b), -1) {
-			if _, err := fs.Stat(web, m[2]); err != nil {
-				t.Errorf("%s references %q, which is not embedded", page, m[2])
-			}
+	b, err := fs.ReadFile(web, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range htmlRef.FindAllStringSubmatch(string(b), -1) {
+		if _, err := fs.Stat(web, m[2]); err != nil {
+			t.Errorf("index.html references %q, which is not embedded", m[2])
 		}
 	}
 	err = fs.WalkDir(web, "js", func(p string, d fs.DirEntry, err error) error {

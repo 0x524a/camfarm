@@ -1,6 +1,9 @@
 # Dashboard redesign
 
-Status: design, awaiting review. Sub-project 3 of 3 of the dashboard work
+Status: implemented.
+Plan: docs/superpowers/plans/2026-10-17-dashboard-redesign.md
+
+Sub-project 3 of 3 of the dashboard work
 (1: media library, merged; 2: host metrics, PR #17; this one: the UI that uses both,
 plus the stream-quality API).
 

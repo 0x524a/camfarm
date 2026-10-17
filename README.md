@@ -45,9 +45,11 @@ Early:
   decode incorrectly. Only the bundled fixture and similarly encoded files are
   tested.
 - **Works:** a web dashboard and `cmd/camfarm` binary. `go run ./cmd/camfarm --cameras 3` (or the
-  built `camfarm` binary) serves a fleet and a page at `http://127.0.0.1:8080/` that lists cameras
-  with copyable RTSP and ONVIF URLs, adds and removes cameras, takes on-demand snapshots, and
-  injects and clears faults. Changes appear live over Server-Sent Events. The JSON API is under
+  built `camfarm` binary) serves a fleet and a page at `http://127.0.0.1:8080/` that shows each
+  camera as a card with a snapshot thumbnail and copyable RTSP and ONVIF URLs, adds and removes
+  cameras, and opens a fault drawer to inject and clear faults. It also has a host metrics strip,
+  a library tab (validation findings, uploads and shared paths) and a per-camera stream quality
+  test. Changes appear live over Server-Sent Events. The JSON API is under
   `/api/v1/` (`fleet`, `cameras`, `cameras/{id}`, `cameras/{id}/snapshot.jpg`,
   `cameras/{id}/faults`, `cameras/{id}/quality`, and the `events` stream). Seeds are decimal strings in the API. Flags:
   `--spec`, `--seed`, `--cameras` (mutually exclusive with `--spec`), `--http-addr`,
@@ -272,7 +274,8 @@ A test points [rtspeek](https://github.com/0x524A/rtspeek) (v1.0.0, linked as a 
 camera's own RTSP URL for a short window and reports what a client received: packet loss, jitter,
 bitrate, frame rate, keyframes, timestamp jumps, broken frames and B-frame reordering, as findings
 ranked `info`, `warn` or `error`. The URL is always the camera's own; nothing in the request can
-aim it at another host. It is API-only for now: the dashboard page has no button for it yet.
+aim it at another host. The dashboard runs it from a button on each camera card. Like the rest of
+the dashboard it has no authentication, and its metrics strip exposes host details.
 
 - Options: `durationSeconds` from 1 to 30, default 5; `transport` `auto` (the default), `udp` or
   `tcp`. An empty body takes the defaults. The thresholds are rtspeek's own and cannot be changed,

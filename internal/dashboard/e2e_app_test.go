@@ -1,8 +1,7 @@
 //go:build e2e
 
-// Real-browser tests of the redesigned dashboard (app.html until the swap in the
-// last task). They reuse launch, newSession, expect and requireClean from
-// e2e_test.go.
+// Real-browser tests of the dashboard page. They reuse launch, newSession,
+// expect and requireClean from e2e_test.go.
 package dashboard
 
 import (
@@ -29,8 +28,8 @@ import (
 	"github.com/0x524a/camfarm/internal/quality"
 )
 
-// appPath is the redesigned page. The last task changes it to "/".
-const appPath = "/app.html"
+// appPath is the dashboard page.
+const appPath = "/"
 
 type appOpts struct {
 	cameras []camfarm.CameraSpec
@@ -1276,4 +1275,221 @@ func TestAppMetricsAbsentWhenTheServerHasNoSampler(t *testing.T) {
 		t.Fatalf("a server without a sampler should say so: %v", err)
 	}
 	s.requireCleanApp(t)
+}
+
+func TestAppCopyButtonCopiesTheRTSPURL(t *testing.T) {
+	url, f := appServer(t, appOpts{})
+	s := newSession(t, playwright.BrowserNewContextOptions{
+		Permissions: []string{"clipboard-read", "clipboard-write"},
+	})
+	s.openApp(t, url)
+	card := s.camCard("front-door")
+	btn := card.Locator(".url button").First()
+	mustClick(t, btn)
+	if err := expect().Locator(btn).ToHaveText("Copied"); err != nil {
+		t.Fatalf("no Copied feedback: %v", err)
+	}
+	got, err := s.page.Evaluate(`navigator.clipboard.readText()`)
+	if err != nil {
+		t.Fatalf("reading the clipboard: %v", err)
+	}
+	cam, _ := f.Camera("front-door")
+	if str, _ := got.(string); str != cam.RTSPURL() {
+		t.Fatalf("clipboard = %v, want %q", got, cam.RTSPURL())
+	}
+	s.requireCleanApp(t)
+}
+
+// openDrawer opens the fault drawer for a camera and waits for its kinds.
+func (s *session) openDrawer(t *testing.T, id string) {
+	t.Helper()
+	mustClick(t, s.camCard(id).Locator(".btn-faults"))
+	if err := expect().Locator(s.page.Locator("#drawer")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(s.page.Locator("#fault-kind option").First()).ToBeAttached(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (s *session) param(name string) playwright.Locator {
+	return s.page.Locator(fmt.Sprintf(`#drawer .fault-param[data-name=%q]`, name))
+}
+
+func selectKind(t *testing.T, kind playwright.Locator, v string) {
+	t.Helper()
+	if _, err := kind.SelectOption(playwright.SelectOptionValues{Values: &[]string{v}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAppFaultFormFollowsTheCatalogue(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	s.openDrawer(t, "front-door")
+	kind := s.page.Locator("#fault-kind")
+
+	selectKind(t, kind, "keyframe_starvation")
+	if err := expect().Locator(s.param("keepEvery")).ToBeVisible(); err != nil {
+		t.Fatalf("keepEvery input missing for keyframe_starvation: %v", err)
+	}
+	if err := expect().Locator(s.param("rate")).ToHaveCount(0); err != nil {
+		t.Fatalf("rate input should not exist for keyframe_starvation: %v", err)
+	}
+	if err := expect().Locator(s.page.Locator("#drawer > p.sub")).ToContainText("keyframe"); err != nil {
+		t.Fatalf("models text missing: %v", err)
+	}
+
+	selectKind(t, kind, "packet_loss")
+	for _, p := range []string{"rate", "meanBurst", "protectKeyframes"} {
+		if err := expect().Locator(s.param(p)).ToBeVisible(); err != nil {
+			t.Fatalf("%s input missing for packet_loss: %v", p, err)
+		}
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppApplyAndClearPacketLossAndKeyframeStarvation(t *testing.T) {
+	url, f := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	s.openDrawer(t, "front-door")
+	kind := s.page.Locator("#fault-kind")
+	active := s.page.Locator("#drawer .fault-active")
+	cam, _ := f.Camera("front-door")
+
+	selectKind(t, kind, "packet_loss")
+	mustFill(t, s.param("rate"), "0.4")
+	mustFill(t, s.param("meanBurst"), "3")
+	mustClick(t, s.page.Locator("#fault-apply"))
+	if err := expect().Locator(active).ToContainText("packet_loss"); err != nil {
+		t.Fatalf("packet_loss not shown as active: %v", err)
+	}
+	got := cam.Faults()
+	if len(got) != 1 || got[0].Kind != "packet_loss" || got[0].MeanBurst != 3 || got[0].Rate != 0.4 {
+		t.Fatalf("camera faults = %+v", got)
+	}
+
+	selectKind(t, kind, "keyframe_starvation")
+	mustFill(t, s.param("keepEvery"), "2")
+	mustClick(t, s.page.Locator("#fault-apply"))
+	if err := expect().Locator(active.Last()).ToContainText("keyframe_starvation"); err != nil {
+		t.Fatalf("keyframe_starvation not shown as active: %v", err)
+	}
+
+	mustClick(t, s.page.Locator("#fault-clear"))
+	if err := expect().Locator(s.page.Locator("#drawer .active")).ToContainText("No active faults"); err != nil {
+		t.Fatalf("faults not cleared: %v", err)
+	}
+	if len(cam.Faults()) != 0 {
+		t.Fatalf("clear did not clear: %+v", cam.Faults())
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppEnumParameterAppliesRtspError(t *testing.T) {
+	url, f := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	s.openDrawer(t, "front-door")
+	cam, _ := f.Camera("front-door")
+
+	selectKind(t, s.page.Locator("#fault-kind"), "rtsp_error")
+	on := s.page.Locator(`#drawer select.fault-param[data-name="on"]`)
+	if err := expect().Locator(on).ToHaveValue("describe"); err != nil {
+		t.Fatalf("enum default not preselected: %v", err)
+	}
+	if err := expect().Locator(on.Locator("option")).ToHaveCount(4); err != nil {
+		t.Fatalf("enum options: %v", err)
+	}
+	if _, err := on.SelectOption(playwright.SelectOptionValues{Values: &[]string{"setup"}}); err != nil {
+		t.Fatal(err)
+	}
+	mustFill(t, s.param("status"), "454")
+	mustFill(t, s.param("rate"), "1")
+	// onlyRequest is optional with an unset default: it must stay empty and be omitted.
+	if err := expect().Locator(s.param("onlyRequest")).ToHaveValue(""); err != nil {
+		t.Fatalf("onlyRequest should default to empty: %v", err)
+	}
+	mustClick(t, s.page.Locator("#fault-apply"))
+	chip := s.camCard("front-door").Locator(".chip").First()
+	if err := expect().Locator(chip).ToContainText("rtsp_error"); err != nil {
+		t.Fatalf("rtsp_error not shown as active: %v", err)
+	}
+	// The card's fault chip carries the parameters as key=value.
+	for _, want := range []string{"on=setup", "status=454"} {
+		if err := expect().Locator(chip).ToContainText(want); err != nil {
+			t.Fatalf("fault chip lacks %q: %v", want, err)
+		}
+	}
+	got := cam.Faults()
+	if len(got) != 1 || got[0].On != "setup" || got[0].Status != 454 || got[0].OnlyRequest != 0 {
+		t.Fatalf("camera faults = %+v", got)
+	}
+	mustClick(t, s.page.Locator("#fault-clear"))
+	if err := expect().Locator(chip).ToContainText("no faults"); err != nil {
+		t.Fatalf("faults not cleared: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppApplyAndClearJitterThroughTheGenericForm(t *testing.T) {
+	url, f := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	s.openDrawer(t, "front-door")
+	cam, _ := f.Camera("front-door")
+
+	selectKind(t, s.page.Locator("#fault-kind"), "jitter")
+	mustFill(t, s.param("maxMs"), "100")
+	mustClick(t, s.page.Locator("#fault-apply"))
+	if err := expect().Locator(s.page.Locator("#drawer .fault-active")).ToContainText("jitter"); err != nil {
+		t.Fatalf("jitter not shown as active: %v", err)
+	}
+	if got := cam.Faults(); len(got) != 1 || got[0].Kind != "jitter" || got[0].MaxMs != 100 {
+		t.Fatalf("camera faults = %+v", got)
+	}
+	// The server-side counter rises as frames are delayed.
+	waitFor(t, "jitter counter rises", func() bool { return cam.Stats().FaultCounts["jitter"].Applied > 0 })
+	first := cam.Stats().FaultCounts["jitter"].Applied
+	waitFor(t, "jitter counter increases", func() bool { return cam.Stats().FaultCounts["jitter"].Applied > first })
+
+	mustClick(t, s.page.Locator("#fault-clear"))
+	if err := expect().Locator(s.camCard("front-door").Locator(".chip").First()).ToContainText("no faults"); err != nil {
+		t.Fatalf("faults not cleared: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppPTSDelayedWithoutParametersShowsTheServerError(t *testing.T) {
+	url, f := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	s.openDrawer(t, "front-door")
+	cam, _ := f.Camera("front-door")
+
+	selectKind(t, s.page.Locator("#fault-kind"), "pts_delayed")
+	mustClick(t, s.page.Locator("#fault-apply"))
+	if err := expect().Locator(s.page.Locator("#error")).ToContainText("delayMs"); err != nil {
+		t.Fatalf("server error not shown: %v", err)
+	}
+	if len(cam.Faults()) != 0 {
+		t.Fatalf("a rejected fault was applied: %+v", cam.Faults())
+	}
+	s.requireCleanApp(t, 422)
+}
+
+func TestAppEnumSelectKindsRenderInBothColourSchemes(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	for _, scheme := range []*playwright.ColorScheme{playwright.ColorSchemeLight, playwright.ColorSchemeDark} {
+		s := newSession(t, playwright.BrowserNewContextOptions{ColorScheme: scheme})
+		s.openApp(t, url)
+		s.openDrawer(t, "front-door")
+		selectKind(t, s.page.Locator("#fault-kind"), "sdp_lie")
+		if err := expect().Locator(s.page.Locator(`#drawer select.fault-param[data-name="mode"]`)).ToHaveValue("codec"); err != nil {
+			t.Fatalf("%v: %v", scheme, err)
+		}
+		s.requireCleanApp(t)
+	}
 }
