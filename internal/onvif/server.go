@@ -41,12 +41,17 @@ const snapshotTimeout = 15 * time.Second
 
 // CameraConfig describes one camera's ONVIF endpoint.
 type CameraConfig struct {
-	ID       string
-	Media    *media.Media
-	RTSPURL  string
-	Username string
-	Password string
-	Seed     seed.Seed
+	ID    string
+	Media *media.Media
+	// RTSPURL is the stream URL clients are told (GetStreamUri).
+	RTSPURL string
+	// LocalRTSPURL is the URL this process dials for snapshots; it must work
+	// from here even when RTSPURL's advertised host does not resolve. Empty
+	// falls back to RTSPURL.
+	LocalRTSPURL string
+	Username     string
+	Password     string
+	Seed         seed.Seed
 }
 
 // Config configures the ONVIF transport for a fleet.
@@ -217,7 +222,11 @@ func buildCamera(cc CameraConfig) (*camera, error) {
 		return nil, fmt.Errorf("onvif: wiring stream URI for %q: %w", cc.ID, err)
 	}
 
-	cam := &camera{id: cc.ID, srv: srv, rtspURL: cc.RTSPURL, uuid: uuid}
+	dial := cc.LocalRTSPURL
+	if dial == "" {
+		dial = cc.RTSPURL
+	}
+	cam := &camera{id: cc.ID, srv: srv, rtspURL: dial, uuid: uuid}
 	if cc.Username != "" && cc.Password != "" {
 		cam.digest = newDigestAuth(cc.Username, cc.Password, cc.Seed.Stream("onvif-auth"))
 	}
@@ -287,9 +296,7 @@ func (s *Server) Start() error {
 	}
 	httpSrv := &http.Server{Handler: s.mux}
 
-	// With an advertised host the spec has already vetted the address clients
-	// are told to dial; the bind address is not what multicast advertises.
-	if d := s.cfg.Discovery; d != nil && d.Multicast && s.cfg.AdvertiseHost == "" {
+	if d := s.cfg.Discovery; d != nil && d.Multicast {
 		// The spec check sees only the literal host text; a hostname can
 		// still resolve to loopback.
 		if tcp, ok := ln.Addr().(*net.TCPAddr); ok && tcp.IP.IsLoopback() {

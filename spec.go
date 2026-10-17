@@ -152,10 +152,15 @@ type DiscoverySpec struct {
 	AnnounceAddr string `json:"announceAddr,omitempty"`
 }
 
-// validateDiscovery checks the discovery block against the (defaulted) host.
-// host is the address clients are told to dial: the advertised host when one
-// is set, otherwise the bind host.
-func validateDiscovery(d *DiscoverySpec, host string) error {
+// validateDiscovery checks the discovery block against the (defaulted) bind
+// host and the advertise host (empty when unset). The address in the
+// advertised XAddr is the advertise host when set, otherwise the bind host.
+// Multicast refuses a loopback bind even when a routable advertise host is
+// set: the listeners would be unreachable at the address LAN clients are
+// told. Unicast with a loopback bind and an advertise host stays allowed,
+// because the probe socket is chosen by the operator (a test or a port
+// forward) rather than reaching arbitrary LAN clients.
+func validateDiscovery(d *DiscoverySpec, bindHost, advHost string) error {
 	if d == nil {
 		return nil
 	}
@@ -186,24 +191,45 @@ func validateDiscovery(d *DiscoverySpec, host string) error {
 		return fmt.Errorf("%w: listen.discovery.mode %q must be %q or %q", ErrInvalidSpec, d.Mode, DiscoveryMulticast, DiscoveryUnicast)
 	}
 
-	if _, _, err := net.SplitHostPort(host); err == nil {
-		return fmt.Errorf("%w: listen.host %q must be a bare host without a port; ports are set by listen.rtspPort and listen.onvifPort", ErrInvalidSpec, host)
+	if _, _, err := net.SplitHostPort(bindHost); err == nil {
+		return fmt.Errorf("%w: listen.host %q must be a bare host without a port; ports are set by listen.rtspPort and listen.onvifPort", ErrInvalidSpec, bindHost)
 	}
-	h := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-	ip := net.ParseIP(h)
-	if h == "" || (ip != nil && ip.IsUnspecified()) {
-		return fmt.Errorf("%w: listen.host %q is a wildcard address; discovery advertises it in the device XAddr, so clients need a reachable address", ErrInvalidSpec, host)
+	if advHost == "" && isWildcardHost(bindHost) {
+		return fmt.Errorf("%w: listen.host %q is a wildcard address; discovery advertises it in the device XAddr, so clients need a reachable address", ErrInvalidSpec, bindHost)
 	}
-	if d.Mode == DiscoveryMulticast && (strings.EqualFold(h, "localhost") || (ip != nil && ip.IsLoopback())) {
-		return fmt.Errorf("%w: listen.host %q is loopback; multicast discovery would advertise an address no other host can reach, set listen.host to a reachable address", ErrInvalidSpec, host)
+	if d.Mode == DiscoveryMulticast {
+		if isLoopbackHost(bindHost) {
+			return fmt.Errorf("%w: listen.host %q is loopback; multicast discovery would advertise an address no other host can reach, set listen.host to a reachable address", ErrInvalidSpec, bindHost)
+		}
+		if advHost != "" && isLoopbackHost(advHost) {
+			return fmt.Errorf("%w: listen.advertiseHost %q is loopback; multicast discovery would advertise an address no other host can reach", ErrInvalidSpec, advHost)
+		}
 	}
 	return nil
 }
 
+// normalizeHost strips brackets, lowercases, and drops one trailing dot.
+func normalizeHost(h string) string {
+	h = strings.TrimSpace(h)
+	if len(h) >= 2 && h[0] == '[' && h[len(h)-1] == ']' {
+		h = h[1 : len(h)-1]
+	}
+	return strings.TrimSuffix(strings.ToLower(h), ".")
+}
+
+// isLoopbackHost reports whether h is localhost or a loopback IP literal.
+func isLoopbackHost(h string) bool {
+	h = normalizeHost(h)
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
 // isWildcardHost reports whether h binds every interface.
 func isWildcardHost(h string) bool {
-	h = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(h), "["), "]")
-	ip := net.ParseIP(h)
+	ip := net.ParseIP(normalizeHost(h))
 	return ip != nil && ip.IsUnspecified()
 }
 
@@ -220,15 +246,62 @@ func validateAdvertiseHost(host, adv string) error {
 	if strings.TrimSpace(adv) == "" {
 		return fmt.Errorf("%w: listen.advertiseHost %q is blank", ErrInvalidSpec, adv)
 	}
-	if strings.ContainsAny(adv, "/\\?#@% ") || strings.IndexFunc(adv, unicode.IsControl) >= 0 {
-		return fmt.Errorf("%w: listen.advertiseHost %q must be a bare host or IP, without scheme, path or port", ErrInvalidSpec, adv)
-	}
-	h := strings.TrimSuffix(strings.TrimPrefix(adv, "["), "]")
-	if strings.Contains(h, ":") && net.ParseIP(h) == nil {
-		return fmt.Errorf("%w: listen.advertiseHost %q must be a bare host without a scheme or port; ports are the real bound ports", ErrInvalidSpec, adv)
-	}
 	if isWildcardHost(adv) {
 		return fmt.Errorf("%w: listen.advertiseHost %q is a wildcard address; clients cannot dial it", ErrInvalidSpec, adv)
+	}
+	if strings.ContainsAny(adv, "/\\?#@") || strings.Contains(adv, "://") {
+		return fmt.Errorf("%w: listen.advertiseHost %q must be a bare host or IP, without scheme or path", ErrInvalidSpec, adv)
+	}
+	if strings.Contains(adv, "%") {
+		return fmt.Errorf("%w: listen.advertiseHost %q must not carry an IPv6 zone", ErrInvalidSpec, adv)
+	}
+	if _, _, err := net.SplitHostPort(adv); err == nil {
+		return fmt.Errorf("%w: listen.advertiseHost %q must be a bare host without a port; ports are the real bound ports", ErrInvalidSpec, adv)
+	}
+	bracketed := strings.HasPrefix(adv, "[") || strings.HasSuffix(adv, "]")
+	h := adv
+	if bracketed {
+		if len(adv) < 2 || adv[0] != '[' || adv[len(adv)-1] != ']' {
+			return fmt.Errorf("%w: listen.advertiseHost %q has unbalanced brackets", ErrInvalidSpec, adv)
+		}
+		h = adv[1 : len(adv)-1]
+		if ip := net.ParseIP(h); ip == nil || ip.To4() != nil {
+			return fmt.Errorf("%w: listen.advertiseHost %q: brackets are only for an IPv6 address", ErrInvalidSpec, adv)
+		}
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return nil
+	}
+	if strings.Contains(h, ":") {
+		return fmt.Errorf("%w: listen.advertiseHost %q must be a bare host without a port; ports are the real bound ports", ErrInvalidSpec, adv)
+	}
+	return validateHostname("listen.advertiseHost", adv)
+}
+
+// validateHostname accepts an ASCII hostname of letter-digit-hyphen labels,
+// with one optional trailing dot. A hostname whose last label is numeric is
+// refused: resolvers read forms such as 127.1 as an address, which would
+// slip past the loopback checks.
+func validateHostname(field, name string) error {
+	h := strings.TrimSuffix(name, ".")
+	if h == "" || len(h) > 253 {
+		return fmt.Errorf("%w: %s %q is not a valid hostname", ErrInvalidSpec, field, name)
+	}
+	labels := strings.Split(h, ".")
+	for _, l := range labels {
+		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return fmt.Errorf("%w: %s %q is not a valid hostname", ErrInvalidSpec, field, name)
+		}
+		for i := 0; i < len(l); i++ {
+			c := l[i]
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return fmt.Errorf("%w: %s %q is not a valid ASCII hostname (letters, digits and hyphens; use punycode for non-ASCII)", ErrInvalidSpec, field, name)
+			}
+		}
+	}
+	last := labels[len(labels)-1]
+	if last[0] >= '0' && last[0] <= '9' {
+		return fmt.Errorf("%w: %s %q looks like a numeric address but is not a full IP literal", ErrInvalidSpec, field, name)
 	}
 	return nil
 }
@@ -301,11 +374,7 @@ func (s Spec) validate() (Spec, error) {
 	if err := validateAdvertiseHost(s.Listen.Host, s.Listen.AdvertiseHost); err != nil {
 		return s, err
 	}
-	discoHost := s.Listen.Host
-	if s.Listen.AdvertiseHost != "" {
-		discoHost = s.Listen.AdvertiseHost
-	}
-	if err := validateDiscovery(s.Listen.Discovery, discoHost); err != nil {
+	if err := validateDiscovery(s.Listen.Discovery, s.Listen.Host, s.Listen.AdvertiseHost); err != nil {
 		return s, err
 	}
 

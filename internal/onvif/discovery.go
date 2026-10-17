@@ -65,13 +65,37 @@ func multicastInterface(d *DiscoveryConfig, host string) string {
 	return ""
 }
 
-// bindOrAdvertised is the host multicastInterface keys on: the address the
-// cameras are advertised from.
+// bindOrAdvertised is the host multicastInterface keys on. A specific bind IP
+// wins, since that is the interface the listeners are on. Otherwise the
+// advertised IP is used only if a local interface owns it (it may be a NAT or
+// published address, which onvif-go cannot resolve to an interface); failing
+// that it is empty, which leaves the join to the default route.
 func (s *Server) bindOrAdvertised() string {
-	if s.cfg.AdvertiseHost != "" {
-		return s.cfg.AdvertiseHost
+	if ip := net.ParseIP(strings.TrimSuffix(strings.TrimPrefix(s.cfg.Host, "["), "]")); ip != nil && !ip.IsUnspecified() {
+		return s.cfg.Host
 	}
-	return s.cfg.Host
+	if s.cfg.AdvertiseHost == "" {
+		return s.cfg.Host
+	}
+	adv := strings.TrimSuffix(strings.TrimPrefix(s.cfg.AdvertiseHost, "["), "]")
+	if ip := net.ParseIP(adv); ip != nil && localIPOwned(ip) {
+		return adv
+	}
+	return ""
+}
+
+// localIPOwned reports whether ip is assigned to a local interface.
+func localIPOwned(ip net.IP) bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // registrar is the part of the onvif-go responder that camfarm drives after

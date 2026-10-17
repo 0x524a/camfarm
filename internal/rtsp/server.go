@@ -569,11 +569,9 @@ func (s *Server) LocalURL(id string) string {
 		return ""
 	}
 	if addr.IP.IsUnspecified() {
-		ip := net.IPv4(127, 0, 0, 1)
-		if addr.IP.To4() == nil {
-			ip = net.IPv6loopback
-		}
-		addr = &net.TCPAddr{IP: ip, Port: addr.Port}
+		// 127.0.0.1 reaches both 0.0.0.0 and a dual-stack :: listener, and
+		// ::1 is missing where IPv6 is disabled.
+		addr = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: addr.Port}
 	}
 	return "rtsp://" + addr.String() + s.Path(id)
 }

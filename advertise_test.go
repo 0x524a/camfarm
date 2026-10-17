@@ -3,11 +3,14 @@ package camfarm
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
@@ -32,6 +35,22 @@ func TestAdvertiseHostValidation(t *testing.T) {
 		{"advertise bracketed wildcard", "", "[::]", "wildcard", nil},
 		{"multicast with loopback advertise", "0.0.0.0", "127.0.0.1", "loopback", &DiscoverySpec{Mode: "multicast"}},
 		{"multicast with localhost advertise", "0.0.0.0", "localhost", "loopback", &DiscoverySpec{Mode: "multicast"}},
+		{"multicast with trailing-dot localhost advertise", "0.0.0.0", "localhost.", "loopback", &DiscoverySpec{Mode: "multicast"}},
+		{"multicast with uppercase localhost advertise", "0.0.0.0", "LOCALHOST", "loopback", &DiscoverySpec{Mode: "multicast"}},
+		{"multicast with loopback bind and routable advertise", "127.0.0.1", "192.0.2.1", "loopback", &DiscoverySpec{Mode: "multicast"}},
+		{"advertise angle brackets", "", "a<b>", "hostname", nil},
+		{"advertise comma", "", "a,b", "hostname", nil},
+		{"advertise semicolon", "", "a;b", "hostname", nil},
+		{"advertise non-ascii", "", "caf\u00e9.test", "ASCII", nil},
+		{"advertise unbalanced open bracket", "", "[2001:db8::1", "brackets", nil},
+		{"advertise unbalanced close bracket", "", "2001:db8::1]", "brackets", nil},
+		{"advertise bracketed hostname", "", "[camfarm.test]", "IPv6", nil},
+		{"advertise bracketed ipv4", "", "[192.0.2.1]", "IPv6", nil},
+		{"advertise ipv6 zone", "", "fe80::1%eth0", "zone", nil},
+		{"advertise shorthand ipv4", "", "127.1", "numeric", nil},
+		{"advertise leading hyphen label", "", "-a.test", "hostname", nil},
+		{"advertise empty label", "", "a..test", "hostname", nil},
+		{"advertise long label", "", strings.Repeat("a", 64) + ".test", "hostname", nil},
 	}
 	for _, tc := range bad {
 		t.Run(tc.name, func(t *testing.T) {
@@ -59,7 +78,10 @@ func TestAdvertiseHostValidation(t *testing.T) {
 		{"bracketed ipv6 advertise", "", "[2001:db8::1]", nil},
 		{"unicast discovery on wildcard bind", "0.0.0.0", "camfarm.test", &DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:0"}},
 		{"multicast on wildcard bind", "0.0.0.0", "192.0.2.1", &DiscoverySpec{Mode: "multicast"}},
-		{"multicast with loopback bind and routable advertise", "127.0.0.1", "192.0.2.1", &DiscoverySpec{Mode: "multicast"}},
+		{"unicast with loopback bind and advertise", "127.0.0.1", "camfarm.test", &DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:0"}},
+		{"uppercase hostname", "", "CAMFARM.TEST", nil},
+		{"trailing-dot hostname", "", "camfarm.test.", nil},
+		{"underscore-free single label", "", "camfarm", nil},
 	}
 	for _, tc := range good {
 		t.Run(tc.name, func(t *testing.T) {
@@ -219,5 +241,42 @@ func TestStartRejectsWildcardWithoutAdvertiseHost(t *testing.T) {
 	s.Listen.Host = "0.0.0.0"
 	if _, err := Start(context.Background(), s); !errors.Is(err, ErrInvalidSpec) {
 		t.Fatalf("Start err = %v, want ErrInvalidSpec", err)
+	}
+}
+
+// The in-process dials (screenshot, ONVIF snapshot) must use the bound
+// address: the advertised host is for clients and may not resolve here.
+func TestAdvertiseHostUnresolvableStillCapturesInProcess(t *testing.T) {
+	s := minimalSpec()
+	s.Listen.Host = "127.0.0.1"
+	s.Listen.AdvertiseHost = "camfarm.invalid"
+	f := StartT(t, s)
+	cam, err := f.Camera("front-door")
+	if err != nil {
+		t.Fatalf("Camera: %v", err)
+	}
+	if strings.Contains(cam.LocalRTSPURL(), "invalid") {
+		t.Fatalf("LocalRTSPURL = %q", cam.LocalRTSPURL())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := cam.Screenshot(ctx); err != nil {
+		t.Fatalf("Screenshot with an unresolvable advertised host: %v", err)
+	}
+
+	eu, err := url.Parse(cam.ONVIFEndpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := "http://" + net.JoinHostPort("127.0.0.1", eu.Port()) + eu.Path + "/snapshot"
+	resp, err := http.Get(local)
+	if err != nil {
+		t.Fatalf("GET %s: %v", local, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("snapshot status %d type %q body %.200s", resp.StatusCode, resp.Header.Get("Content-Type"), body)
 	}
 }
