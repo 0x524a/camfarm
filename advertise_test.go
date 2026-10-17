@@ -1,0 +1,223 @@
+package camfarm
+
+import (
+	"context"
+	"errors"
+	"net"
+	"net/url"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/bluenviron/gortsplib/v5"
+	"github.com/bluenviron/gortsplib/v5/pkg/base"
+)
+
+func TestAdvertiseHostValidation(t *testing.T) {
+	bad := []struct {
+		name, host, adv, want string
+		disco                 *DiscoverySpec
+	}{
+		{"wildcard v4 without advertise", "0.0.0.0", "", "advertiseHost", nil},
+		{"wildcard v6 without advertise", "::", "", "advertiseHost", nil},
+		{"bracketed wildcard without advertise", "[::]", "", "advertiseHost", nil},
+		{"blank advertise", "", "   ", "blank", nil},
+		{"advertise with scheme", "", "rtsp://camfarm.test", "bare host", nil},
+		{"advertise with path", "", "camfarm.test/x", "bare host", nil},
+		{"advertise with port", "", "camfarm.test:8554", "port", nil},
+		{"advertise ipv4 with port", "", "192.0.2.1:8554", "port", nil},
+		{"advertise bracketed ipv6 with port", "", "[::1]:8554", "port", nil},
+		{"advertise wildcard v4", "", "0.0.0.0", "wildcard", nil},
+		{"advertise wildcard v6", "", "::", "wildcard", nil},
+		{"advertise bracketed wildcard", "", "[::]", "wildcard", nil},
+		{"multicast with loopback advertise", "0.0.0.0", "127.0.0.1", "loopback", &DiscoverySpec{Mode: "multicast"}},
+		{"multicast with localhost advertise", "0.0.0.0", "localhost", "loopback", &DiscoverySpec{Mode: "multicast"}},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			s := minimalSpec()
+			s.Listen.Host, s.Listen.AdvertiseHost, s.Listen.Discovery = tc.host, tc.adv, tc.disco
+			_, err := s.validate()
+			if !errors.Is(err, ErrInvalidSpec) {
+				t.Fatalf("err = %v, want ErrInvalidSpec", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %q, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+
+	good := []struct {
+		name, host, adv string
+		disco           *DiscoverySpec
+	}{
+		{"no advertise", "", "", nil},
+		{"hostname advertise", "", "camfarm.test", nil},
+		{"wildcard bind with advertise", "0.0.0.0", "camfarm.test", nil},
+		{"v6 wildcard bind with advertise", "::", "192.0.2.1", nil},
+		{"ipv6 advertise", "", "2001:db8::1", nil},
+		{"bracketed ipv6 advertise", "", "[2001:db8::1]", nil},
+		{"unicast discovery on wildcard bind", "0.0.0.0", "camfarm.test", &DiscoverySpec{Mode: "unicast", Addr: "127.0.0.1:0"}},
+		{"multicast on wildcard bind", "0.0.0.0", "192.0.2.1", &DiscoverySpec{Mode: "multicast"}},
+		{"multicast with loopback bind and routable advertise", "127.0.0.1", "192.0.2.1", &DiscoverySpec{Mode: "multicast"}},
+	}
+	for _, tc := range good {
+		t.Run(tc.name, func(t *testing.T) {
+			s := minimalSpec()
+			s.Listen.Host, s.Listen.AdvertiseHost, s.Listen.Discovery = tc.host, tc.adv, tc.disco
+			if _, err := s.validate(); err != nil {
+				t.Fatalf("validate: %v", err)
+			}
+		})
+	}
+}
+
+func TestAdvertiseHostEmptyLeavesHashUnchanged(t *testing.T) {
+	const wantHash = "b080afcfab9da1c905fd17b60c370d0a00c4f07cc0963d7ba295f9bd14e989db"
+	if got := minimalSpec().Hash(); got != wantHash {
+		t.Fatalf("Hash = %s, want the pre-existing %s", got, wantHash)
+	}
+	s := minimalSpec()
+	s.Listen.AdvertiseHost = "camfarm.test"
+	if s.Hash() == wantHash {
+		t.Fatal("setting AdvertiseHost did not change the hash")
+	}
+}
+
+func TestAdvertiseHostURLsUseAdvertisedHostAndRealPorts(t *testing.T) {
+	s := minimalSpec()
+	s.Listen.Host = "127.0.0.1"
+	s.Listen.AdvertiseHost = "camfarm.test"
+	f := StartT(t, s)
+	cam, err := f.Camera("front-door")
+	if err != nil {
+		t.Fatalf("Camera: %v", err)
+	}
+
+	rtspPort := f.Addr().RTSP.Port
+	if got, want := cam.RTSPURL(), "rtsp://camfarm.test:"+strconv.Itoa(rtspPort)+"/front-door"; got != want {
+		t.Fatalf("RTSPURL = %q, want %q", got, want)
+	}
+	eu, err := url.Parse(cam.ONVIFEndpoint())
+	if err != nil {
+		t.Fatalf("parse endpoint: %v", err)
+	}
+	if eu.Hostname() != "camfarm.test" || eu.Port() == "" || eu.Port() == "0" {
+		t.Fatalf("ONVIFEndpoint = %q, want camfarm.test with the real port", cam.ONVIFEndpoint())
+	}
+
+	// Still reachable on the bind address.
+	for _, addr := range []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(rtspPort)), net.JoinHostPort("127.0.0.1", eu.Port())} {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatalf("dial bind address %s: %v", addr, err)
+		}
+		_ = c.Close()
+	}
+	if got, want := cam.LocalRTSPURL(), "rtsp://127.0.0.1:"+strconv.Itoa(rtspPort)+"/front-door"; got != want {
+		t.Fatalf("LocalRTSPURL = %q, want %q", got, want)
+	}
+
+	// ONVIF answers carry the advertised host. The request goes to the bind
+	// address because camfarm.test does not resolve.
+	local := "http://" + net.JoinHostPort("127.0.0.1", eu.Port()) + eu.Path
+	const deviceNS = "http://www.onvif.org/ver10/device/wsdl"
+	const mediaNS = "http://www.onvif.org/ver10/media/wsdl"
+
+	resp, body := soapPost(t, local+"/device", deviceNS, "GetCapabilities", "")
+	if resp.StatusCode != 200 || !strings.Contains(string(body), cam.ONVIFEndpoint()+"/device") {
+		t.Errorf("GetCapabilities status %d, body %s, want XAddr %s", resp.StatusCode, body, cam.ONVIFEndpoint()+"/device")
+	}
+	resp, body = soapPost(t, local+"/device", deviceNS, "GetServices", "")
+	if resp.StatusCode != 200 || !strings.Contains(string(body), cam.ONVIFEndpoint()+"/media") {
+		t.Errorf("GetServices status %d, body %s, want XAddr %s", resp.StatusCode, body, cam.ONVIFEndpoint()+"/media")
+	}
+	resp, body = soapPost(t, local+"/media", mediaNS, "GetStreamUri", "<ProfileToken>profile1</ProfileToken>")
+	if resp.StatusCode != 200 || !strings.Contains(string(body), cam.RTSPURL()) {
+		t.Errorf("GetStreamUri status %d, body %s, want %s", resp.StatusCode, body, cam.RTSPURL())
+	}
+	resp, body = soapPost(t, local+"/media", mediaNS, "GetSnapshotUri", "<ProfileToken>profile1</ProfileToken>")
+	if resp.StatusCode != 200 || !strings.Contains(string(body), "camfarm.test") {
+		t.Errorf("GetSnapshotUri status %d, body %s, want the advertised host", resp.StatusCode, body)
+	}
+
+	// A camera added at runtime is advertised the same way.
+	added, err := f.AddCamera(CameraSpec{ID: "garage"})
+	if err != nil {
+		t.Fatalf("AddCamera: %v", err)
+	}
+	if !strings.HasPrefix(added.RTSPURL(), "rtsp://camfarm.test:") || !strings.HasPrefix(added.ONVIFEndpoint(), "http://camfarm.test:") {
+		t.Errorf("added camera URLs = %q, %q", added.RTSPURL(), added.ONVIFEndpoint())
+	}
+}
+
+func TestAdvertiseHostDiscoveryXAddr(t *testing.T) {
+	s := unicastSpec()
+	s.Listen.AdvertiseHost = "camfarm.test"
+	f := StartT(t, s)
+
+	devs := probeFleet(t, f)
+	if len(devs) != 2 {
+		t.Fatalf("found %d devices, want 2", len(devs))
+	}
+	for _, id := range []string{"front-door", "lobby"} {
+		cam, _ := f.Camera(id)
+		d, ok := devs["urn:uuid:"+cam.ONVIFUUID()]
+		if !ok {
+			t.Fatalf("camera %q not discovered", id)
+		}
+		want := cam.ONVIFEndpoint() + "/device"
+		if !strings.HasPrefix(want, "http://camfarm.test:") || len(d.XAddrs) != 1 || d.XAddrs[0] != want {
+			t.Fatalf("camera %q XAddrs = %v, want [%s]", id, d.XAddrs, want)
+		}
+	}
+}
+
+func TestWildcardBindWithAdvertiseHostServes(t *testing.T) {
+	s := unicastSpec()
+	s.Listen.Host = "0.0.0.0"
+	s.Listen.AdvertiseHost = "127.0.0.1"
+	f := StartT(t, s)
+	cam, err := f.Camera("front-door")
+	if err != nil {
+		t.Fatalf("Camera: %v", err)
+	}
+	if !strings.HasPrefix(cam.RTSPURL(), "rtsp://127.0.0.1:") || strings.Contains(cam.RTSPURL(), "0.0.0.0") {
+		t.Fatalf("RTSPURL = %q", cam.RTSPURL())
+	}
+	if !strings.HasPrefix(cam.LocalRTSPURL(), "rtsp://127.0.0.1:") {
+		t.Fatalf("LocalRTSPURL = %q, want loopback for a wildcard bind", cam.LocalRTSPURL())
+	}
+
+	u, err := base.ParseURL(cam.RTSPURL())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	c := &gortsplib.Client{Scheme: u.Scheme, Host: u.Host}
+	if err := c.Start(); err != nil {
+		t.Fatalf("client start: %v", err)
+	}
+	defer c.Close()
+	if _, _, err := c.Describe(u); err != nil {
+		t.Fatalf("DESCRIBE %s: %v", cam.RTSPURL(), err)
+	}
+
+	resp, body := soapPost(t, cam.ONVIFEndpoint()+"/media",
+		"http://www.onvif.org/ver10/media/wsdl", "GetStreamUri", "<ProfileToken>profile1</ProfileToken>")
+	if resp.StatusCode != 200 || !strings.Contains(string(body), cam.RTSPURL()) {
+		t.Errorf("GetStreamUri status %d, body %s", resp.StatusCode, body)
+	}
+	devs := probeFleet(t, f)
+	d, ok := devs["urn:uuid:"+cam.ONVIFUUID()]
+	if !ok || len(d.XAddrs) != 1 || d.XAddrs[0] != cam.ONVIFEndpoint()+"/device" {
+		t.Fatalf("discovery = %+v", devs)
+	}
+}
+
+func TestStartRejectsWildcardWithoutAdvertiseHost(t *testing.T) {
+	s := minimalSpec()
+	s.Listen.Host = "0.0.0.0"
+	if _, err := Start(context.Background(), s); !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("Start err = %v, want ErrInvalidSpec", err)
+	}
+}

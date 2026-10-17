@@ -13,7 +13,7 @@ and [faults](faults.md).
   `/api/v1/` (`fleet`, `cameras`, `cameras/{id}`, `cameras/{id}/snapshot.jpg`,
   `cameras/{id}/faults`, `cameras/{id}/quality`, and the `events` stream). Seeds are decimal strings in the API. Flags:
   `--spec`, `--seed`, `--cameras` (mutually exclusive with `--spec`), `--http-addr`,
-  `--listen-host`, `--rtsp-port`, `--onvif-port`, `--discovery`, `--discovery-interface`, `--media-dir`, `--allow-ui-paths`, `--max-upload`; run with `-h` for details. **Security:** the
+  `--listen-host`, `--advertise-host`, `--rtsp-port`, `--onvif-port`, `--discovery`, `--discovery-interface`, `--media-dir`, `--allow-ui-paths`, `--max-upload`; run with `-h` for details. **Security:** the
   dashboard can start servers and, with file sources, make the process read local paths, and the
   page shows cameras' Digest credentials. It listens on loopback by default and has *no*
   authentication, token or Host-header check. Only the library's mutating endpoints (upload, scan,

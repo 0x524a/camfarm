@@ -45,6 +45,9 @@ type Config struct {
 	// Host to bind. Defaults to 127.0.0.1: a test fixture should not be
 	// reachable from the network by accident.
 	Host string
+	// AdvertiseHost, when set, replaces Host in URLs handed to clients
+	// (URL). Binding is unaffected.
+	AdvertiseHost string
 	// Port to bind. Zero requests an ephemeral port, readable back via Addr.
 	Port int
 	// Log receives server events. Nil means silent. Never stdout: a consumer
@@ -554,7 +557,35 @@ func (s *Server) URL(id string) string {
 	if addr == nil {
 		return ""
 	}
+	return "rtsp://" + advertisedHostPort(s.cfg.AdvertiseHost, addr) + s.Path(id)
+}
+
+// LocalURL returns an RTSP URL for dialing from this process: the bound
+// address, with a wildcard bind mapped to loopback. Unlike URL it never uses
+// the advertised host, which may not resolve from inside a container.
+func (s *Server) LocalURL(id string) string {
+	addr := s.Addr()
+	if addr == nil {
+		return ""
+	}
+	if addr.IP.IsUnspecified() {
+		ip := net.IPv4(127, 0, 0, 1)
+		if addr.IP.To4() == nil {
+			ip = net.IPv6loopback
+		}
+		addr = &net.TCPAddr{IP: ip, Port: addr.Port}
+	}
 	return "rtsp://" + addr.String() + s.Path(id)
+}
+
+// advertisedHostPort joins an advertised host with the bound port; with no
+// advertised host it is the bound address unchanged.
+func advertisedHostPort(host string, addr *net.TCPAddr) string {
+	if host == "" {
+		return addr.String()
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	return net.JoinHostPort(host, strconv.Itoa(addr.Port))
 }
 
 // Readers returns the number of sessions currently set up against a camera.

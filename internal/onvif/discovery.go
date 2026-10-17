@@ -65,6 +65,15 @@ func multicastInterface(d *DiscoveryConfig, host string) string {
 	return ""
 }
 
+// bindOrAdvertised is the host multicastInterface keys on: the address the
+// cameras are advertised from.
+func (s *Server) bindOrAdvertised() string {
+	if s.cfg.AdvertiseHost != "" {
+		return s.cfg.AdvertiseHost
+	}
+	return s.cfg.Host
+}
+
 // registrar is the part of the onvif-go responder that camfarm drives after
 // startup. It is an interface only so a test can inject a failing Register.
 type registrar interface {
@@ -101,7 +110,7 @@ func (s *Server) newResponder() (responder, <-chan struct{}, int, error) {
 		build = func(c *discovery.ResponderConfig) responder { return discovery.NewResponder(c) }
 	}
 	resp := build(&discovery.ResponderConfig{
-		NetworkInterface: multicastInterface(s.cfg.Discovery, s.cfg.Host),
+		NetworkInterface: multicastInterface(s.cfg.Discovery, s.bindOrAdvertised()),
 		ListenAddr:       s.cfg.Discovery.ListenAddr,
 		AnnounceAddr:     s.cfg.Discovery.AnnounceAddr,
 		Ready:            ready,
@@ -232,7 +241,7 @@ func (s *Server) registerLocked(resp registrar, cam *camera) error {
 	// DiscoveryDevice returns a fresh value, but copy anyway so nothing
 	// camfarm sets can ever leak back into onvif-go's state.
 	dev := *cam.srv.DiscoveryDevice()
-	dev.XAddrs = []string{baseURL(s.ln.Addr(), cam.id) + "/device"}
+	dev.XAddrs = []string{baseURL(s.ln.Addr(), s.cfg.AdvertiseHost, cam.id) + "/device"}
 	if err := resp.Register(&dev); err != nil {
 		return fmt.Errorf("onvif: registering %q for discovery: %w", cam.id, err)
 	}

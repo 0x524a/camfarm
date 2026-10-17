@@ -420,15 +420,15 @@ func TestAddCameraRollsBackWhenRegisterFails(t *testing.T) {
 
 func TestBaseURLEscapesZoneAndID(t *testing.T) {
 	zoned := &net.TCPAddr{IP: net.ParseIP("fe80::1"), Port: 8080, Zone: "eth0"}
-	if got, want := baseURL(zoned, "cam"), "http://[fe80::1%25eth0]:8080/onvif/cam"; got != want {
+	if got, want := baseURL(zoned, "", "cam"), "http://[fe80::1%25eth0]:8080/onvif/cam"; got != want {
 		t.Errorf("zoned baseURL = %q, want %q", got, want)
 	}
 	plain := &net.TCPAddr{IP: net.IPv4(192, 0, 2, 7), Port: 80}
-	if got, want := baseURL(plain, "a b%c"), "http://192.0.2.7:80/onvif/a%20b%25c"; got != want {
+	if got, want := baseURL(plain, "", "a b%c"), "http://192.0.2.7:80/onvif/a%20b%25c"; got != want {
 		t.Errorf("escaped baseURL = %q, want %q", got, want)
 	}
 	// The result must parse back to the same host and zone.
-	u, err := url.Parse(baseURL(zoned, "cam"))
+	u, err := url.Parse(baseURL(zoned, "", "cam"))
 	if err != nil {
 		t.Fatal(err)
 	}

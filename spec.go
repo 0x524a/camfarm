@@ -106,6 +106,14 @@ type ListenSpec struct {
 	// Host defaults to 127.0.0.1, so a test fixture is not exposed to the
 	// network by accident.
 	Host string `json:"host,omitempty"`
+	// AdvertiseHost, when set, is the host written into every URL a client is
+	// told to dial (RTSP URLs, ONVIF endpoints and XAddrs, stream URIs,
+	// WS-Discovery XAddrs, the dashboard's links), instead of Host. Host
+	// stays the bind address. It is required when Host is a wildcard
+	// (0.0.0.0 or ::), as in a container. It must be a bare host or IP. The
+	// ports in those URLs are the real bound ports, so a published container
+	// port must equal the container port, or the ports must be fixed.
+	AdvertiseHost string `json:"advertiseHost,omitempty"`
 	// RTSPPort of zero requests an ephemeral port, readable back via
 	// Fleet.Addr.
 	RTSPPort int `json:"rtspPort,omitempty"`
@@ -145,6 +153,8 @@ type DiscoverySpec struct {
 }
 
 // validateDiscovery checks the discovery block against the (defaulted) host.
+// host is the address clients are told to dial: the advertised host when one
+// is set, otherwise the bind host.
 func validateDiscovery(d *DiscoverySpec, host string) error {
 	if d == nil {
 		return nil
@@ -186,6 +196,39 @@ func validateDiscovery(d *DiscoverySpec, host string) error {
 	}
 	if d.Mode == DiscoveryMulticast && (strings.EqualFold(h, "localhost") || (ip != nil && ip.IsLoopback())) {
 		return fmt.Errorf("%w: listen.host %q is loopback; multicast discovery would advertise an address no other host can reach, set listen.host to a reachable address", ErrInvalidSpec, host)
+	}
+	return nil
+}
+
+// isWildcardHost reports whether h binds every interface.
+func isWildcardHost(h string) bool {
+	h = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(h), "["), "]")
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsUnspecified()
+}
+
+// validateAdvertiseHost checks listen.advertiseHost against the (defaulted)
+// bind host. An empty advertise host is valid unless the bind host is a
+// wildcard, which would put 0.0.0.0 into every advertised URL.
+func validateAdvertiseHost(host, adv string) error {
+	if adv == "" {
+		if isWildcardHost(host) {
+			return fmt.Errorf("%w: listen.host %q is a wildcard address; set listen.advertiseHost to the host clients should dial", ErrInvalidSpec, host)
+		}
+		return nil
+	}
+	if strings.TrimSpace(adv) == "" {
+		return fmt.Errorf("%w: listen.advertiseHost %q is blank", ErrInvalidSpec, adv)
+	}
+	if strings.ContainsAny(adv, "/\\?#@% ") || strings.IndexFunc(adv, unicode.IsControl) >= 0 {
+		return fmt.Errorf("%w: listen.advertiseHost %q must be a bare host or IP, without scheme, path or port", ErrInvalidSpec, adv)
+	}
+	h := strings.TrimSuffix(strings.TrimPrefix(adv, "["), "]")
+	if strings.Contains(h, ":") && net.ParseIP(h) == nil {
+		return fmt.Errorf("%w: listen.advertiseHost %q must be a bare host without a scheme or port; ports are the real bound ports", ErrInvalidSpec, adv)
+	}
+	if isWildcardHost(adv) {
+		return fmt.Errorf("%w: listen.advertiseHost %q is a wildcard address; clients cannot dial it", ErrInvalidSpec, adv)
 	}
 	return nil
 }
@@ -255,7 +298,14 @@ func (s Spec) validate() (Spec, error) {
 	if s.Listen.Host == "" {
 		s.Listen.Host = "127.0.0.1"
 	}
-	if err := validateDiscovery(s.Listen.Discovery, s.Listen.Host); err != nil {
+	if err := validateAdvertiseHost(s.Listen.Host, s.Listen.AdvertiseHost); err != nil {
+		return s, err
+	}
+	discoHost := s.Listen.Host
+	if s.Listen.AdvertiseHost != "" {
+		discoHost = s.Listen.AdvertiseHost
+	}
+	if err := validateDiscovery(s.Listen.Discovery, discoHost); err != nil {
 		return s, err
 	}
 

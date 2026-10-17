@@ -53,6 +53,9 @@ type CameraConfig struct {
 type Config struct {
 	// Host defaults to 127.0.0.1.
 	Host string
+	// AdvertiseHost, when set, replaces the bound host in every URL clients
+	// are given (endpoints, XAddrs, discovery XAddrs, snapshot URI).
+	AdvertiseHost string
 	// Port of zero requests an ephemeral port, readable back via Addr.
 	Port int
 	// Log receives server events. Nil means silent.
@@ -284,7 +287,9 @@ func (s *Server) Start() error {
 	}
 	httpSrv := &http.Server{Handler: s.mux}
 
-	if d := s.cfg.Discovery; d != nil && d.Multicast {
+	// With an advertised host the spec has already vetted the address clients
+	// are told to dial; the bind address is not what multicast advertises.
+	if d := s.cfg.Discovery; d != nil && d.Multicast && s.cfg.AdvertiseHost == "" {
 		// The spec check sees only the literal host text; a hostname can
 		// still resolve to loopback.
 		if tcp, ok := ln.Addr().(*net.TCPAddr); ok && tcp.IP.IsLoopback() {
@@ -449,15 +454,20 @@ func (s *Server) Endpoint(cameraID string) string {
 	if !ok {
 		return ""
 	}
-	return baseURL(addr, cameraID)
+	return baseURL(addr, s.cfg.AdvertiseHost, cameraID)
 }
 
 // baseURL builds "http://host:port/onvif/<id>" for a bound listener address.
 // A link-local IPv6 zone ("fe80::1%eth0") is written as %25eth0, as RFC 6874
 // requires, and the camera ID is escaped as a path segment.
-func baseURL(addr net.Addr, cameraID string) string {
+//
+// A non-empty advertiseHost replaces the host; the port stays the bound one.
+func baseURL(addr net.Addr, advertiseHost, cameraID string) string {
 	hostport := addr.String()
-	if tcp, ok := addr.(*net.TCPAddr); ok && tcp.Zone != "" {
+	if tcp, ok := addr.(*net.TCPAddr); ok && advertiseHost != "" {
+		h := strings.TrimSuffix(strings.TrimPrefix(advertiseHost, "["), "]")
+		hostport = net.JoinHostPort(h, strconv.Itoa(tcp.Port))
+	} else if ok && tcp.Zone != "" {
 		hostport = net.JoinHostPort(tcp.IP.String()+"%25"+url.PathEscape(tcp.Zone), strconv.Itoa(tcp.Port))
 	}
 	return fmt.Sprintf("http://%s/onvif/%s", hostport, url.PathEscape(cameraID))
