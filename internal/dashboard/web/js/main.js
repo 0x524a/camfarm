@@ -65,9 +65,9 @@ async function refreshCameras() {
     const cams = await api.cameras();
     if (my < applied) return; // an older response must not overwrite a newer one
     applied = my;
-    store.set({ cameras: cams });
+    store.set({ cameras: cams, conn: "ok" });
   } catch (_) {
-    store.set({ conn: "lost" });
+    if (my >= applied) store.set({ conn: "lost" }); // an older failure must not undo a newer success
   }
 }
 async function refreshReplay() {

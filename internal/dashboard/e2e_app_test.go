@@ -193,3 +193,42 @@ func TestAppBothColourSchemesRender(t *testing.T) {
 		t.Fatalf("light (%q) and dark (%q) backgrounds should be set and differ", light, dark)
 	}
 }
+
+func TestAppConnectionPillTracksCameraRefreshFailuresAndRecovers(t *testing.T) {
+	url, f := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	conn := s.page.Locator("#conn")
+	if err := expect().Locator(conn).ToHaveText("connected"); err != nil {
+		t.Fatal(err)
+	}
+	const glob = "**/api/v1/cameras"
+	if err := s.page.Route(glob, func(r playwright.Route) {
+		_ = r.Fulfill(playwright.RouteFulfillOptions{
+			Status:      playwright.Int(500),
+			ContentType: playwright.String("application/json"),
+			Body:        `{"error":"cameras are down"}`,
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.AddCamera(camfarm.CameraSpec{ID: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(conn).ToHaveText("disconnected, retrying"); err != nil {
+		t.Fatalf("a failed camera refresh should flip the pill: %v", err)
+	}
+	if err := expect().Locator(s.page.Locator("#error")).ToHaveText(""); err != nil {
+		t.Fatalf("a background failure must not touch the action error region: %v", err)
+	}
+	if err := s.page.Unroute(glob); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.AddCamera(camfarm.CameraSpec{ID: "third"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(conn).ToHaveText("connected"); err != nil {
+		t.Fatalf("a successful refresh should restore the pill while the stream stays open: %v", err)
+	}
+	s.requireCleanApp(t, 500)
+}
