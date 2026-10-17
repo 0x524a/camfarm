@@ -278,8 +278,11 @@ func validateAdvertiseHost(host, adv string) error {
 	return validateHostname("listen.advertiseHost", adv)
 }
 
-// validateHostname accepts an ASCII hostname of letter-digit-hyphen labels,
-// with one optional trailing dot. A hostname whose last label is numeric is
+// validateHostname accepts an ASCII hostname of letter, digit, hyphen and
+// underscore labels, with one optional trailing dot. Underscores are allowed
+// anywhere in a label (Docker Compose names such as camfarm_1 resolve through
+// its embedded DNS); a label still may not start or end with a hyphen. A
+// hostname whose last label starts with a digit is
 // refused: resolvers read forms such as 127.1 as an address, which would
 // slip past the loopback checks.
 func validateHostname(field, name string) error {
@@ -294,8 +297,8 @@ func validateHostname(field, name string) error {
 		}
 		for i := 0; i < len(l); i++ {
 			c := l[i]
-			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
-				return fmt.Errorf("%w: %s %q is not a valid ASCII hostname (letters, digits and hyphens; use punycode for non-ASCII)", ErrInvalidSpec, field, name)
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+				return fmt.Errorf("%w: %s %q is not a valid ASCII hostname (letters, digits, hyphens and underscores; use punycode for non-ASCII)", ErrInvalidSpec, field, name)
 			}
 		}
 	}

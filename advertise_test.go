@@ -49,6 +49,8 @@ func TestAdvertiseHostValidation(t *testing.T) {
 		{"advertise ipv6 zone", "", "fe80::1%eth0", "zone", nil},
 		{"advertise shorthand ipv4", "", "127.1", "numeric", nil},
 		{"advertise leading hyphen label", "", "-a.test", "hostname", nil},
+		{"advertise trailing hyphen label", "", "a-.test", "hostname", nil},
+		{"advertise underscore with space", "", "my cam", "hostname", nil},
 		{"advertise empty label", "", "a..test", "hostname", nil},
 		{"advertise long label", "", strings.Repeat("a", 64) + ".test", "hostname", nil},
 	}
@@ -82,6 +84,10 @@ func TestAdvertiseHostValidation(t *testing.T) {
 		{"uppercase hostname", "", "CAMFARM.TEST", nil},
 		{"trailing-dot hostname", "", "camfarm.test.", nil},
 		{"underscore-free single label", "", "camfarm", nil},
+		{"underscore in label", "", "my_cam", nil},
+		{"underscore and digit suffix", "", "camfarm_1", nil},
+		{"leading underscore", "", "_x", nil},
+		{"compose network name", "", "web_1.net_default", nil},
 	}
 	for _, tc := range good {
 		t.Run(tc.name, func(t *testing.T) {
