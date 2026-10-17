@@ -7,6 +7,7 @@ package dashboard
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -1109,6 +1110,130 @@ func TestAppLibraryDeleteAsksFirst(t *testing.T) {
 	mustClick(t, row.Locator(".btn-del-confirm"))
 	if err := expect().Locator(row).ToHaveCount(0); err != nil {
 		t.Fatalf("file still listed after delete: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+const gpuRowApp = "0, NVIDIA GeForce RTX 4090, GPU-aaaa-1111, 37, 12, 1024, 24564, 5, 0, 54, 78.43, 450.00\n"
+
+// sampler builds a hostmetrics sampler over a fake /proc with a fake nvidia-smi
+// and a manual tick channel, so a test controls exactly when a sample lands.
+func sampler(t *testing.T, run hostmetrics.Runner) (*hostmetrics.Sampler, chan time.Time) {
+	t.Helper()
+	root := procFixture(t)
+	ticks := make(chan time.Time)
+	s := hostmetrics.New(hostmetrics.Options{
+		ProcRoot: filepath.Join(root, "proc"), CgroupRoot: filepath.Join(root, "cg"),
+		Run: run, Ticks: ticks,
+	})
+	t.Cleanup(s.Close)
+	return s, ticks
+}
+
+func gpuOKApp(context.Context, string, ...string) ([]byte, []byte, error) {
+	return []byte(gpuRowApp), nil, nil
+}
+
+func gpuBrokenApp(context.Context, string, ...string) ([]byte, []byte, error) {
+	return nil, []byte("Failed to initialize NVML: Driver/library version mismatch\n"), errors.New("exit status 18")
+}
+
+func TestAppMetricsStripShowsHostAndGPU(t *testing.T) {
+	s0, _ := sampler(t, gpuOKApp)
+	url, _ := appServer(t, appOpts{metrics: s0})
+	s := newSession(t)
+	s.openApp(t, url)
+	cpu := s.page.Locator(`#metrics .tile[data-tile="cpu"]`)
+	mem := s.page.Locator(`#metrics .tile[data-tile="memory"]`)
+	gpu := s.page.Locator(`#metrics .tile[data-tile="gpu-0"]`)
+	proc := s.page.Locator(`#metrics .tile[data-tile="process"]`)
+	for name, l := range map[string]playwright.Locator{"cpu": cpu, "memory": mem, "gpu": gpu, "process": proc} {
+		if err := expect().Locator(l).ToBeVisible(); err != nil {
+			t.Fatalf("%s tile missing: %v", name, err)
+		}
+	}
+	if err := expect().Locator(gpu).ToContainText("GPU busy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(gpu).ToContainText("37"); err != nil {
+		t.Fatalf("GPU utilisation not shown: %v", err)
+	}
+	if err := expect().Locator(gpu).ToContainText("RTX 4090"); err != nil {
+		t.Fatalf("GPU name not shown: %v", err)
+	}
+	if err := expect().Locator(mem).ToContainText("GB"); err != nil {
+		t.Fatalf("memory not shown in GB: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+// An unavailable GPU shows its reason; a null value shows "-"; the other tiles
+// keep their numbers.
+func TestAppMetricsUnavailableGPUShowsReasonAndLeavesTheRestAlone(t *testing.T) {
+	s0, _ := sampler(t, gpuBrokenApp)
+	url, _ := appServer(t, appOpts{metrics: s0})
+	s := newSession(t)
+	s.openApp(t, url)
+	gpu := s.page.Locator(`#metrics .tile[data-tile="gpu"]`)
+	if err := expect().Locator(gpu.Locator(".tile-reason")).ToContainText("Driver/library version mismatch"); err != nil {
+		t.Fatalf("GPU reason not shown: %v", err)
+	}
+	if err := expect().Locator(s.page.Locator(`#metrics .tile[data-tile="memory"] .tile-value`)).ToContainText("GB"); err != nil {
+		t.Fatalf("memory tile affected by the GPU failure: %v", err)
+	}
+	// The first sample has no CPU baseline: null renders as "-", never "0%".
+	val, err := s.page.Locator(`#metrics .tile[data-tile="cpu"] .tile-value`).TextContent()
+	if err != nil || strings.Contains(val, "0%") && !strings.Contains(val, "-") {
+		t.Fatalf("a null CPU reading rendered as zero: %q err=%v", val, err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppMetricsStripNeverSaysSMOccupancy(t *testing.T) {
+	s0, _ := sampler(t, gpuOKApp)
+	url, _ := appServer(t, appOpts{metrics: s0})
+	s := newSession(t)
+	s.openApp(t, url)
+	if err := expect().Locator(s.page.Locator(`#metrics .tile[data-tile="gpu-0"]`)).ToContainText("kernel-busy time"); err != nil {
+		t.Fatal(err)
+	}
+	txt, err := s.page.Locator("#metrics").TextContent()
+	if err != nil || strings.Contains(strings.ToLower(txt), "sm ") {
+		t.Fatalf("the strip claims SM occupancy: %q err=%v", txt, err)
+	}
+	s.requireCleanApp(t)
+}
+
+// When the stream drops the strip dims and says stale.
+func TestAppMetricsStripGoesStaleWhenTheStreamDrops(t *testing.T) {
+	s0, _ := sampler(t, gpuOKApp)
+	f := camfarm.StartT(t, camfarm.Spec{Seed: 1, Cameras: []camfarm.CameraSpec{{ID: "front-door"}}})
+	ts := httptest.NewServer(Handler(f, Options{Metrics: s0}))
+	defer ts.Close()
+	s := newSession(t)
+	s.openApp(t, ts.URL)
+	if err := expect().Locator(s.page.Locator("#metrics.stale")).ToHaveCount(0); err != nil {
+		t.Fatal(err)
+	}
+	ts.CloseClientConnections()
+	ts.Close()
+	if err := expect().Locator(s.page.Locator("#conn")).ToHaveText("disconnected, retrying"); err != nil {
+		t.Fatalf("pill did not change: %v", err)
+	}
+	if err := expect().Locator(s.page.Locator("#metrics.stale")).ToHaveCount(1); err != nil {
+		t.Fatalf("strip not marked stale: %v", err)
+	}
+}
+
+func TestAppMetricsAbsentWhenTheServerHasNoSampler(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	if err := expect().Locator(s.camCard("front-door")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(s.page.Locator("#metrics")).ToContainText("not enabled"); err != nil {
+		t.Fatalf("a server without a sampler should say so: %v", err)
 	}
 	s.requireCleanApp(t)
 }

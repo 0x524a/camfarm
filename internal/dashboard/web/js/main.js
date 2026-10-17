@@ -3,6 +3,7 @@ import { createStore } from "./state.js";
 import { mount as mountCameras } from "./cameras.js";
 import { mount as mountFaults } from "./faults.js";
 import { mount as mountLibrary } from "./library.js";
+import { mount as mountMetrics } from "./metrics.js";
 
 const store = createStore({
   cameras: [], catalogue: [], library: null, metrics: null,
@@ -89,6 +90,7 @@ function refreshSoon() {
 mountCameras($("#panel-cameras"), ctx);
 mountFaults($("#drawer"), ctx);
 mountLibrary($("#panel-library"), ctx);
+mountMetrics($("#metrics"), ctx);
 
 // --- event stream ---
 if (window.EventSource) {
