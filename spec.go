@@ -194,9 +194,6 @@ func validateDiscovery(d *DiscoverySpec, bindHost, advHost string) error {
 	if _, _, err := net.SplitHostPort(bindHost); err == nil {
 		return fmt.Errorf("%w: listen.host %q must be a bare host without a port; ports are set by listen.rtspPort and listen.onvifPort", ErrInvalidSpec, bindHost)
 	}
-	if advHost == "" && isWildcardHost(bindHost) {
-		return fmt.Errorf("%w: listen.host %q is a wildcard address; discovery advertises it in the device XAddr, so clients need a reachable address", ErrInvalidSpec, bindHost)
-	}
 	if d.Mode == DiscoveryMulticast {
 		if isLoopbackHost(bindHost) {
 			return fmt.Errorf("%w: listen.host %q is loopback; multicast discovery would advertise an address no other host can reach, set listen.host to a reachable address", ErrInvalidSpec, bindHost)

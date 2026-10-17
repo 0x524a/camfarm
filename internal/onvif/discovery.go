@@ -86,10 +86,7 @@ func (s *Server) bindOrAdvertised() string {
 
 // localIPOwned reports whether ip is assigned to a local interface.
 func localIPOwned(ip net.IP) bool {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return false
-	}
+	addrs, _ := net.InterfaceAddrs() // on error addrs is empty: not owned
 	for _, a := range addrs {
 		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
 			return true
