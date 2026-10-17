@@ -278,5 +278,19 @@ jobs:
           echo "PLAYWRIGHT_DRIVER_PATH=$drv" >> "$GITHUB_ENV"
           node "$drv/package/cli.js" install --with-deps chromium
 
+      # CAMFARM_DOCS_SHOTS makes TestDocsScreenshots render the README's
+      # screenshots; it fails if the page no longer shows those views. The
+      # images are kept as a build artifact so a reviewer can compare them with
+      # the ones committed under docs/assets.
       - name: e2e tests
+        env:
+          CAMFARM_DOCS_SHOTS: ${{ runner.temp }}/docs-shots
         run: go test -tags e2e -count=1 ./internal/dashboard/...
+
+      - name: upload dashboard screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dashboard-screenshots
+          path: ${{ runner.temp }}/docs-shots
+          if-no-files-found: warn
