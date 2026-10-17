@@ -1234,15 +1234,23 @@ func TestAppMetricsStripGoesStaleWhenTheStreamDrops(t *testing.T) {
 	if err := expect().Locator(s.page.Locator("#metrics.stale")).ToHaveCount(1); err != nil {
 		t.Fatalf("strip not marked stale: %v", err)
 	}
-	if err := expect().Locator(s.page.Locator("#metrics")).ToContainText("stale"); err != nil {
-		t.Fatalf("strip does not say stale: %v", err)
+	if err := expect().Locator(s.page.Locator("#metrics .stale-note")).ToBeVisible(); err != nil {
+		t.Fatalf("strip does not visibly say stale: %v", err)
 	}
 	// Bring the server back on the same address; EventSource reconnects.
-	l, err := net.Listen("tcp", addr)
+	var l net.Listener
+	var err error
+	for i := 0; i < 20; i++ {
+		if l, err = net.Listen("tcp", addr); err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	if err != nil {
-		t.Skipf("cannot rebind %s to test recovery: %v", addr, err)
+		t.Fatalf("cannot rebind %s to test recovery: %v", addr, err)
 	}
 	ts = httptest.NewUnstartedServer(h)
+	_ = ts.Listener.Close() // the unstarted server's own throwaway listener
 	ts.Listener = l
 	ts.Start()
 	if err := expect().Locator(s.page.Locator("#conn")).ToHaveText("connected"); err != nil {
