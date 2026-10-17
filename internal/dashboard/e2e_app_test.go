@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -1183,8 +1184,8 @@ func TestAppMetricsUnavailableGPUShowsReasonAndLeavesTheRestAlone(t *testing.T) 
 	}
 	// The first sample has no CPU baseline: null renders as "-", never "0%".
 	val, err := s.page.Locator(`#metrics .tile[data-tile="cpu"] .tile-value`).TextContent()
-	if err != nil || strings.Contains(val, "0%") && !strings.Contains(val, "-") {
-		t.Fatalf("a null CPU reading rendered as zero: %q err=%v", val, err)
+	if err != nil || strings.TrimSpace(val) != "-" {
+		t.Fatalf("a null CPU reading should render as exactly \"-\": %q err=%v", val, err)
 	}
 	s.requireCleanApp(t)
 }
@@ -1208,11 +1209,21 @@ func TestAppMetricsStripNeverSaysSMOccupancy(t *testing.T) {
 func TestAppMetricsStripGoesStaleWhenTheStreamDrops(t *testing.T) {
 	s0, _ := sampler(t, gpuOKApp)
 	f := camfarm.StartT(t, camfarm.Spec{Seed: 1, Cameras: []camfarm.CameraSpec{{ID: "front-door"}}})
-	ts := httptest.NewServer(Handler(f, Options{Metrics: s0}))
-	defer ts.Close()
+	h := Handler(f, Options{Metrics: s0})
+	ts := httptest.NewServer(h)
+	addr := ts.Listener.Addr().String()
+	// The page still holds an open event stream, so drop it before Close waits.
+	defer func() { ts.CloseClientConnections(); ts.Close() }()
 	s := newSession(t)
 	s.openApp(t, ts.URL)
+	// Wait for a live connection first, or the "not stale" check proves nothing.
+	if err := expect().Locator(s.page.Locator("#conn")).ToHaveText("connected"); err != nil {
+		t.Fatal(err)
+	}
 	if err := expect().Locator(s.page.Locator("#metrics.stale")).ToHaveCount(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(s.page.Locator("#metrics .stale-note")).ToBeHidden(); err != nil {
 		t.Fatal(err)
 	}
 	ts.CloseClientConnections()
@@ -1223,6 +1234,27 @@ func TestAppMetricsStripGoesStaleWhenTheStreamDrops(t *testing.T) {
 	if err := expect().Locator(s.page.Locator("#metrics.stale")).ToHaveCount(1); err != nil {
 		t.Fatalf("strip not marked stale: %v", err)
 	}
+	if err := expect().Locator(s.page.Locator("#metrics")).ToContainText("stale"); err != nil {
+		t.Fatalf("strip does not say stale: %v", err)
+	}
+	// Bring the server back on the same address; EventSource reconnects.
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Skipf("cannot rebind %s to test recovery: %v", addr, err)
+	}
+	ts = httptest.NewUnstartedServer(h)
+	ts.Listener = l
+	ts.Start()
+	if err := expect().Locator(s.page.Locator("#conn")).ToHaveText("connected"); err != nil {
+		t.Fatalf("did not reconnect: %v", err)
+	}
+	if err := expect().Locator(s.page.Locator("#metrics.stale")).ToHaveCount(0); err != nil {
+		t.Fatalf("strip still stale after recovery: %v", err)
+	}
+	if err := expect().Locator(s.page.Locator("#metrics .stale-note")).ToBeHidden(); err != nil {
+		t.Fatalf("stale text still visible after recovery: %v", err)
+	}
+	// No requireCleanApp: the dropped stream legitimately logs console errors.
 }
 
 func TestAppMetricsAbsentWhenTheServerHasNoSampler(t *testing.T) {

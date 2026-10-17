@@ -7,6 +7,13 @@ export function mount(root, ctx) {
   const hist = new Map(); // tile key -> number[]
   let enabled = true;
 
+  // The strip says so when its numbers are old, not only dims.
+  const stalePill = el("span", { class: "pill bad stale-note", text: "stale", hidden: true });
+  function setStale(on) {
+    root.classList.toggle("stale", on);
+    stalePill.hidden = !on;
+  }
+
   function push(key, v) {
     const h = hist.get(key) || [];
     h.push(typeof v === "number" && Number.isFinite(v) ? v : null);
@@ -55,7 +62,7 @@ export function mount(root, ctx) {
         tiles.push(tile("gpu-" + d.index, pre + "busy", d.name || "", fmtPct(d.gpuUtilPercent, 0), "",
           "kernel-busy time · enc " + fmtPct(d.encoderUtilPercent, 0) + " · dec " + fmtPct(d.decoderUtilPercent, 0), d.gpuUtilPercent, 100));
         const mt = d.memTotalBytes, mu = d.memUsedBytes;
-        tiles.push(tile("gpu-mem-" + d.index, pre + "memory", mt != null ? "of " + fmtBytes(mt) : DASH, mu != null ? fmtBytes(mu) : DASH, "",
+        tiles.push(tile("gpu-mem-" + d.index, pre + "memory", (g.devices.length > 1 && d.name ? d.name + " · " : "") + (mt != null ? "of " + fmtBytes(mt) : DASH), mu != null ? fmtBytes(mu) : DASH, "",
           (d.temperatureC != null ? d.temperatureC + " °C" : DASH) + " · " + (d.powerWatts != null ? fmtNum(d.powerWatts, 0) + " W" : DASH),
           mt && mu != null ? (mu / mt) * 100 : null, 100));
       }
@@ -69,12 +76,12 @@ export function mount(root, ctx) {
         p.goroutines + " goroutines · " + p.openFDs + " open files", p.cpuPercent, 100)
       : unavailable("process", "camfarm process", p.reason));
 
-    root.replaceChildren(...tiles);
+    root.replaceChildren(stalePill, ...tiles);
   }
 
   store.subscribe((st, patch) => {
     if ("metrics" in patch && st.metrics && enabled) render(st.metrics);
-    if ("conn" in patch) root.classList.toggle("stale", st.conn === "lost");
+    if ("conn" in patch) setStale(st.conn === "lost");
   });
 
   // First paint: a sample from the endpoint, so the strip is never empty while

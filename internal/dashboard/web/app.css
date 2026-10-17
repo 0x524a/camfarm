@@ -126,3 +126,5 @@ tr.sev-valid td:first-child { box-shadow: inset 3px 0 var(--ok); }
 .finding.warning b { color: var(--warn); }
 .finding span { color: var(--muted); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+.stale-note { grid-column: 1 / -1; justify-self: start; }
+.stale-note[hidden] { display: none; }
