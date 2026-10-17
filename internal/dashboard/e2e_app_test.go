@@ -996,6 +996,53 @@ func TestAppLibraryUploadsSeveralFilesOneAfterAnother(t *testing.T) {
 	s.requireCleanApp(t)
 }
 
+func TestAppLibraryMidBatchUploadFailureIsStillReportedAtTheEnd(t *testing.T) {
+	lib, err := library.New(library.Options{Roots: []string{t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	url, _ := appServer(t, appOpts{lib: lib})
+	s := newSession(t)
+	var posts atomic.Int32
+	if err := s.page.Route("**/api/v1/library/upload", func(r playwright.Route) {
+		if posts.Add(1) == 2 {
+			_ = r.Fulfill(playwright.RouteFulfillOptions{
+				Status: playwright.Int(400), ContentType: playwright.String("application/json"),
+				Body: `{"error":"not a supported video type"}`,
+			})
+			return
+		}
+		_ = r.Continue()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	openLibrary(t, s, url)
+	dir := t.TempDir()
+	var paths []string
+	for _, n := range []string{"first.ts", "bad.ts", "last.ts"} {
+		p := filepath.Join(dir, n)
+		if err := os.WriteFile(p, fixture.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	if err := s.page.Locator("#file-input").SetInputFiles(paths); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"first.ts", "last.ts"} {
+		if err := expect().Locator(libRow(s, "uploads/"+n)).ToBeVisible(); err != nil {
+			t.Fatalf("%s not listed: %v", n, err)
+		}
+	}
+	if err := expect().Locator(s.page.Locator("#error")).ToContainText("bad.ts: not a supported video type"); err != nil {
+		t.Fatalf("failure cleared by the later success: %v", err)
+	}
+	if n, _ := libRow(s, "uploads/bad.ts").Count(); n != 0 {
+		t.Fatal("rejected file is listed")
+	}
+	s.requireCleanApp(t, 400)
+}
+
 func TestAppLibraryEmptyAndInvalidOnly(t *testing.T) {
 	dir := t.TempDir()
 	lib, err := library.New(library.Options{Roots: []string{dir}})

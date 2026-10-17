@@ -78,9 +78,12 @@ export function mount(panel, ctx) {
   // always describes the transfer in flight. The response is the validated file.
   const queue = [];
   let uploading = false;
-  function mergeFile(file) {
+  async function mergeFile(file) {
     const cur = store.get().library;
-    if (!cur) return;
+    if (!cur) {
+      setView(await api.library()); // the listing already includes the new file
+      return;
+    }
     const files = cur.files || [];
     const i = files.findIndex((f) => f.id === file.id);
     setView({ ...cur, files: i >= 0 ? files.map((f, j) => (j === i ? file : f)) : [file, ...files] });
@@ -90,6 +93,8 @@ export function mount(panel, ctx) {
     uploading = true;
     let done = 0;
     let total = queue.length;
+    const failures = []; // "name: reason", reported once when the queue empties
+    store.set({ error: "" });
     try {
       while (queue.length) {
         const file = queue.shift();
@@ -100,12 +105,12 @@ export function mount(panel, ctx) {
         progress.textContent = "Uploading " + file.name + tag + "…";
         try {
           const saved = await api.upload(file, (f) => { progress.textContent = "Uploading " + file.name + tag + " " + Math.round(f * 100) + "%"; });
-          mergeFile(saved);
-          store.set({ error: "" });
+          await mergeFile(saved);
         } catch (e) {
-          fail(e);
+          failures.push(file.name + ": " + (e && e.message ? e.message : String(e)));
         }
       }
+      if (failures.length) fail(new Error(failures.join("; ")));
     } finally {
       uploading = false;
       progress.hidden = true;
