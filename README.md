@@ -6,6 +6,8 @@
 [![codecov](https://codecov.io/gh/0x524a/camfarm/graph/badge.svg)](https://codecov.io/gh/0x524a/camfarm)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=0x524a_camfarm&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=0x524a_camfarm)
 
+**Simulated fleet for pipeline testing. Not an ONVIF conformance tool.**
+
 CamFarm is a synthetic RTSP camera farm for testing video-analytics pipelines without
 physical hardware. It serves N fake cameras from one process, and it is built so
 that misbehaviour can be injected deterministically: a fault fires because a
