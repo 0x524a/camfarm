@@ -508,6 +508,10 @@ func TestAppUnimplementedFaultKindsAreDisabled(t *testing.T) {
 	s := newSession(t)
 	s.openApp(t, url)
 	mustClick(t, s.camCard("front-door").Locator(".btn-faults"))
+	// The options arrive with the catalogue fetch; wait for them before counting.
+	if err := expect().Locator(s.page.Locator("#fault-kind option").First()).ToBeAttached(); err != nil {
+		t.Fatal(err)
+	}
 	n, err := s.page.Locator("#fault-kind option").Count()
 	if err != nil || n == 0 {
 		t.Fatalf("no kinds listed (n=%d err=%v)", n, err)
