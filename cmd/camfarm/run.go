@@ -78,6 +78,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	cameras := fs.Int("cameras", 1, "number of cameras cam-1..N on the bundled fixture (cannot be combined with --spec)")
 	httpAddr := fs.String("http-addr", "127.0.0.1:8080", "dashboard listen address")
 	listenHost := fs.String("listen-host", "", "host the RTSP and ONVIF listeners bind (default 127.0.0.1)")
+	advertiseHost := fs.String("advertise-host", "", "host written into every advertised URL (RTSP, ONVIF, discovery); required when --listen-host is a wildcard such as 0.0.0.0, e.g. in a container.\n"+
+		"ports in those URLs are the real bound ports, so publish container ports unchanged or fix them with --rtsp-port and --onvif-port")
 	rtspPort := fs.Int("rtsp-port", 0, "RTSP port (0 picks a free one)")
 	onvifPort := fs.Int("onvif-port", 0, "ONVIF port (0 picks a free one)")
 	discoveryFlag := fs.String("discovery", "", "answer WS-Discovery probes: \"multicast\" or \"unicast:HOST:PORT\" (empty leaves the spec as is).\n"+
@@ -153,6 +155,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	if set["listen-host"] {
 		spec.Listen.Host = *listenHost
+	}
+	if set["advertise-host"] {
+		spec.Listen.AdvertiseHost = *advertiseHost
 	}
 	if set["rtsp-port"] {
 		spec.Listen.RTSPPort = *rtspPort

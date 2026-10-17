@@ -1,0 +1,22 @@
+# A CamFarm fleet for a pipeline running in the same compose project.
+#
+#   docker compose up --build
+#
+# Other services reach the cameras at rtsp://camfarm:8554/cam-1. The dashboard
+# has no authentication, so it is published on the loopback interface only.
+services:
+  camfarm:
+    build: .
+    command:
+      - --cameras=3
+      - --http-addr=0.0.0.0:8080
+      - --listen-host=0.0.0.0
+      - --rtsp-port=8554
+      - --onvif-port=8000
+      # The name other containers use to reach this one.
+      - --advertise-host=camfarm
+    ports:
+      - "127.0.0.1:8080:8080"
+    # Add your own footage and point the fleet at it:
+    #   volumes: ["./clips:/clips:ro"]
+    #   and append: --media-dir=/clips

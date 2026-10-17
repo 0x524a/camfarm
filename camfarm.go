@@ -164,10 +164,11 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 	root := seed.Seed(valid.Seed)
 
 	cfg := rtsp.Config{
-		Host: valid.Listen.Host,
-		Port: valid.Listen.RTSPPort,
-		Log:  log,
-		Obs:  f.rec,
+		Host:          valid.Listen.Host,
+		AdvertiseHost: valid.Listen.AdvertiseHost,
+		Port:          valid.Listen.RTSPPort,
+		Log:           log,
+		Obs:           f.rec,
 	}
 
 	for i, cs := range valid.Cameras {
@@ -212,9 +213,10 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 	f.srv = srv
 
 	onvifCfg := onvif.Config{
-		Host: valid.Listen.Host,
-		Port: valid.Listen.ONVIFPort,
-		Log:  log,
+		Host:          valid.Listen.Host,
+		AdvertiseHost: valid.Listen.AdvertiseHost,
+		Port:          valid.Listen.ONVIFPort,
+		Log:           log,
 	}
 	if d := valid.Listen.Discovery; d != nil {
 		if d.Mode == DiscoveryMulticast {
@@ -226,12 +228,13 @@ func Start(ctx context.Context, spec Spec) (*Fleet, error) {
 	for _, cs := range valid.Cameras {
 		cam := f.cameras[cs.ID]
 		onvifCfg.Cameras = append(onvifCfg.Cameras, onvif.CameraConfig{
-			ID:       cs.ID,
-			Media:    cam.media,
-			RTSPURL:  srv.URL(cs.ID),
-			Username: cs.Auth.Username,
-			Password: cs.Auth.Password,
-			Seed:     cam.seed,
+			ID:           cs.ID,
+			Media:        cam.media,
+			RTSPURL:      srv.URL(cs.ID),
+			LocalRTSPURL: srv.LocalURL(cs.ID),
+			Username:     cs.Auth.Username,
+			Password:     cs.Auth.Password,
+			Seed:         cam.seed,
 		})
 	}
 
@@ -453,12 +456,13 @@ func (f *Fleet) AddCamera(spec CameraSpec) (*Camera, error) {
 
 	if f.onvifSrv != nil {
 		if err := f.onvifSrv.AddCamera(onvif.CameraConfig{
-			ID:       cs.ID,
-			Media:    m,
-			RTSPURL:  f.srv.URL(cs.ID),
-			Username: cs.Auth.Username,
-			Password: cs.Auth.Password,
-			Seed:     camSeed,
+			ID:           cs.ID,
+			Media:        m,
+			RTSPURL:      f.srv.URL(cs.ID),
+			LocalRTSPURL: f.srv.LocalURL(cs.ID),
+			Username:     cs.Auth.Username,
+			Password:     cs.Auth.Password,
+			Seed:         camSeed,
 		}); err != nil {
 			if rmErr := f.srv.RemoveCamera(cs.ID); rmErr != nil {
 				f.log.Warn("rollback: could not remove camera from rtsp after onvif AddCamera failed",
@@ -594,6 +598,11 @@ func (c *Camera) ID() string { return c.id }
 // RTSPURL returns the camera's stream URL.
 func (c *Camera) RTSPURL() string { return c.fleet.srv.URL(c.id) }
 
+// LocalRTSPURL returns a URL for dialing the camera from this process: the
+// bound address rather than the advertised host, which may not resolve from
+// inside a container.
+func (c *Camera) LocalRTSPURL() string { return c.fleet.srv.LocalURL(c.id) }
+
 // ONVIFEndpoint returns the camera's ONVIF base URL, e.g.
 // "http://127.0.0.1:PORT/onvif/front-door". Append "/device" or "/media" for
 // the two services this version serves.
@@ -622,12 +631,13 @@ func (c *Camera) Stats() Stats {
 
 // Screenshot returns one decoded frame from this camera's live RTSP stream.
 //
-// It dials the camera's own RTSP URL, so it exercises the real wire path, and
+// It dials the camera's own RTSP server on its bound address (not the
+// advertised host, which may not resolve here), so it exercises the real wire path, and
 // blocks until the stream's next random access point (bounded by one loop of
 // the source). It returns ErrNotReady if the fleet's RTSP server is not
 // serving, and ctx's own error if ctx ends first.
 func (c *Camera) Screenshot(ctx context.Context) (image.Image, error) {
-	url := c.RTSPURL()
+	url := c.fleet.srv.LocalURL(c.id)
 	if url == "" {
 		return nil, ErrNotReady
 	}

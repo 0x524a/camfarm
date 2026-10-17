@@ -56,7 +56,7 @@ func (s *server) startQuality(w http.ResponseWriter, r *http.Request) {
 	if !decodeOptionalJSON(w, r, &req) {
 		return
 	}
-	run, err := s.quality.Start(id, cam.RTSPURL(), req)
+	run, err := s.quality.Start(id, cam.LocalRTSPURL(), req)
 	if err != nil {
 		switch {
 		case errors.Is(err, quality.ErrBadRequest):

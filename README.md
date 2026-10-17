@@ -25,6 +25,13 @@ or VLC at an RTSP URL from there (the RTSP and ONVIF ports are picked at random 
 `--rtsp-port` and `--onvif-port`). Use your own footage with `--media-dir DIR`. Run with `-h` for
 every flag.
 
+In a container (Docker or nerdctl), see [docs/docker.md](docs/docker.md):
+
+```sh
+docker build -t camfarm .
+docker run --rm -p 127.0.0.1:8080:8080 -p 127.0.0.1:8554:8554 -p 127.0.0.1:8000:8000 camfarm
+```
+
 **The dashboard has no authentication.** It can start servers, read local paths when you allow
 it, and show host details and camera credentials. It listens on loopback by default. Do not
 expose it. [Details](docs/dashboard.md).

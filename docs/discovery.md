@@ -23,10 +23,13 @@ behaves on real networks.
   responder, which supports Probe/ProbeMatches with Types and Scopes filtering (rfc3986, strcmp0
   and none match rules) plus Hello and Bye. It does not support Resolve/ResolveMatches, the ldap
   and uuid scope rules (such a probe matches nothing), the 2009/01 (WS-Discovery 1.1) namespace,
-  or managed mode with a discovery proxy. A wildcard `listen.host` (`0.0.0.0`, `::`) is refused,
-  because the host is advertised in each camera's XAddr and a wildcard is not an address a client
-  can dial. Multicast mode also refuses a loopback `listen.host`, since it would advertise an
-  address no other machine can reach; use unicast mode for loopback. Multicast depends on the
+  or managed mode with a discovery proxy. A wildcard `listen.host` (`0.0.0.0`, `::`) is refused
+  unless `listen.advertiseHost` is set, because the host is advertised in each camera's XAddr and
+  a wildcard is not an address a client can dial; with `advertiseHost` the XAddr uses it instead.
+  Multicast mode also refuses a loopback `listen.host` (even with `advertiseHost` set, since the
+  listeners would not be reachable at the advertised address) and a loopback `advertiseHost`; use
+  unicast mode for loopback. Unicast with a loopback bind and an `advertiseHost` is allowed, as
+  the probe socket is chosen by the operator. Multicast depends on the
   network: it commonly does not work across Docker bridge networks, on CI runners, between network
   namespaces, or through firewalls and IGMP-snooping switches, and nothing here detects that. CI
   exercises **unicast mode only** for probe and announce behaviour. A test that starts the
@@ -34,8 +37,10 @@ behaves on real networks.
   a non-loopback multicast-capable IPv4 interface and skips otherwise, and it does not check that
   any packet is delivered. Multicast joins the
   interface named by `--discovery-interface` (`interface` in the spec); when that is empty
-  and `listen.host` is a literal IP it defaults to the interface holding that IP, and with a
-  hostname it falls back to the system default-route interface. Containers on a bridge should need the
+  and `listen.host` is a literal IP it defaults to the interface holding that IP. With a wildcard
+  `listen.host`, it uses `advertiseHost` if that is an IP assigned to a local interface; otherwise
+  (a hostname, or a NAT or published address) it falls back to the system default-route
+  interface. Containers on a bridge should need the
   bridge's interface (reasoned from how multicast joins work, not tested). **On the same host as the fleet, multicast discovery with `onvif-go`'s
   client (and other clients built on Go's `net.ListenMulticastUDP`) finds nothing and never sees
   Hello or Bye**, because both sides disable `IP_MULTICAST_LOOP`. This was observed by hand on one Linux

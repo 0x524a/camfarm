@@ -65,6 +65,36 @@ func multicastInterface(d *DiscoveryConfig, host string) string {
 	return ""
 }
 
+// bindOrAdvertised is the host multicastInterface keys on. A specific bind IP
+// wins, since that is the interface the listeners are on. Otherwise the
+// advertised IP is used only if a local interface owns it (it may be a NAT or
+// published address, which onvif-go cannot resolve to an interface); failing
+// that it is empty, which leaves the join to the default route.
+func (s *Server) bindOrAdvertised() string {
+	if ip := net.ParseIP(strings.TrimSuffix(strings.TrimPrefix(s.cfg.Host, "["), "]")); ip != nil && !ip.IsUnspecified() {
+		return s.cfg.Host
+	}
+	if s.cfg.AdvertiseHost == "" {
+		return s.cfg.Host
+	}
+	adv := strings.TrimSuffix(strings.TrimPrefix(s.cfg.AdvertiseHost, "["), "]")
+	if ip := net.ParseIP(adv); ip != nil && localIPOwned(ip) {
+		return adv
+	}
+	return ""
+}
+
+// localIPOwned reports whether ip is assigned to a local interface.
+func localIPOwned(ip net.IP) bool {
+	addrs, _ := net.InterfaceAddrs() // on error addrs is empty: not owned
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // registrar is the part of the onvif-go responder that camfarm drives after
 // startup. It is an interface only so a test can inject a failing Register.
 type registrar interface {
@@ -101,7 +131,7 @@ func (s *Server) newResponder() (responder, <-chan struct{}, int, error) {
 		build = func(c *discovery.ResponderConfig) responder { return discovery.NewResponder(c) }
 	}
 	resp := build(&discovery.ResponderConfig{
-		NetworkInterface: multicastInterface(s.cfg.Discovery, s.cfg.Host),
+		NetworkInterface: multicastInterface(s.cfg.Discovery, s.bindOrAdvertised()),
 		ListenAddr:       s.cfg.Discovery.ListenAddr,
 		AnnounceAddr:     s.cfg.Discovery.AnnounceAddr,
 		Ready:            ready,
@@ -232,7 +262,7 @@ func (s *Server) registerLocked(resp registrar, cam *camera) error {
 	// DiscoveryDevice returns a fresh value, but copy anyway so nothing
 	// camfarm sets can ever leak back into onvif-go's state.
 	dev := *cam.srv.DiscoveryDevice()
-	dev.XAddrs = []string{baseURL(s.ln.Addr(), cam.id) + "/device"}
+	dev.XAddrs = []string{baseURL(s.ln.Addr(), s.cfg.AdvertiseHost, cam.id) + "/device"}
 	if err := resp.Register(&dev); err != nil {
 		return fmt.Errorf("onvif: registering %q for discovery: %w", cam.id, err)
 	}

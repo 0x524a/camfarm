@@ -41,18 +41,26 @@ const snapshotTimeout = 15 * time.Second
 
 // CameraConfig describes one camera's ONVIF endpoint.
 type CameraConfig struct {
-	ID       string
-	Media    *media.Media
-	RTSPURL  string
-	Username string
-	Password string
-	Seed     seed.Seed
+	ID    string
+	Media *media.Media
+	// RTSPURL is the stream URL clients are told (GetStreamUri).
+	RTSPURL string
+	// LocalRTSPURL is the URL this process dials for snapshots; it must work
+	// from here even when RTSPURL's advertised host does not resolve. Empty
+	// falls back to RTSPURL.
+	LocalRTSPURL string
+	Username     string
+	Password     string
+	Seed         seed.Seed
 }
 
 // Config configures the ONVIF transport for a fleet.
 type Config struct {
 	// Host defaults to 127.0.0.1.
 	Host string
+	// AdvertiseHost, when set, replaces the bound host in every URL clients
+	// are given (endpoints, XAddrs, discovery XAddrs, snapshot URI).
+	AdvertiseHost string
 	// Port of zero requests an ephemeral port, readable back via Addr.
 	Port int
 	// Log receives server events. Nil means silent.
@@ -214,7 +222,11 @@ func buildCamera(cc CameraConfig) (*camera, error) {
 		return nil, fmt.Errorf("onvif: wiring stream URI for %q: %w", cc.ID, err)
 	}
 
-	cam := &camera{id: cc.ID, srv: srv, rtspURL: cc.RTSPURL, uuid: uuid}
+	dial := cc.LocalRTSPURL
+	if dial == "" {
+		dial = cc.RTSPURL
+	}
+	cam := &camera{id: cc.ID, srv: srv, rtspURL: dial, uuid: uuid}
 	if cc.Username != "" && cc.Password != "" {
 		cam.digest = newDigestAuth(cc.Username, cc.Password, cc.Seed.Stream("onvif-auth"))
 	}
@@ -449,15 +461,20 @@ func (s *Server) Endpoint(cameraID string) string {
 	if !ok {
 		return ""
 	}
-	return baseURL(addr, cameraID)
+	return baseURL(addr, s.cfg.AdvertiseHost, cameraID)
 }
 
 // baseURL builds "http://host:port/onvif/<id>" for a bound listener address.
 // A link-local IPv6 zone ("fe80::1%eth0") is written as %25eth0, as RFC 6874
 // requires, and the camera ID is escaped as a path segment.
-func baseURL(addr net.Addr, cameraID string) string {
+//
+// A non-empty advertiseHost replaces the host; the port stays the bound one.
+func baseURL(addr net.Addr, advertiseHost, cameraID string) string {
 	hostport := addr.String()
-	if tcp, ok := addr.(*net.TCPAddr); ok && tcp.Zone != "" {
+	if tcp, ok := addr.(*net.TCPAddr); ok && advertiseHost != "" {
+		h := strings.TrimSuffix(strings.TrimPrefix(advertiseHost, "["), "]")
+		hostport = net.JoinHostPort(h, strconv.Itoa(tcp.Port))
+	} else if ok && tcp.Zone != "" {
 		hostport = net.JoinHostPort(tcp.IP.String()+"%25"+url.PathEscape(tcp.Zone), strconv.Itoa(tcp.Port))
 	}
 	return fmt.Sprintf("http://%s/onvif/%s", hostport, url.PathEscape(cameraID))

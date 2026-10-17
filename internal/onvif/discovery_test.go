@@ -420,15 +420,15 @@ func TestAddCameraRollsBackWhenRegisterFails(t *testing.T) {
 
 func TestBaseURLEscapesZoneAndID(t *testing.T) {
 	zoned := &net.TCPAddr{IP: net.ParseIP("fe80::1"), Port: 8080, Zone: "eth0"}
-	if got, want := baseURL(zoned, "cam"), "http://[fe80::1%25eth0]:8080/onvif/cam"; got != want {
+	if got, want := baseURL(zoned, "", "cam"), "http://[fe80::1%25eth0]:8080/onvif/cam"; got != want {
 		t.Errorf("zoned baseURL = %q, want %q", got, want)
 	}
 	plain := &net.TCPAddr{IP: net.IPv4(192, 0, 2, 7), Port: 80}
-	if got, want := baseURL(plain, "a b%c"), "http://192.0.2.7:80/onvif/a%20b%25c"; got != want {
+	if got, want := baseURL(plain, "", "a b%c"), "http://192.0.2.7:80/onvif/a%20b%25c"; got != want {
 		t.Errorf("escaped baseURL = %q, want %q", got, want)
 	}
 	// The result must parse back to the same host and zone.
-	u, err := url.Parse(baseURL(zoned, "cam"))
+	u, err := url.Parse(baseURL(zoned, "", "cam"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,6 +686,51 @@ func TestDiscoveryDisabledByDefault(t *testing.T) {
 	}
 	if err := srv.RemoveCamera("b"); err != nil {
 		t.Fatalf("RemoveCamera: %v", err)
+	}
+}
+
+func TestBindOrAdvertisedPicksAJoinableInterface(t *testing.T) {
+	for _, tc := range []struct{ name, host, adv, want string }{
+		{"specific bind wins", "192.0.2.7", "198.51.100.1", "192.0.2.7"},
+		{"wildcard bind, advertised not local", "0.0.0.0", "192.0.2.1", ""},
+		{"wildcard bind, advertised hostname", "0.0.0.0", "camfarm.test", ""},
+		{"wildcard bind, advertised local IP", "0.0.0.0", "127.0.0.1", "127.0.0.1"},
+		{"no advertise keeps host", "camhost.example", "", "camhost.example"},
+	} {
+		s := &Server{cfg: Config{Host: tc.host, AdvertiseHost: tc.adv}}
+		if got := s.bindOrAdvertised(); got != tc.want {
+			t.Errorf("%s: bindOrAdvertised = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestMulticastWildcardBindWithForeignAdvertiseStarts(t *testing.T) {
+	multicastTestInterface(t)
+	srv, err := New(Config{Host: "0.0.0.0", AdvertiseHost: "192.0.2.1", Cameras: []CameraConfig{discoCam("a", 1)},
+		Discovery: &DiscoveryConfig{Multicast: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(); err != nil {
+		if strings.Contains(err.Error(), "interface not found") {
+			t.Fatalf("Start failed on an advertised IP no interface owns: %v", err)
+		}
+		t.Skipf("multicast join unavailable here: %v", err)
+	}
+	srv.Close()
+}
+
+func TestBaseURLAdvertiseHost(t *testing.T) {
+	addr := &net.TCPAddr{IP: net.IPv4(10, 0, 0, 5), Port: 8080}
+	for _, tc := range []struct{ adv, want string }{
+		{"camfarm.test", "http://camfarm.test:8080/onvif/cam"},
+		{"192.0.2.1", "http://192.0.2.1:8080/onvif/cam"},
+		{"2001:db8::1", "http://[2001:db8::1]:8080/onvif/cam"},
+		{"[2001:db8::1]", "http://[2001:db8::1]:8080/onvif/cam"},
+	} {
+		if got := baseURL(addr, tc.adv, "cam"); got != tc.want {
+			t.Errorf("baseURL(%q) = %q, want %q", tc.adv, got, tc.want)
+		}
 	}
 }
 
