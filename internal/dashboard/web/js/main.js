@@ -1,5 +1,6 @@
 import { api } from "./api.js";
 import { createStore } from "./state.js";
+import { mount as mountCameras } from "./cameras.js";
 
 const store = createStore({
   cameras: [], catalogue: [], library: null, metrics: null,
@@ -83,6 +84,7 @@ function refreshSoon() {
 }
 
 // --- feature modules (each task adds its line) ---
+mountCameras($("#panel-cameras"), ctx);
 
 // --- event stream ---
 if (window.EventSource) {

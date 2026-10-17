@@ -10,7 +10,9 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/playwright-community/playwright-go"
 
@@ -231,4 +233,165 @@ func TestAppConnectionPillTracksCameraRefreshFailuresAndRecovers(t *testing.T) {
 		t.Fatalf("a successful refresh should restore the pill while the stream stays open: %v", err)
 	}
 	s.requireCleanApp(t, 500)
+}
+
+func TestAppCameraCardShowsThumbnailAndURLs(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	card := s.camCard("front-door")
+	if err := expect().Locator(card).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.page.WaitForFunction(`() => {
+		const i = document.querySelector('.cam[data-id="front-door"] img.snap');
+		return !!i && !i.hidden && i.complete && i.naturalWidth === 320 && i.naturalHeight === 240;
+	}`, nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(assertTimeoutMS)}); err != nil {
+		t.Fatalf("thumbnail never loaded as a 320x240 image: %v", err)
+	}
+	if err := expect().Locator(card).ToContainText("rtsp://"); err != nil {
+		t.Fatalf("RTSP URL missing: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppAddAndRemoveACameraWithInlineConfirm(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	mustClick(t, s.page.Locator("#add-open"))
+	mustFill(t, s.page.Locator("#add-id"), "lobby")
+	mustClick(t, s.page.Locator("#add-submit"))
+	lobby := s.camCard("lobby")
+	if err := expect().Locator(lobby).ToBeVisible(); err != nil {
+		t.Fatalf("added camera did not appear: %v", err)
+	}
+	// Remove asks first; Cancel keeps the camera.
+	mustClick(t, lobby.Locator(".btn-remove"))
+	mustClick(t, lobby.Locator(".btn-remove-cancel"))
+	if err := expect().Locator(lobby).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	mustClick(t, lobby.Locator(".btn-remove"))
+	mustClick(t, lobby.Locator(".btn-remove-confirm"))
+	if err := expect().Locator(lobby).ToHaveCount(0); err != nil {
+		t.Fatalf("removed camera still shown: %v", err)
+	}
+	if err := expect().Locator(s.camCard("front-door")).ToBeVisible(); err != nil {
+		t.Fatal("the other camera disappeared")
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppDuplicateCameraShowsAnError(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	mustClick(t, s.page.Locator("#add-open"))
+	mustFill(t, s.page.Locator("#add-id"), "front-door")
+	mustClick(t, s.page.Locator("#add-submit"))
+	if err := expect().Locator(s.page.Locator("#error")).ToContainText("duplicate"); err != nil {
+		t.Fatalf("no duplicate error: %v", err)
+	}
+	s.requireCleanApp(t, 409)
+}
+
+func TestAppFleetChangeAppearsWithoutReload(t *testing.T) {
+	url, f := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	if err := expect().Locator(s.page.Locator("#conn")).ToHaveText("connected"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.AddCamera(camfarm.CameraSpec{ID: "from-library"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(s.camCard("from-library")).ToBeVisible(); err != nil {
+		t.Fatalf("a library-side AddCamera was not pushed to the page: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+// Review Focus 1: ids that collide with Object.prototype names, or that contain
+// markup, render as text and can be removed.
+func TestAppCameraIDsAreTextAndPrototypeNamesWork(t *testing.T) {
+	url, f := appServer(t, appOpts{})
+	for _, id := range []string{"constructor", "__proto__", "toString", "<b>x<b>"} {
+		if _, err := f.AddCamera(camfarm.CameraSpec{ID: id}); err != nil {
+			t.Fatalf("AddCamera(%q): %v", id, err)
+		}
+	}
+	s := newSession(t)
+	s.openApp(t, url)
+	for _, id := range []string{"constructor", "__proto__", "toString", "<b>x<b>"} {
+		if err := expect().Locator(s.camCard(id)).ToBeVisible(); err != nil {
+			t.Fatalf("%q did not render: %v", id, err)
+		}
+	}
+	n, err := s.page.Locator("#cam-grid b").Count()
+	if err != nil || n != 0 {
+		t.Fatalf("markup in an id was parsed as HTML (%d <b> elements, err=%v)", n, err)
+	}
+	card := s.camCard("constructor")
+	mustClick(t, card.Locator(".btn-remove"))
+	mustClick(t, card.Locator(".btn-remove-confirm"))
+	if err := expect().Locator(card).ToHaveCount(0); err != nil {
+		t.Fatalf("camera named constructor was not removed: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+// Review Focus 2: a failed snapshot shows its error on the card.
+func TestAppFailedSnapshotShowsTheErrorOnTheCard(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	if err := s.page.Route("**/snapshot.jpg", func(r playwright.Route) {
+		_ = r.Fulfill(playwright.RouteFulfillOptions{
+			Status: playwright.Int(503), ContentType: playwright.String("application/json"),
+			Body: `{"error":"camera is restarting"}`,
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.openApp(t, url)
+	if err := expect().Locator(s.camCard("front-door").Locator(".snap-ph")).ToContainText("camera is restarting"); err != nil {
+		t.Fatalf("snapshot error not shown on the card: %v", err)
+	}
+	if err := expect().Locator(s.camCard("front-door").Locator(".btn-remove")).ToBeVisible(); err != nil {
+		t.Fatal("the rest of the card stopped working")
+	}
+	s.requireCleanApp(t, 503)
+}
+
+func TestAppRefreshSnapshotButtonFetchesAgain(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	var hits int32
+	if err := s.page.Route("**/snapshot.jpg", func(r playwright.Route) {
+		atomic.AddInt32(&hits, 1)
+		_ = r.Continue()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.openApp(t, url)
+	if err := expect().Locator(s.camCard("front-door").Locator("img.snap")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	before := atomic.LoadInt32(&hits)
+	mustClick(t, s.camCard("front-door").Locator(".btn-snap"))
+	deadline := time.Now().Add(10 * time.Second)
+	for atomic.LoadInt32(&hits) <= before && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if atomic.LoadInt32(&hits) <= before {
+		t.Fatal("Refresh snapshot did not fetch again")
+	}
+	// And nothing else fetches on its own: wait and confirm the count is stable.
+	time.Sleep(1500 * time.Millisecond)
+	after := atomic.LoadInt32(&hits)
+	time.Sleep(1500 * time.Millisecond)
+	if atomic.LoadInt32(&hits) != after {
+		t.Fatal("snapshots refresh on a timer; the design fetches only on load, add and click")
+	}
+	s.requireCleanApp(t)
 }
