@@ -21,7 +21,7 @@ export function mount(panel, ctx) {
   rootForm.append(pathInput, el("button", { type: "submit", class: "ghost sm", text: "Add shared path" }));
   const progress = el("span", { class: "sub", hidden: true });
   const drop = el("div", { id: "drop", class: "drop", tabindex: "0", role: "button", text: "Drop a video here, or click to choose one. It is validated as soon as it lands." });
-  const fileInput = el("input", { id: "file-input", type: "file", hidden: true, accept: "video/*,.ts,.mp4,.mkv,.mov" });
+  const fileInput = el("input", { id: "file-input", type: "file", multiple: true, hidden: true, accept: "video/*,.ts,.mp4,.mkv,.mov" });
   const tbody = el("tbody", { id: "files-body" });
   const empty = el("p", { id: "lib-empty", class: "empty", hidden: true });
   const disabledMsg = el("p", { class: "empty", hidden: true });
@@ -74,31 +74,58 @@ export function mount(panel, ctx) {
     });
   });
 
-  async function upload(file) {
-    progress.hidden = false;
-    progress.textContent = "Uploading " + file.name + "…";
+  // Uploads run one after another through a queue, so the single progress line
+  // always describes the transfer in flight. The response is the validated file.
+  const queue = [];
+  let uploading = false;
+  function mergeFile(file) {
+    const cur = store.get().library;
+    if (!cur) return;
+    const files = cur.files || [];
+    const i = files.findIndex((f) => f.id === file.id);
+    setView({ ...cur, files: i >= 0 ? files.map((f, j) => (j === i ? file : f)) : [file, ...files] });
+  }
+  async function drain() {
+    if (uploading) return;
+    uploading = true;
+    let done = 0;
+    let total = queue.length;
     try {
-      await api.upload(file, (f) => { progress.textContent = "Uploading " + file.name + " " + Math.round(f * 100) + "%"; });
-      progress.textContent = "Checking " + file.name + "…";
-      setView(await api.library());
-      store.set({ error: "" });
-    } catch (e) {
-      fail(e);
+      while (queue.length) {
+        const file = queue.shift();
+        done++;
+        total = Math.max(total, done + queue.length);
+        const tag = total > 1 ? " (" + done + " of " + total + ")" : "";
+        progress.hidden = false;
+        progress.textContent = "Uploading " + file.name + tag + "…";
+        try {
+          const saved = await api.upload(file, (f) => { progress.textContent = "Uploading " + file.name + tag + " " + Math.round(f * 100) + "%"; });
+          mergeFile(saved);
+          store.set({ error: "" });
+        } catch (e) {
+          fail(e);
+        }
+      }
     } finally {
+      uploading = false;
       progress.hidden = true;
       fileInput.value = "";
     }
+  }
+  function enqueue(files) {
+    queue.push(...files);
+    drain();
   }
   drop.addEventListener("click", () => fileInput.click());
   drop.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
   });
-  fileInput.addEventListener("change", () => { if (fileInput.files[0]) upload(fileInput.files[0]); });
+  fileInput.addEventListener("change", () => { if (fileInput.files.length) enqueue([...fileInput.files]); });
   ["dragenter", "dragover"].forEach((n) => drop.addEventListener(n, (e) => { e.preventDefault(); drop.classList.add("over"); }));
   ["dragleave", "drop"].forEach((n) => drop.addEventListener(n, (e) => {
     e.preventDefault();
     drop.classList.remove("over");
-    if (n === "drop" && e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]);
+    if (n === "drop" && e.dataTransfer.files.length) enqueue([...e.dataTransfer.files]);
   }));
 
   function factsText(f) {
@@ -147,12 +174,20 @@ export function mount(panel, ctx) {
     files.forEach((f) => { count[f.report.status] = (count[f.report.status] || 0) + 1; });
     document.getElementById("count-library").textContent = String(count.warning + count.invalid || "");
 
-    stats.replaceChildren(...FILTERS.map(([k, label]) => {
-      const b = el("button", { type: "button", class: "stat", "aria-pressed": String(filter === k), dataset: { f: k } },
-        [el("b", { text: String(count[k] || 0) }), el("span", { text: label })]);
-      b.addEventListener("click", () => { filter = k; render(store.get().library); });
-      return b;
-    }));
+    // The chips are built once and updated in place so a keyboard user keeps focus.
+    if (!stats.children.length) {
+      stats.replaceChildren(...FILTERS.map(([k, label]) => {
+        const b = el("button", { type: "button", class: "stat", dataset: { f: k } },
+          [el("b"), el("span", { text: label })]);
+        b.addEventListener("click", () => { filter = k; render(store.get().library); });
+        return b;
+      }));
+    }
+    for (const b of stats.children) {
+      const k = b.dataset.f;
+      b.setAttribute("aria-pressed", String(filter === k));
+      b.querySelector("b").textContent = String(count[k] || 0);
+    }
 
     rootsBox.replaceChildren(...(lib.roots || []).map((r) => {
       const n = files.filter((f) => f.root === r.path).length;

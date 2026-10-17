@@ -703,13 +703,6 @@ func mustSelect(t *testing.T, l playwright.Locator, v string) {
 // analysed for real, so "Use for camera" really serves the valid file.
 func libraryFixture(t *testing.T, opt library.Options) (*library.Library, string) {
 	t.Helper()
-	return libraryFixtureMode(t, opt, 0o755)
-}
-
-// libraryFixtureMode is libraryFixture with the media directory's permission
-// bits set before the library probes it, so 0o555 yields a read-only root.
-func libraryFixtureMode(t *testing.T, opt library.Options, mode os.FileMode) (*library.Library, string) {
-	t.Helper()
 	dir := t.TempDir()
 	write := func(name string, b []byte) {
 		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
@@ -730,10 +723,6 @@ func libraryFixtureMode(t *testing.T, opt library.Options, mode os.FileMode) (*l
 		}
 		return r
 	}
-	if err := os.Chmod(dir, mode); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) }) // let TempDir remove it
 	lib, err := library.New(opt)
 	if err != nil {
 		t.Fatal(err)
@@ -914,12 +903,18 @@ func TestAppLibraryAddSharedPath(t *testing.T) {
 
 // Review Focus 3.
 func TestAppLibraryHidesDisabledControlsWithAReason(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores directory permissions, so no root can be read-only")
-	}
-	lib, _ := libraryFixtureMode(t, library.Options{}, 0o555) // no writable root, no UI paths
-	url, _ := appServer(t, appOpts{lib: lib})
+	// The view is faked rather than built from a read-only directory, so the
+	// test does not depend on the uid (root ignores directory permissions).
+	url, _ := appServer(t, appOpts{})
 	s := newSession(t)
+	if err := s.page.Route("**/api/v1/library", func(r playwright.Route) {
+		_ = r.Fulfill(playwright.RouteFulfillOptions{
+			Status: playwright.Int(200), ContentType: playwright.String("application/json"),
+			Body: `{"roots":[{"path":"/media","writable":false,"ui":false}],"uploadEnabled":false,"allowUIPaths":false,"maxUpload":1048576,"scanning":false,"files":[],"scanErrors":[]}`,
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	openLibrary(t, s, url)
 	if err := expect().Locator(s.page.Locator("#drop")).ToHaveCount(0); err != nil {
 		t.Fatal("upload area shown although uploads are disabled")
@@ -932,6 +927,71 @@ func TestAppLibraryHidesDisabledControlsWithAReason(t *testing.T) {
 	}
 	if err := expect().Locator(s.page.Locator("#panel-library")).ToContainText("Adding paths is off"); err != nil {
 		t.Fatalf("no reason for the missing path form: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppLibraryFilterChipKeepsKeyboardFocus(t *testing.T) {
+	lib, _ := libraryFixture(t, library.Options{})
+	if err := lib.Scan(context.Background(), "", false); err != nil {
+		t.Fatal(err)
+	}
+	url, _ := appServer(t, appOpts{lib: lib})
+	s := newSession(t)
+	openLibrary(t, s, url)
+	chip := s.page.Locator(`.stat[data-f="invalid"]`)
+	if err := expect().Locator(chip).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	if err := chip.Focus(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.page.Keyboard().Press("Enter"); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(s.page.Locator("#files tbody tr")).ToHaveCount(1); err != nil {
+		t.Fatalf("keyboard activation did not filter: %v", err)
+	}
+	cls, err := s.page.Evaluate(`document.activeElement.className + "|" + document.activeElement.dataset.f`)
+	if err != nil || cls != "stat|invalid" {
+		t.Fatalf("focus left the chip after filtering: %v err=%v", cls, err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppLibraryUploadsSeveralFilesOneAfterAnother(t *testing.T) {
+	lib, err := library.New(library.Options{Roots: []string{t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	url, _ := appServer(t, appOpts{lib: lib})
+	s := newSession(t)
+	openLibrary(t, s, url)
+	dir := t.TempDir()
+	var paths []string
+	for _, n := range []string{"one.ts", "two.ts", "three.ts"} {
+		p := filepath.Join(dir, n)
+		if err := os.WriteFile(p, fixture.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	var gets atomic.Int32
+	s.page.On("request", func(r playwright.Request) {
+		if r.Method() == "GET" && strings.HasSuffix(r.URL(), "/api/v1/library") {
+			gets.Add(1)
+		}
+	})
+	if err := s.page.Locator("#file-input").SetInputFiles(paths); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"one.ts", "two.ts", "three.ts"} {
+		if err := expect().Locator(libRow(s, "uploads/"+n).Locator(".status")).ToHaveText("Valid"); err != nil {
+			t.Fatalf("%s not listed: %v", n, err)
+		}
+	}
+	if n := gets.Load(); n != 0 {
+		t.Fatalf("upload re-fetched the library %d times; the response already carries the report", n)
 	}
 	s.requireCleanApp(t)
 }
