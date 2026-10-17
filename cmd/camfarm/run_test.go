@@ -97,6 +97,28 @@ func TestRunServesTheDashboardAndShutsDownCleanly(t *testing.T) {
 	}
 }
 
+func TestRunServesHostMetrics(t *testing.T) {
+	url, stop, _ := start(t, "--http-addr", "127.0.0.1:0", "--cameras", "1", "--seed", "7")
+	resp, err := http.Get(url + "/api/v1/metrics")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := got["time"]; !ok {
+		t.Fatalf("no time field in %v", got)
+	}
+	if err := stop(); err != nil {
+		t.Fatalf("run returned %v on shutdown, want nil", err)
+	}
+}
+
 var seedRe = regexp.MustCompile(`seed=(0x[0-9a-f]+)`)
 
 func TestRunDrawsASeedWhenNoneIsGiven(t *testing.T) {

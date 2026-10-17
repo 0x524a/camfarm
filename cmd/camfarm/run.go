@@ -19,6 +19,7 @@ import (
 
 	"github.com/0x524a/camfarm"
 	"github.com/0x524a/camfarm/internal/dashboard"
+	"github.com/0x524a/camfarm/internal/hostmetrics"
 	"github.com/0x524a/camfarm/internal/library"
 	"github.com/0x524a/camfarm/internal/quality"
 )
@@ -184,6 +185,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	// cancelled before the cameras they read from go away.
 	qr := quality.New(quality.Options{})
 	defer qr.Close()
+	// Samples only while watched: an events client that asked for metrics=1, or
+	// a recent /api/v1/metrics request. Otherwise it does nothing.
+	hm := hostmetrics.New(hostmetrics.Options{})
+	defer hm.Close()
 
 	_, _ = fmt.Fprintln(stderr, fleet.ReplayLine())
 	if a := fleet.DiscoveryAddr(); a != "" {
@@ -201,7 +206,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	bctx, bcancel := context.WithCancel(context.Background())
 	defer bcancel()
 	srv := &http.Server{
-		Handler:           dashboard.Handler(fleet, dashboard.Options{Library: lib, Quality: qr}),
+		Handler:           dashboard.Handler(fleet, dashboard.Options{Library: lib, Quality: qr, Metrics: hm}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second, // bounds slow request bodies; SSE is response-only
 		IdleTimeout:       60 * time.Second,

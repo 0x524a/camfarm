@@ -19,6 +19,7 @@ import (
 
 	"github.com/0x524a/camfarm"
 	"github.com/0x524a/camfarm/internal/fault"
+	"github.com/0x524a/camfarm/internal/hostmetrics"
 	"github.com/0x524a/camfarm/internal/library"
 	"github.com/0x524a/camfarm/internal/media"
 	"github.com/0x524a/camfarm/internal/quality"
@@ -36,6 +37,8 @@ type Options struct {
 	Library *library.Library
 	// Quality, when non-nil, enables the stream quality endpoints. The caller closes it.
 	Quality *quality.Runner
+	// Metrics, when non-nil, enables GET /api/v1/metrics and the "metrics" event. The caller closes it.
+	Metrics *hostmetrics.Sampler
 }
 
 //go:embed web
@@ -48,6 +51,7 @@ type server struct {
 	snap    *snapshotter
 	lib     *library.Library
 	quality *quality.Runner
+	metrics *hostmetrics.Sampler
 	// libMu makes "is this library file in use?" and "use this library file"
 	// atomic with respect to each other: held by deleteFile across its in-use
 	// check and Delete, and by addCamera across Refresh and AddCamera. Refresh
@@ -59,7 +63,7 @@ type server struct {
 
 // Handler returns the dashboard for a fleet.
 func Handler(f *camfarm.Fleet, opt Options) http.Handler {
-	s := &server{fleet: f, snap: newSnapshotter(opt), lib: opt.Library, quality: opt.Quality}
+	s := &server{fleet: f, snap: newSnapshotter(opt), lib: opt.Library, quality: opt.Quality, metrics: opt.Metrics}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/fleet", s.getFleet)
 	mux.HandleFunc("GET /api/v1/cameras", s.listCameras)
@@ -72,6 +76,7 @@ func Handler(f *camfarm.Fleet, opt Options) http.Handler {
 	mux.HandleFunc("POST /api/v1/cameras/{id}/quality", sameOrigin(s.startQuality))
 	mux.HandleFunc("GET /api/v1/cameras/{id}/quality", s.getQuality)
 	mux.HandleFunc("DELETE /api/v1/cameras/{id}/quality", sameOrigin(s.cancelQuality))
+	mux.HandleFunc("GET /api/v1/metrics", s.getMetrics)
 	mux.HandleFunc("GET /api/v1/faults", s.getFaultCatalogue)
 	mux.HandleFunc("GET /api/v1/events", s.events)
 	mux.HandleFunc("GET /api/v1/library", s.getLibrary)

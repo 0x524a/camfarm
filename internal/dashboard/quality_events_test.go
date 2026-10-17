@@ -17,9 +17,15 @@ import (
 // sseFrames connects to /api/v1/events and delivers (event, data) pairs.
 func sseFrames(t *testing.T, base string) <-chan [2]string {
 	t.Helper()
+	return sseFramesAt(t, base+"/api/v1/events")
+}
+
+// sseFramesAt is sseFrames for a full events URL, query string included.
+func sseFramesAt(t *testing.T, url string) <-chan [2]string {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	req, _ := http.NewRequestWithContext(ctx, "GET", base+"/api/v1/events", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
