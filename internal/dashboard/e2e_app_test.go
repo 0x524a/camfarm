@@ -617,3 +617,66 @@ func TestAppFaultDrawerClosesWhenItsCameraIsRemoved(t *testing.T) {
 	}
 	s.requireCleanApp(t)
 }
+
+func TestAppStreamQualityRunsAndShowsTheResult(t *testing.T) {
+	url, _ := appServer(t, appOpts{quality: true})
+	s := newSession(t)
+	s.openApp(t, url)
+	card := s.camCard("front-door")
+	mustClick(t, card.Locator(".btn-quality"))
+	if err := expect().Locator(card.Locator(".qbox")).ToContainText("testing"); err != nil {
+		t.Fatalf("no running state: %v", err)
+	}
+	// The default window is 5 s.
+	res := card.Locator(".qres.done")
+	if err := expect().Locator(res).ToBeVisible(playwright.LocatorAssertionsToBeVisibleOptions{Timeout: playwright.Float(30000)}); err != nil {
+		t.Fatalf("result never appeared: %v", err)
+	}
+	for _, label := range []string{"Frame rate", "Bitrate", "Jitter", "Packet loss", "Keyframe every"} {
+		if err := expect().Locator(res).ToContainText(label); err != nil {
+			t.Errorf("result lacks %q: %v", label, err)
+		}
+	}
+	if err := expect().Locator(res.Locator(".pill").First()).ToHaveText(regexp.MustCompile(`(?i)healthy|warnings|errors`)); err != nil {
+		t.Errorf("no verdict pill: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppStreamQualityCanBeCancelled(t *testing.T) {
+	url, _ := appServer(t, appOpts{quality: true})
+	s := newSession(t)
+	s.openApp(t, url)
+	card := s.camCard("front-door")
+	mustClick(t, card.Locator(".btn-quality"))
+	cancel := card.Locator(".btn-quality-cancel")
+	if err := expect().Locator(cancel).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	mustClick(t, cancel)
+	if err := expect().Locator(card.Locator(".qbox")).Not().ToContainText("testing"); err != nil {
+		t.Fatalf("still shows testing after cancel: %v", err)
+	}
+	if err := expect().Locator(card.Locator(".btn-quality")).ToBeEnabled(); err != nil {
+		t.Fatal(err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppStreamQualityButtonIsAbsentWhenNotEnabled(t *testing.T) {
+	url, _ := appServer(t, appOpts{quality: false})
+	s := newSession(t)
+	s.openApp(t, url)
+	if err := expect().Locator(s.camCard("front-door")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	// The probe settles asynchronously; give it a moment before counting.
+	time.Sleep(500 * time.Millisecond)
+	for _, sel := range []string{".btn-quality", ".btn-quality-cancel"} {
+		n, err := s.camCard("front-door").Locator(sel).Count()
+		if err != nil || n != 0 {
+			t.Fatalf("%s present although the server has quality disabled (n=%d err=%v)", sel, n, err)
+		}
+	}
+	s.requireCleanApp(t)
+}

@@ -56,6 +56,20 @@ export function mount(root, ctx) {
     }
   }
 
+  // One probe decides whether the server runs quality tests: "not enabled" is a
+  // 404 whose error text says so; "no result yet" is a 404 with other text. The
+  // in-flight promise is cached so N cards cause a single request.
+  let qualityProbe = null;
+  function probeQuality(id) {
+    if (!qualityProbe) {
+      qualityProbe = api.getQuality(id).then(
+        () => true,
+        (e) => !/not enabled/i.test((e && e.message) || ""),
+      );
+    }
+    return qualityProbe;
+  }
+
   function buildCard(cam) {
     const id = cam.id;
     const img = el("img", { class: "snap", alt: "Snapshot of " + id, hidden: true });
@@ -130,12 +144,97 @@ export function mount(root, ctx) {
         }
       },
       destroy() {
+        clearInterval(ticker);
         const url = blobs.get(id);
         if (url) URL.revokeObjectURL(url);
         blobs.delete(id);
       },
     };
     card.update(cam);
+
+    // Stream quality. The buttons join the actions row only once the probe says
+    // the server supports it; otherwise they never exist in the DOM.
+    const qBtn = el("button", { type: "button", class: "sm btn-quality", text: "Test stream quality" });
+    const qCancel = el("button", { type: "button", class: "ghost sm btn-quality-cancel", text: "Cancel test", hidden: true });
+    let ticker = 0;
+
+    function qRender() {
+      const run = store.get().quality[id];
+      clearInterval(ticker);
+      qbox.replaceChildren();
+      qBtn.disabled = false;
+      qCancel.hidden = true;
+      if (!run) return;
+      const head = (label, cls) => el("div", { class: "row" }, [
+        el("strong", { text: "Stream quality" }), el("span", { class: "grow" }), el("span", { class: "pill " + cls, text: label }),
+      ]);
+      if (run.state === "running") {
+        qBtn.disabled = true;
+        qCancel.hidden = false;
+        const fill = el("div", { class: "bar-fill" });
+        qbox.append(el("div", { class: "qres" }, [head("testing…", "run"), el("div", { class: "bar-track" }, [fill])]));
+        const total = ((run.request && run.request.durationSeconds) || 5) * 1000;
+        const started = Date.parse(run.startedAt) || Date.now();
+        const tick = () => { fill.style.width = Math.min(100, ((Date.now() - started) / total) * 100) + "%"; };
+        tick();
+        ticker = setInterval(tick, 250);
+        return;
+      }
+      if (run.state === "failed") {
+        qbox.append(el("div", { class: "qres failed" }, [head("failed", "bad"), el("div", { text: run.error || "The test failed." })]));
+        return;
+      }
+      const a = run.analysis || { tracks: [], findings: [] };
+      const v = (a.tracks || []).find((t) => t.type === "video") || (a.tracks || [])[0] || {};
+      const fr = v.frames || {};
+      const num = (x, d, unit) => (typeof x === "number" && Number.isFinite(x) ? x.toFixed(d) + unit : "-");
+      const verdict = { ok: ["healthy", "ok"], warn: ["warnings", "warn"], error: ["errors", "bad"] }[run.verdict] || ["done", ""];
+      const dl = el("dl", {}, [
+        ["Frame rate", num(fr.fps, 1, " fps")],
+        ["Bitrate", num(v.bitrate_kbps, 0, " kb/s")],
+        ["Jitter", num(v.jitter_ms, 1, " ms")],
+        ["Packet loss", num(v.loss_percent, 2, " %")],
+        ["Keyframe every", fr.keyframe_interval_ms ? num(fr.keyframe_interval_ms / 1000, 1, " s") : "-"],
+        ["Frames", typeof fr.frames === "number" ? String(fr.frames) : "-"],
+      ].map(([k, val]) => el("div", {}, [el("dt", { text: k }), el("dd", { text: val })])));
+      const findings = (a.findings || []).filter((f) => f.severity !== "info");
+      qbox.append(el("div", { class: "qres done" }, [
+        head(verdict[0], verdict[1]),
+        dl,
+        findings.length ? el("ul", {}, findings.map((f) => el("li", { text: f.message }))) : null,
+      ]));
+    }
+    card.qRender = qRender;
+
+    qBtn.addEventListener("click", async () => {
+      qBtn.disabled = true;
+      try {
+        const run = await api.startQuality(id, {});
+        store.set({ quality: { ...store.get().quality, [id]: run } });
+      } catch (e) {
+        fail(e);
+        qBtn.disabled = false;
+      }
+    });
+    qCancel.addEventListener("click", async () => {
+      qCancel.disabled = true;
+      try {
+        await api.cancelQuality(id);
+        const run = await api.getQuality(id);
+        store.set({ quality: { ...store.get().quality, [id]: run } });
+      } catch (e) {
+        fail(e);
+      } finally {
+        qCancel.disabled = false;
+      }
+    });
+    probeQuality(id).then((on) => {
+      if (!on) return;
+      const spacer = actions.querySelector(".grow");
+      actions.insertBefore(qBtn, spacer);
+      actions.insertBefore(qCancel, spacer);
+    });
+    qRender();
     return card;
   }
 
@@ -151,6 +250,14 @@ export function mount(root, ctx) {
         loadSnap(cam.id);
       } else {
         card.update(cam);
+      }
+      // Restore a finished result from before this page loaded, once per card.
+      const q = cam.quality;
+      if (q && q.state !== "running" && !store.get().quality[cam.id] && !card.restoring) {
+        card.restoring = true;
+        api.getQuality(cam.id).then((run) => {
+          store.set({ quality: { ...store.get().quality, [cam.id]: run } });
+        }).catch(() => {});
       }
     }
     for (const [id, card] of cards) {
@@ -239,6 +346,15 @@ export function mount(root, ctx) {
 
   store.subscribe((st, patch) => {
     if ("cameras" in patch) render(st.cameras);
+    if ("quality" in patch) for (const c of cards.values()) c.qRender();
+    if ("qualityEvent" in patch && st.qualityEvent) {
+      const ev = st.qualityEvent;
+      if (cards.has(ev.camera) && ev.state !== "running") {
+        api.getQuality(ev.camera).then((run) => {
+          store.set({ quality: { ...store.get().quality, [ev.camera]: run } });
+        }).catch(fail);
+      }
+    }
     if ("addRequest" in patch && st.addRequest) {
       const req = st.addRequest;
       store.set({ addRequest: null });
