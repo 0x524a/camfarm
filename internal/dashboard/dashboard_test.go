@@ -288,52 +288,6 @@ func TestRootServesTheEmbeddedPage(t *testing.T) {
 	}
 }
 
-func TestEmbeddedPageCarriesTheTestHooks(t *testing.T) {
-	ts, _ := newServer(t, Options{})
-	resp := do(t, "GET", ts.URL+"/", "")
-	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(resp.Body)
-	page := buf.String()
-	// This only pins the construction patterns in the page source. The Task 10
-	// browser tests are the real contract for these hooks.
-	for _, hook := range []string{
-		`<code id="replay">`,
-		`<div id="error" role="alert"></div>`,
-		`<p id="conn" role="status">`,
-		`<form id="add-form"`,
-		`<input id="add-id" required`,
-		`<input id="add-user"`,
-		`<input id="add-pass"`,
-		`<select id="add-source">`,
-		`<option value="fixture">`,
-		`<option value="file">`,
-		`<input id="add-path"`,
-		`<button id="add-submit" type="submit">`,
-		`<table id="cameras">`,
-		`"data-id": c.id`,
-		`class: "btn-snapshot secondary"`,
-		`class: "btn-remove danger"`,
-		`class: "btn-fault"`,
-		`class: "btn-clear-fault secondary"`,
-		`class: "snapshot"`,
-		`class: "fault-kind"`,
-		`cls += " fault-rate"`,
-		`cls += " fault-protect"`,
-		`"data-param"`,
-		`class: "fault-hint"`,
-		`id="notice"`,
-		`class: "fault-active"`,
-		`class: "copy secondary", type: "button"`,
-		`"data-copy": value`,
-		`"cell-rtsp"`,
-		`"cell-onvif"`,
-	} {
-		if !strings.Contains(page, hook) {
-			t.Errorf("page is missing hook %q", hook)
-		}
-	}
-}
-
 func TestCancelledWaiterDoesNotCancelSharedCapture(t *testing.T) {
 	release := make(chan struct{})
 	capture, calls := capturing(release)
