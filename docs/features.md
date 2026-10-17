@@ -10,14 +10,14 @@ item lists what is not. Longer topics have their own pages: [dashboard](dashboar
   fragmented MP4 as sources, detected from content rather than filename; a
   bundled fixture per codec; media parsed once and shared across cameras;
   seed-derived per-camera RTP sequence numbers; inspection counters.
-- **Works:** an ONVIF® Device Service and Media Service control plane —
-  *not ONVIF conformant* (see the notice in the [README](../README.md#status)) — behind one HTTP listener, with HTTP
+- **Works:** an ONVIF® Device Service and Media Service control plane
+  (*not ONVIF conformant*, see the notice in the [README](../README.md#status)) behind one HTTP listener, with HTTP
   Digest authentication when a camera's spec sets credentials.
-- **Works:** a Go API for mutating a running fleet — `Fleet.AddCamera` starts a new camera (RTSP,
+- **Works:** a Go API for mutating a running fleet: `Fleet.AddCamera` starts a new camera (RTSP,
   and its ONVIF endpoint when the camera's spec sets credentials) without restarting the process,
   and `Fleet.RemoveCamera` stops and removes one. Both apply the same validation `Start` does, so a
   spec that would be refused at startup is refused here too.
-- **Works:** screenshots — `Camera.Screenshot(ctx)` returns one decoded frame
+- **Works:** screenshots: `Camera.Screenshot(ctx)` returns one decoded frame
   from a camera's live RTSP stream, and each camera serves it as a JPEG at
   `/onvif/{id}/snapshot` (behind Digest auth when credentialed), which
   `GetSnapshotUri` advertises. The capture dials the real RTSP wire and waits

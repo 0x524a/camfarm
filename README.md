@@ -64,7 +64,7 @@ CAMFARM_DOCS_SHOTS=$PWD/docs/assets go test -tags e2e -count=1 -run TestDocsScre
 
 ## Status
 
-Early. What works, in brief:
+No tagged release yet, so the Go API and the JSON API can still change. What works, in brief:
 
 - N RTSP cameras behind one listener, H.264 and H.265, from MPEG-TS, MP4 or fragmented MP4 sources.
 - An ONVIF® Device and Media control plane, and an opt-in WS-Discovery responder.
@@ -121,87 +121,41 @@ fmt.Println(cam.RTSPURL()) // rtsp://127.0.0.1:41569/front-door
 In a test, `camfarm.StartT(t, spec)` binds an ephemeral port, stays silent, and
 closes itself when the test ends.
 
-## Scope — what this does not do
+## Scope: what this does not do
 
 - **It simulates. It is not a conformance-tested implementation of anything, and
   it does not claim to be.** Testing a client against this farm tells you your
   client works against *this farm*. It does not tell you your client is correct
-  against real hardware, and it certainly does not tell you anything about your
-  own conformance to any specification.
-- **It does not transcode or rescale.** A camera serves whatever codec and
-  geometry its source already has. Serving H.265 means supplying an H.265
-  source, and serving 320×240 means supplying a 320×240 source. Both would need
-  an encoder, no viable pure-Go H.265 encoder exists, and cgo and a runtime
-  `ffmpeg` are both excluded by design. `VideoSpec` therefore describes the
-  output you expect and is refused when it disagrees with the source, rather
-  than transforming anything.
-- **Container support is deliberately narrow.** MPEG-TS, plain MP4, and
-  fragmented MP4, all H.264 or H.265 video only; audio tracks are ignored.
-  Matroska and MPEG-PS are not supported, and no pure-Go demuxer for either was
-  found to be production-ready. Fragmented MP4 additionally requires each `trun`
-  to carry a data-offset preset, so a producer using the base-data-offset
+  against real hardware, and it says nothing about your own conformance to any
+  specification.
+- **No transcoding or rescaling.** A camera serves the codec and geometry its source
+  already has; `VideoSpec` is refused when it disagrees with the source. Serving H.265
+  means supplying an H.265 source. An encoder would be needed, no viable pure-Go H.265
+  encoder exists, and cgo and a runtime `ffmpeg` are excluded by design.
+- **Narrow container support.** MPEG-TS, plain MP4 and fragmented MP4, H.264 or H.265
+  video only; audio is ignored. Matroska and MPEG-PS are not supported. Fragmented MP4
+  needs each `trun` to carry a data-offset preset; a producer using the base-data-offset
   convention is refused rather than mis-parsed.
-- **The ONVIF control plane covers two services only.** Device and Media —
-  enough for a client to discover a camera and get back its real RTSP URL.
-  PTZ and Imaging are not implemented: `GetCapabilities`/`GetServices` never
-  advertise them, so a conformant client should not expect them. A WS-Discovery responder
-  is available but opt-in (see below); with it off, a client must be given the ONVIF endpoint
-  directly (`Camera.ONVIFEndpoint()`). Each camera has a seed-derived endpoint UUID, returned by
-  `GetEndpointReference` as `urn:uuid:<uuid>` (served by `onvif-go`'s own handler) and shown bare
-  in the dashboard; the responder announces and answers with that same reference. The UUID is
-  version 4 shaped.
-- **WS-Discovery is a simulation, not a conformance-tested responder.** It is `onvif-go`'s
-  responder, which supports Probe/ProbeMatches with Types and Scopes filtering (rfc3986, strcmp0
-  and none match rules) plus Hello and Bye. It does not support Resolve/ResolveMatches, the ldap
-  and uuid scope rules (such a probe matches nothing), the 2009/01 (WS-Discovery 1.1) namespace,
-  or managed mode with a discovery proxy. A wildcard `listen.host` (`0.0.0.0`, `::`) is refused,
-  because the host is advertised in each camera's XAddr and a wildcard is not an address a client
-  can dial. Multicast mode also refuses a loopback `listen.host`, since it would advertise an
-  address no other machine can reach; use unicast mode for loopback. Multicast depends on the
-  network: it commonly does not work across Docker bridge networks, on CI runners, between network
-  namespaces, or through firewalls and IGMP-snooping switches, and nothing here detects that. CI
-  exercises **unicast mode only** for probe and announce behaviour. A test that starts the
-  responder in multicast mode (join, add and remove a camera, close) runs only where the host has
-  a non-loopback multicast-capable IPv4 interface and skips otherwise, and it does not check that
-  any packet is delivered. Multicast joins the
-  interface named by `--discovery-interface` (`interface` in the spec); when that is empty
-  and `listen.host` is a literal IP it defaults to the interface holding that IP, and with a
-  hostname it falls back to the system default-route interface. Containers on a bridge should need the
-  bridge's interface (reasoned from how multicast joins work, not tested). **On the same host as the fleet, multicast discovery with `onvif-go`'s
-  client (and other clients built on Go's `net.ListenMulticastUDP`) finds nothing and never sees
-  Hello or Bye**, because both sides disable `IP_MULTICAST_LOOP`. This was observed by hand on one Linux
-  machine (`onvif-go`'s client on the LAN interface found none of the fleet's cameras, while probing
-  via `lo` and a Python prober found them); no test covers it. On one host, use the loopback interface (`lo`), a client that leaves multicast loopback
-  on, or unicast mode. **Give each fleet on a shared network a distinct seed:** endpoint
-  references derive only from the seed (a spec file with no seed, and a zero-value library
-  `Spec`, use 0), so two fleets with the same seed advertise identical `urn:uuid:` references
-  with different XAddrs, and clients keep one entry per reference. Only the endpoint references
-  are seeded: WS-Discovery MessageIDs are random and the AppSequence InstanceId is wall-clock,
-  so discovery traffic is not byte-replayable, and reply timing is wall-clock. Enabling
-  discovery changes the spec's hash, and so the replay line.
-- **The bundled video is a fixture, not a sample.** Two of them: a two-second
-  synthetic test pattern at 320×240 in H.264, and its H.265 counterpart, both
-  generated by `scripts/gen-fixture.sh`. They exist so that tests need no media
-  sourced before they run. Neither is representative of real camera output in
-  bitrate, motion, noise, or encoder behaviour.
-- **Determinism has stated limits.** The decision sequence is reproducible from a
-  seed; wall-clock timings are not, because serving a real client happens in real
-  time. Two specific carve-outs:
-  - **RTP SSRC is not reproducible.** The underlying RTSP library assigns each
-    stream its own SSRC and overwrites whatever the encoder set, so SSRC is
-    excluded from replay assertions. Sequence numbers *are* reproducible.
-  - **A live upstream source is outside the guarantee.** Not implemented in this
-    version; when it is, its bytes will differ run to run, so only the fault
-    *decisions* over it will be reproducible, not the media.
-- **No network-path impairment.** Bandwidth ceilings, reordering and real
-  network-path effects are properties of the path, not of the sender; they need
-  `tc`/`netem` and elevated privileges, and they are not reproducible from a
-  seed. `packet_loss` is a *sender-side simulation* of loss (the camera chooses
-  not to write packets), not a network impairment. CamFarm owns only what a
-  camera itself chooses not to send, or sends late.
-- **Not a benchmark result.** No cameras-per-core or memory-per-camera figure is
-  published, because none has been measured yet. When one is, it will come from a
-  committed benchmark, not an estimate.
+- **ONVIF: Device and Media services only.** Enough for a client to discover a camera and
+  get its real RTSP URL. PTZ and Imaging are not implemented, and
+  `GetCapabilities`/`GetServices` never advertise them. WS-Discovery is opt-in and is also
+  a simulation; its limits, including how multicast behaves on real networks, are in
+  [docs/discovery.md](docs/discovery.md). With discovery off, a client is given the ONVIF
+  endpoint directly (`Camera.ONVIFEndpoint()`).
+- **The bundled video is a fixture, not a sample.** A two-second 320×240 test pattern in
+  H.264 and its H.265 counterpart, generated by `scripts/gen-fixture.sh`. Neither is
+  representative of real camera bitrate, motion, noise or encoder behaviour.
+- **Determinism has limits.** The decision sequence is reproducible from a seed;
+  wall-clock timing is not, because serving a real client happens in real time. RTP SSRC
+  is not reproducible (the RTSP library assigns it), so replay assertions exclude it;
+  sequence numbers are reproducible. A live upstream source, not implemented yet, would be
+  outside the guarantee.
+- **No network-path impairment.** Bandwidth ceilings, reordering and other path effects
+  need `tc`/`netem` and elevated privileges, and cannot be reproduced from a seed.
+  `packet_loss` is a sender-side simulation (the camera chooses not to write packets).
+  CamFarm owns only what a camera itself chooses not to send, or sends late.
+- **Not a benchmark.** No cameras-per-core or memory-per-camera figure is published,
+  because none has been measured. When one is, it will come from a committed benchmark.
 
 ## Requirements
 
