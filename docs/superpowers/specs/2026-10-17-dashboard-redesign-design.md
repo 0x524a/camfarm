@@ -106,8 +106,8 @@ quality and Remove.
 - The add form offers a library file (valid files; files with warnings marked), a plain
   path where the server allows it, or the bundled fixture. "Use for camera" in the
   Library tab opens this form with the file preselected, sending `libraryId`.
-- The quality result panel shows verdict, frame rate, bitrate, jitter, gaps, keyframe
-  interval and time to first frame, or the error text of a failed run. While running it
+- The quality result panel shows verdict, frame rate, bitrate, jitter, packet loss, keyframe
+  interval and frame count (the fields rtspeek v1.0.0 reports), or the error text of a failed run. While running it
   shows progress and a Cancel button.
 
 ### Library tab

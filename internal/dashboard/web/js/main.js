@@ -26,6 +26,7 @@ const CONN = {
   connecting: ["connecting…", ""],
   ok: ["connected", "ok"],
   lost: ["disconnected, retrying", "bad"],
+  closed: ["disconnected", "bad"], // the stream was refused and the browser will not retry
 };
 store.subscribe((st, patch) => {
   if ("conn" in patch) {
@@ -62,6 +63,8 @@ const initial = location.hash.slice(1);
 selectTab(tabs.some((t) => t.dataset.tab === initial) ? initial : "cameras", false);
 
 // --- data refresh ---
+let es = null;
+const lostState = () => (es && es.readyState === EventSource.CLOSED ? "closed" : "lost");
 let seq = 0, applied = 0;
 async function refreshCameras() {
   const my = ++seq;
@@ -69,9 +72,10 @@ async function refreshCameras() {
     const cams = await api.cameras();
     if (my < applied) return; // an older response must not overwrite a newer one
     applied = my;
-    store.set({ cameras: cams, conn: "ok" });
+    // A refresh alone does not prove the live stream is up.
+    store.set(es && es.readyState === EventSource.OPEN ? { cameras: cams, conn: "ok" } : { cameras: cams });
   } catch (_) {
-    if (my >= applied) store.set({ conn: "lost" }); // an older failure must not undo a newer success
+    if (my >= applied) store.set({ conn: lostState() }); // an older failure must not undo a newer success
   }
 }
 async function refreshReplay() {
@@ -94,7 +98,7 @@ mountMetrics($("#metrics"), ctx);
 
 // --- event stream ---
 if (window.EventSource) {
-  const es = new EventSource("/api/v1/events?metrics=1");
+  es = new EventSource("/api/v1/events?metrics=1");
   ["camera_added", "camera_removed", "fault_injected", "fault_cleared"].forEach((t) => es.addEventListener(t, refreshSoon));
   es.addEventListener("metrics", (e) => store.set({ metrics: JSON.parse(e.data) }));
   es.addEventListener("quality", (e) => store.set({ qualityEvent: JSON.parse(e.data) }));
@@ -103,7 +107,7 @@ if (window.EventSource) {
     refreshCameras();
     refreshReplay();
   };
-  es.onerror = () => store.set({ conn: "lost" });
+  es.onerror = () => store.set({ conn: lostState() });
 } else {
   store.set({ conn: "lost" });
 }

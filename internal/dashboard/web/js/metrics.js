@@ -81,7 +81,7 @@ export function mount(root, ctx) {
 
   store.subscribe((st, patch) => {
     if ("metrics" in patch && st.metrics && enabled) render(st.metrics);
-    if ("conn" in patch) setStale(st.conn === "lost");
+    if ("conn" in patch) setStale(st.conn === "lost" || st.conn === "closed");
   });
 
   // First paint: a sample from the endpoint, so the strip is never empty while

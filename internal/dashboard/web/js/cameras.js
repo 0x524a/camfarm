@@ -34,6 +34,20 @@ export function mount(root, ctx) {
   const cards = new Map(); // id -> {el, update(cam), destroy()}
   const blobs = new Map(); // id -> object URL currently shown
 
+  // Quality entries are keyed by camera id, and ids such as "constructor" are
+  // legal, so every lookup is an own-property lookup.
+  const qOf = (id) => {
+    const q = store.get().quality;
+    return Object.hasOwn(q, id) ? q[id] : undefined;
+  };
+  const setQ = (id, run) => store.set({ quality: { ...store.get().quality, [id]: run } });
+  const dropQ = (id) => {
+    if (!Object.hasOwn(store.get().quality, id)) return;
+    const rest = { ...store.get().quality };
+    delete rest[id];
+    store.set({ quality: rest });
+  };
+
   // Snapshots load one at a time: each costs the server a frame decode.
   let chain = Promise.resolve();
   function loadSnap(id) {
@@ -145,6 +159,7 @@ export function mount(root, ctx) {
       },
       destroy() {
         clearInterval(ticker);
+        dropQ(id); // a camera re-added under this id must not inherit the old run
         const url = blobs.get(id);
         if (url) URL.revokeObjectURL(url);
         blobs.delete(id);
@@ -159,7 +174,7 @@ export function mount(root, ctx) {
     let ticker = 0;
 
     function qRender() {
-      const run = store.get().quality[id];
+      const run = qOf(id);
       clearInterval(ticker);
       qbox.replaceChildren();
       qBtn.disabled = false;
@@ -206,11 +221,39 @@ export function mount(root, ctx) {
     }
     card.qRender = qRender;
 
+    // qFetch reads the server's latest run into the store. One fetch runs at a
+    // time per card; a request that arrives meanwhile triggers a follow-up, so
+    // the last state seen is never lost. Failures are background noise.
+    let fetching = false, again = false, localStart = 0;
+    function qFetch() {
+      if (fetching) { again = true; return; }
+      fetching = true;
+      api.getQuality(id).then((run) => {
+        if (cards.get(id) === card) setQ(id, run);
+      }).catch(() => {}).finally(() => {
+        fetching = false;
+        if (again) { again = false; if (cards.get(id) === card) qFetch(); }
+      });
+    }
+    card.qFetch = qFetch;
+    // qSync reconciles the camera's summary with the store entry on every render.
+    card.qSync = (c) => {
+      const sum = c.quality, entry = qOf(id);
+      if (!sum) {
+        // A run started here moments ago may not be in the camera list yet.
+        const fresh = entry && entry.state === "running" && Date.now() - localStart < 3000;
+        if (entry && !fresh) dropQ(id);
+      } else if (!entry || entry.state !== sum.state) {
+        qFetch();
+      }
+    };
+
     qBtn.addEventListener("click", async () => {
       qBtn.disabled = true;
+      localStart = Date.now();
       try {
         const run = await api.startQuality(id, {});
-        store.set({ quality: { ...store.get().quality, [id]: run } });
+        setQ(id, run);
       } catch (e) {
         fail(e);
         qBtn.disabled = false;
@@ -221,7 +264,7 @@ export function mount(root, ctx) {
       try {
         await api.cancelQuality(id);
         const run = await api.getQuality(id);
-        store.set({ quality: { ...store.get().quality, [id]: run } });
+        setQ(id, run);
       } catch (e) {
         fail(e);
       } finally {
@@ -251,14 +294,7 @@ export function mount(root, ctx) {
       } else {
         card.update(cam);
       }
-      // Restore a finished result from before this page loaded, once per card.
-      const q = cam.quality;
-      if (q && q.state !== "running" && !store.get().quality[cam.id] && !card.restoring) {
-        card.restoring = true;
-        api.getQuality(cam.id).then((run) => {
-          store.set({ quality: { ...store.get().quality, [cam.id]: run } });
-        }).catch(() => {});
-      }
+      card.qSync(cam);
     }
     for (const [id, card] of cards) {
       if (!seen.has(id)) {
@@ -349,11 +385,8 @@ export function mount(root, ctx) {
     if ("quality" in patch) for (const c of cards.values()) c.qRender();
     if ("qualityEvent" in patch && st.qualityEvent) {
       const ev = st.qualityEvent;
-      if (cards.has(ev.camera) && ev.state !== "running") {
-        api.getQuality(ev.camera).then((run) => {
-          store.set({ quality: { ...store.get().quality, [ev.camera]: run } });
-        }).catch(fail);
-      }
+      const card = cards.get(ev.camera);
+      if (card) card.qFetch();
     }
     if ("addRequest" in patch && st.addRequest) {
       const req = st.addRequest;

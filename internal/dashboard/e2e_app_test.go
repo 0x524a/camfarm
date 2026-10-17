@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -343,6 +344,10 @@ func TestAppCameraIDsAreTextAndPrototypeNamesWork(t *testing.T) {
 	n, err := s.page.Locator("#cam-grid b").Count()
 	if err != nil || n != 0 {
 		t.Fatalf("markup in an id was parsed as HTML (%d <b> elements, err=%v)", n, err)
+	}
+	// Inherited object keys must not look like stored quality results.
+	if n, err := s.page.Locator("#cam-grid .qres, #cam-grid .qbox > *").Count(); err != nil || n != 0 {
+		t.Fatalf("a quality panel appeared without any test (n=%d err=%v)", n, err)
 	}
 	card := s.camCard("constructor")
 	mustClick(t, card.Locator(".btn-remove"))
@@ -1492,4 +1497,142 @@ func TestAppEnumSelectKindsRenderInBothColourSchemes(t *testing.T) {
 		}
 		s.requireCleanApp(t)
 	}
+}
+
+// startQualityOutsidePage starts a test the way another tab or client would.
+func startQualityOutsidePage(t *testing.T, url, id string) {
+	t.Helper()
+	resp, err := http.Post(url+"/api/v1/cameras/"+id+"/quality", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		t.Fatalf("starting a quality test: status %d", resp.StatusCode)
+	}
+}
+
+func TestAppRunningQualityTestAtLoadShowsProgressAndCancel(t *testing.T) {
+	url, _ := appServer(t, appOpts{quality: true})
+	startQualityOutsidePage(t, url, "front-door")
+	s := newSession(t)
+	s.openApp(t, url)
+	card := s.camCard("front-door")
+	if err := expect().Locator(card.Locator(".qbox")).ToContainText("testing"); err != nil {
+		t.Fatalf("a run already in progress is not shown: %v", err)
+	}
+	cancel := card.Locator(".btn-quality-cancel")
+	if err := expect().Locator(cancel).ToBeVisible(); err != nil {
+		t.Fatalf("no Cancel for a run started elsewhere: %v", err)
+	}
+	mustClick(t, cancel)
+	if err := expect().Locator(card.Locator(".qbox")).Not().ToContainText("testing"); err != nil {
+		t.Fatalf("still testing after cancel: %v", err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppRunStartedElsewhereAfterLoadAppears(t *testing.T) {
+	url, _ := appServer(t, appOpts{quality: true})
+	s := newSession(t)
+	s.openApp(t, url)
+	card := s.camCard("front-door")
+	if err := expect().Locator(card.Locator(".btn-quality")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	startQualityOutsidePage(t, url, "front-door")
+	if err := expect().Locator(card.Locator(".btn-quality-cancel")).ToBeVisible(); err != nil {
+		t.Fatalf("a running event did not show Cancel: %v", err)
+	}
+	mustClick(t, card.Locator(".btn-quality-cancel"))
+	s.requireCleanApp(t)
+}
+
+func TestAppReAddedCameraDoesNotInheritTheOldQualityRun(t *testing.T) {
+	url, f := appServer(t, appOpts{quality: true})
+	s := newSession(t)
+	s.openApp(t, url)
+	card := s.camCard("front-door")
+	if err := expect().Locator(card.Locator("img.snap")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	mustClick(t, card.Locator(".btn-quality"))
+	if err := expect().Locator(card.Locator(".qbox")).ToContainText("testing"); err != nil {
+		t.Fatal(err)
+	}
+	// Removing through the dashboard also makes the server forget the run.
+	mustClick(t, card.Locator(".btn-remove"))
+	mustClick(t, card.Locator(".btn-remove-confirm"))
+	if err := expect().Locator(s.camCard("front-door")).ToHaveCount(0); err != nil {
+		t.Fatalf("camera card stayed: %v", err)
+	}
+	if _, err := f.AddCamera(camfarm.CameraSpec{ID: "front-door"}); err != nil {
+		t.Fatal(err)
+	}
+	card = s.camCard("front-door")
+	if err := expect().Locator(card.Locator(".btn-quality")).ToBeEnabled(); err != nil {
+		t.Fatalf("the re-added camera inherited a running test: %v", err)
+	}
+	if n, err := card.Locator(".qres").Count(); err != nil || n != 0 {
+		t.Fatalf("the re-added camera shows an old result (n=%d err=%v)", n, err)
+	}
+	if err := expect().Locator(card.Locator("img.snap")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppDrawerErrorIsVisibleInsideTheDrawerAtNarrowWidth(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	if err := s.page.SetViewportSize(400, 800); err != nil {
+		t.Fatal(err)
+	}
+	s.openApp(t, url)
+	s.openDrawer(t, "front-door")
+	selectKind(t, s.page.Locator("#fault-kind"), "pts_delayed")
+	mustClick(t, s.page.Locator("#fault-apply"))
+	alert := s.page.Locator(`#drawer [role="alert"]`)
+	if err := expect().Locator(alert).ToContainText("delayMs"); err != nil {
+		t.Fatalf("the error is not shown in the drawer: %v", err)
+	}
+	if err := expect().Locator(alert).ToBeInViewport(); err != nil {
+		t.Fatalf("the drawer error is outside the viewport: %v", err)
+	}
+	s.requireCleanApp(t, 422)
+}
+
+func TestAppPillSaysDisconnectedWhenTheStreamIsRefused(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	if err := s.page.Route("**/api/v1/events*", func(r playwright.Route) {
+		_ = r.Fulfill(playwright.RouteFulfillOptions{Status: playwright.Int(500), ContentType: playwright.String("text/plain"), Body: "no"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.openApp(t, url)
+	if err := expect().Locator(s.camCard("front-door")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(s.page.Locator("#conn")).ToHaveText("disconnected"); err != nil {
+		t.Fatalf("a refused stream is not retried, so the pill must not say so: %v", err)
+	}
+	s.requireCleanApp(t, 500)
+}
+
+func TestAppGridFitsAVeryNarrowViewport(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	if err := s.page.SetViewportSize(300, 700); err != nil {
+		t.Fatal(err)
+	}
+	s.openApp(t, url)
+	if err := expect().Locator(s.camCard("front-door")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	fits, err := s.page.Evaluate(`document.documentElement.scrollWidth <= document.documentElement.clientWidth`)
+	if err != nil || fits != true {
+		t.Fatalf("the page scrolls horizontally at 300px (fits=%v err=%v)", fits, err)
+	}
+	s.requireCleanApp(t)
 }

@@ -5,10 +5,23 @@ export function mount(drawer, ctx) {
   let opener = null; // the element that opened the drawer, for returning focus
   let busy = false; // an Apply or Clear is in flight; the focused button is never disabled
   const page = document.querySelector("main");
+  let loadErr = ""; // why the catalogue could not be loaded, shown inside the drawer
+
+  // The page-level #error sits under the inert <main> while the drawer is open
+  // (and under the drawer on a narrow screen), so errors also appear in the drawer.
+  function drawerFail(e) {
+    const box = drawer.querySelector(".drawer-error");
+    if (box) box.textContent = e && e.message ? e.message : String(e);
+    fail(e);
+  }
+  function drawerOk() {
+    const box = drawer.querySelector(".drawer-error");
+    if (box) box.textContent = "";
+  }
 
   async function ensureCatalogue() {
     if (store.get().catalogue.length) return;
-    try { store.set({ catalogue: await api.catalogue() }); } catch (e) { fail(e); }
+    try { loadErr = ""; store.set({ catalogue: await api.catalogue() }); } catch (e) { loadErr = e && e.message ? e.message : String(e); fail(e); }
   }
 
   function paramInput(p) {
@@ -83,7 +96,8 @@ export function mount(drawer, ctx) {
       try {
         await api.injectFault(id, spec);
         store.set({ error: "", cameras: await api.cameras() });
-      } catch (e) { fail(e); } finally { busy = false; apply.removeAttribute("aria-disabled"); }
+        drawerOk();
+      } catch (e) { drawerFail(e); } finally { busy = false; apply.removeAttribute("aria-disabled"); }
     });
     clear.addEventListener("click", async () => {
       if (busy) return;
@@ -92,11 +106,13 @@ export function mount(drawer, ctx) {
       try {
         await api.clearFaults(id);
         store.set({ error: "", cameras: await api.cameras() });
-      } catch (e) { fail(e); } finally { busy = false; clear.removeAttribute("aria-disabled"); }
+        drawerOk();
+      } catch (e) { drawerFail(e); } finally { busy = false; clear.removeAttribute("aria-disabled"); }
     });
 
     drawer.replaceChildren(
       el("div", { class: "row" }, [el("h2", { id: "drawer-title", text: "Faults on " + id }), el("span", { class: "grow" }), closeBtn]),
+      el("div", { class: "drawer-error", role: "alert" }),
       active,
       el("label", {}, ["Kind", kind]),
       models, params,
@@ -130,6 +146,7 @@ export function mount(drawer, ctx) {
         if (!render(id)) return;
         drawer.hidden = false;
         if (page) page.inert = true;
+        if (loadErr) drawer.querySelector(".drawer-error").textContent = loadErr;
         const first = drawer.querySelector("#fault-kind");
         if (first) first.focus();
       } else {
