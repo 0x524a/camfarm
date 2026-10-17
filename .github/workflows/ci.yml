@@ -294,3 +294,41 @@ jobs:
           name: dashboard-screenshots
           path: ${{ runner.temp }}/docs-shots
           if-no-files-found: warn
+
+  # Builds the image and talks to the running container the way a user would:
+  # the dashboard JSON must advertise the published address, and ffprobe must
+  # read a stream through the published RTSP port. Multicast discovery is not
+  # exercised (see docs/docker.md).
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: build image
+        run: docker build -t camfarm:ci .
+
+      - name: run and probe
+        run: |
+          docker run -d --name camfarm \
+            -p 127.0.0.1:8080:8080 -p 127.0.0.1:8554:8554 -p 127.0.0.1:8000:8000 \
+            camfarm:ci
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/api/v1/cameras >cameras.json && break
+            sleep 1
+          done
+          cat cameras.json
+          grep -q "rtsp://127.0.0.1:8554/cam-1" cameras.json
+          grep -q "http://127.0.0.1:8000/onvif/cam-1" cameras.json
+          ffprobe -v error -rtsp_transport tcp -show_entries stream=codec_name,width,height \
+            -of default=nw=1 rtsp://127.0.0.1:8554/cam-1 | tee probe.txt
+          grep -q "codec_name=h264" probe.txt
+
+      - name: container log
+        if: always()
+        run: docker logs camfarm

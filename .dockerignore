@@ -1,0 +1,11 @@
+.git
+.github
+.claude
+.superpowers
+.serena
+docs
+*.md
+!README.md
+CLAUDE.local.md
+Dockerfile
+.dockerignore
