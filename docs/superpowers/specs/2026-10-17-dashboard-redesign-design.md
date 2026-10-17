@@ -45,6 +45,7 @@ All under `internal/dashboard/web/`, embedded with `go:embed`, served as static 
 | `app.css` | Tokens (light and dark), layout, components |
 | `js/api.js` | `fetch` wrapper and error normalisation; the only module that knows URLs |
 | `js/state.js` | Small store (cameras, library, metrics, catalogue) with subscribe |
+| `js/dom.js` | Element builder, number and byte formatters, sparkline, clipboard helper |
 | `js/metrics.js` | Metrics strip |
 | `js/cameras.js` | Camera grid, thumbnails, add form, quality button and result |
 | `js/faults.js` | Fault drawer |
