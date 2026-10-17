@@ -422,3 +422,103 @@ func TestAppRefreshSnapshotButtonFetchesAgain(t *testing.T) {
 	}
 	s.requireCleanApp(t)
 }
+
+func TestAppFaultDrawerAppliesAndClearsFrameDrop(t *testing.T) {
+	url, f := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	card := s.camCard("front-door")
+	mustClick(t, card.Locator(".btn-faults"))
+	drawer := s.page.Locator("#drawer")
+	if err := expect().Locator(drawer).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(s.page.Locator("#drawer-title")).ToContainText("front-door"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.page.Locator("#fault-kind").SelectOption(playwright.SelectOptionValues{Values: &[]string{"frame_drop"}}); err != nil {
+		t.Fatal(err)
+	}
+	mustFill(t, s.page.Locator(`.fault-param[data-name="rate"]`), "0.5")
+	mustClick(t, s.page.Locator("#fault-apply"))
+	if err := expect().Locator(card.Locator(".chip").First()).ToContainText("frame_drop"); err != nil {
+		t.Fatalf("fault chip missing on the card: %v", err)
+	}
+	cam, _ := f.Camera("front-door")
+	if fs := cam.Faults(); len(fs) != 1 || fs[0].Kind != "frame_drop" || fs[0].Rate != 0.5 {
+		t.Fatalf("faults = %+v", fs)
+	}
+	if err := expect().Locator(drawer.Locator(".fault-active")).ToContainText("frame_drop"); err != nil {
+		t.Fatalf("active fault not listed in the drawer: %v", err)
+	}
+	mustClick(t, s.page.Locator("#fault-clear"))
+	if err := expect().Locator(card.Locator(".chip").First()).ToContainText("no faults"); err != nil {
+		t.Fatalf("faults not cleared on the card: %v", err)
+	}
+	if len(cam.Faults()) != 0 {
+		t.Fatal("clear did not clear")
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppFaultDrawerFocusAndEscape(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	open := s.camCard("front-door").Locator(".btn-faults")
+	mustClick(t, open)
+	if err := expect().Locator(s.page.Locator("#drawer")).ToBeVisible(); err != nil {
+		t.Fatal(err)
+	}
+	inside, err := s.page.Evaluate(`document.getElementById("drawer").contains(document.activeElement)`)
+	if err != nil || inside != true {
+		t.Fatalf("focus did not move into the drawer (inside=%v err=%v)", inside, err)
+	}
+	if err := s.page.Keyboard().Press("Escape"); err != nil {
+		t.Fatal(err)
+	}
+	if err := expect().Locator(s.page.Locator("#drawer")).ToBeHidden(); err != nil {
+		t.Fatal(err)
+	}
+	back, err := s.page.Evaluate(`document.activeElement && document.activeElement.classList.contains("btn-faults")`)
+	if err != nil || back != true {
+		t.Fatalf("focus did not return to the Faults button (back=%v err=%v)", back, err)
+	}
+	s.requireCleanApp(t)
+}
+
+func TestAppFaultDrawerShowsTheServerError(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	mustClick(t, s.camCard("front-door").Locator(".btn-faults"))
+	if _, err := s.page.Locator("#fault-kind").SelectOption(playwright.SelectOptionValues{Values: &[]string{"frame_drop"}}); err != nil {
+		t.Fatal(err)
+	}
+	mustFill(t, s.page.Locator(`.fault-param[data-name="rate"]`), "7")
+	mustClick(t, s.page.Locator("#fault-apply"))
+	if err := expect().Locator(s.page.Locator("#error")).Not().ToBeEmpty(); err != nil {
+		t.Fatalf("server validation error not shown: %v", err)
+	}
+	s.requireCleanApp(t, 422, 400)
+}
+
+func TestAppUnimplementedFaultKindsAreDisabled(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	mustClick(t, s.camCard("front-door").Locator(".btn-faults"))
+	n, err := s.page.Locator("#fault-kind option").Count()
+	if err != nil || n == 0 {
+		t.Fatalf("no kinds listed (n=%d err=%v)", n, err)
+	}
+	// Every option the server marks unimplemented must be disabled.
+	res, err := s.page.Evaluate(`fetch("/api/v1/faults").then(r => r.json()).then(c => c.filter(k => !k.implemented).every(k => {
+		const o = document.querySelector('#fault-kind option[value="' + k.kind + '"]');
+		return !o || o.disabled;
+	}))`)
+	if err != nil || res != true {
+		t.Fatalf("an unimplemented kind is selectable (res=%v err=%v)", res, err)
+	}
+	s.requireCleanApp(t)
+}

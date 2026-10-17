@@ -66,11 +66,13 @@ export function mount(root, ctx) {
     const chips = el("div", { class: "chips" });
     const qbox = el("div", { class: "qbox" });
     const snapBtn = el("button", { type: "button", class: "ghost sm btn-snap", text: "Refresh snapshot" });
+    const faultsBtn = el("button", { type: "button", class: "ghost sm btn-faults", text: "Faults" });
+    faultsBtn.addEventListener("click", () => store.set({ faultsFor: id }));
     const removeBtn = el("button", { type: "button", class: "danger sm btn-remove", text: "Remove" });
     const confirmBtn = el("button", { type: "button", class: "danger sm btn-remove-confirm", text: "Confirm remove", hidden: true });
     const cancelBtn = el("button", { type: "button", class: "ghost sm btn-remove-cancel", text: "Cancel", hidden: true });
     const prompt = el("span", { class: "rm-prompt", text: "Remove " + id + "?", hidden: true });
-    const actions = el("div", { class: "row actions" }, [snapBtn, el("span", { class: "grow" }), prompt, removeBtn, confirmBtn, cancelBtn]);
+    const actions = el("div", { class: "row actions" }, [snapBtn, faultsBtn, el("span", { class: "grow" }), prompt, removeBtn, confirmBtn, cancelBtn]);
     const root = el("article", { class: "cam", dataset: { id } }, [
       el("div", { class: "thumb" }, [img, ph]),
       el("div", { class: "cam-body" }, [title, source, urls, chips, qbox, actions]),

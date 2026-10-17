@@ -127,7 +127,7 @@ quality and Remove.
 ### Fault drawer
 
 A side drawer per camera: kind picker, the kind's parameters from the catalogue, the
-active faults with individual clear buttons, and Apply. It traps focus, returns it to the
+active faults, a "Clear faults" button (the API clears all of a camera's faults at once), and Apply. It traps focus, returns it to the
 opening button on close, and closes on Escape.
 
 ## Errors
