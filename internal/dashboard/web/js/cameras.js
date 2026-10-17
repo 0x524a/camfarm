@@ -69,7 +69,8 @@ export function mount(root, ctx) {
     const removeBtn = el("button", { type: "button", class: "danger sm btn-remove", text: "Remove" });
     const confirmBtn = el("button", { type: "button", class: "danger sm btn-remove-confirm", text: "Confirm remove", hidden: true });
     const cancelBtn = el("button", { type: "button", class: "ghost sm btn-remove-cancel", text: "Cancel", hidden: true });
-    const actions = el("div", { class: "row actions" }, [snapBtn, el("span", { class: "grow" }), removeBtn, confirmBtn, cancelBtn]);
+    const prompt = el("span", { class: "rm-prompt", text: "Remove " + id + "?", hidden: true });
+    const actions = el("div", { class: "row actions" }, [snapBtn, el("span", { class: "grow" }), prompt, removeBtn, confirmBtn, cancelBtn]);
     const root = el("article", { class: "cam", dataset: { id } }, [
       el("div", { class: "thumb" }, [img, ph]),
       el("div", { class: "cam-body" }, [title, source, urls, chips, qbox, actions]),
@@ -81,6 +82,7 @@ export function mount(root, ctx) {
     });
     const askRemove = (on) => {
       removeBtn.hidden = on;
+      prompt.hidden = !on;
       confirmBtn.hidden = !on;
       cancelBtn.hidden = !on;
     };
@@ -171,6 +173,9 @@ export function mount(root, ctx) {
   function fillLibrary() {
     const lib = store.get().library;
     const usable = lib ? lib.files.filter((f) => f.report.status !== "invalid") : [];
+    const opt = src.querySelector('option[value="library"]');
+    opt.disabled = usable.length === 0;
+    if (opt.disabled && src.value === "library") src.value = "fixture";
     libSel.replaceChildren(...usable.map((f) => el("option", {
       value: f.id,
       text: f.name + (f.report.status === "warning" ? "  (warnings)" : ""),
@@ -188,9 +193,13 @@ export function mount(root, ctx) {
       try { store.set({ library: await api.library() }); } catch (_) { /* library may be disabled */ }
     }
     const usable = fillLibrary();
-    if (libraryId && usable.some((f) => f.id === libraryId)) {
-      src.value = "library";
-      libSel.value = libraryId;
+    if (libraryId) {
+      if (usable.some((f) => f.id === libraryId)) {
+        src.value = "library";
+        libSel.value = libraryId;
+      } else {
+        fail(new Error("That file is not available for a camera."));
+      }
     }
     syncSource();
     form.hidden = false;
@@ -200,6 +209,10 @@ export function mount(root, ctx) {
   root.querySelector("#add-cancel").addEventListener("click", () => { form.hidden = true; });
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
+    if (src.value === "library" && !libSel.value) {
+      fail(new Error("Choose a library file."));
+      return;
+    }
     const spec = { id: idInput.value.trim() };
     const user = root.querySelector("#add-user").value;
     const pass = root.querySelector("#add-pass").value;

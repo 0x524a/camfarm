@@ -268,7 +268,13 @@ func TestAppAddAndRemoveACameraWithInlineConfirm(t *testing.T) {
 	}
 	// Remove asks first; Cancel keeps the camera.
 	mustClick(t, lobby.Locator(".btn-remove"))
+	if err := expect().Locator(lobby.Locator(".rm-prompt")).ToContainText("Remove lobby?"); err != nil {
+		t.Fatalf("inline prompt missing: %v", err)
+	}
 	mustClick(t, lobby.Locator(".btn-remove-cancel"))
+	if err := expect().Locator(lobby.Locator(".rm-prompt")).ToBeHidden(); err != nil {
+		t.Fatalf("prompt should hide after Cancel: %v", err)
+	}
 	if err := expect().Locator(lobby).ToBeVisible(); err != nil {
 		t.Fatal(err)
 	}
@@ -343,24 +349,45 @@ func TestAppCameraIDsAreTextAndPrototypeNamesWork(t *testing.T) {
 
 // Review Focus 2: a failed snapshot shows its error on the card.
 func TestAppFailedSnapshotShowsTheErrorOnTheCard(t *testing.T) {
-	url, _ := appServer(t, appOpts{})
+	// The failing camera is first, so a rejected load that stalled the queue
+	// would keep the second card from ever loading.
+	url, _ := appServer(t, appOpts{cameras: []camfarm.CameraSpec{{ID: "broken"}, {ID: "healthy"}}})
 	s := newSession(t)
 	if err := s.page.Route("**/snapshot.jpg", func(r playwright.Route) {
-		_ = r.Fulfill(playwright.RouteFulfillOptions{
-			Status: playwright.Int(503), ContentType: playwright.String("application/json"),
-			Body: `{"error":"camera is restarting"}`,
-		})
+		if strings.Contains(r.Request().URL(), "/cameras/broken/") {
+			_ = r.Fulfill(playwright.RouteFulfillOptions{
+				Status: playwright.Int(503), ContentType: playwright.String("application/json"),
+				Body: `{"error":"camera is restarting"}`,
+			})
+			return
+		}
+		_ = r.Continue()
 	}); err != nil {
 		t.Fatal(err)
 	}
 	s.openApp(t, url)
-	if err := expect().Locator(s.camCard("front-door").Locator(".snap-ph")).ToContainText("camera is restarting"); err != nil {
+	if err := expect().Locator(s.camCard("broken").Locator(".snap-ph")).ToContainText("camera is restarting"); err != nil {
 		t.Fatalf("snapshot error not shown on the card: %v", err)
 	}
-	if err := expect().Locator(s.camCard("front-door").Locator(".btn-remove")).ToBeVisible(); err != nil {
-		t.Fatal("the rest of the card stopped working")
+	if _, err := s.page.WaitForFunction(`() => {
+		const i = document.querySelector('.cam[data-id="healthy"] img.snap');
+		return !!i && !i.hidden && i.complete && i.naturalWidth === 320 && i.naturalHeight === 240;
+	}`, nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(assertTimeoutMS)}); err != nil {
+		t.Fatalf("the other camera's thumbnail did not load after a rejected one: %v", err)
 	}
 	s.requireCleanApp(t, 503)
+}
+
+func TestAppLibrarySourceIsDisabledWithoutALibrary(t *testing.T) {
+	url, _ := appServer(t, appOpts{})
+	s := newSession(t)
+	s.openApp(t, url)
+	mustClick(t, s.page.Locator("#add-open"))
+	if _, err := s.page.WaitForFunction(`() => document.querySelector('#add-source option[value=library]').disabled`,
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(assertTimeoutMS)}); err != nil {
+		t.Fatalf("library option should be disabled with no usable files: %v", err)
+	}
+	s.requireCleanApp(t)
 }
 
 func TestAppRefreshSnapshotButtonFetchesAgain(t *testing.T) {
