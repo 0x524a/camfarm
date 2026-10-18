@@ -100,6 +100,13 @@ their APIs, since they may still be in flux:
    different rules for what a valid camera is. The dashboard and the `cmd/camfarm` binary now
    drive this API interactively, built on top of it.
 
+## Releases
+
+A release is a `vX.Y.Z` tag cut by `scripts/release.sh`; `.github/workflows/release.yml` builds the
+archives (GoReleaser, `.goreleaser.yaml`) and the ghcr image and creates a draft GitHub release.
+`scripts/package.sh` runs the same packaging locally and in CI. See `docs/releasing.md`. Never
+move or reuse a published tag, and do not push a release tag without the user's say-so.
+
 ## Open architectural decisions
 
 None of the following has been decided. Frame each honestly with evidence before committing to an

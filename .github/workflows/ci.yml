@@ -332,3 +332,28 @@ jobs:
       - name: container log
         if: always()
         run: docker logs camfarm
+
+  # Builds every release archive in snapshot mode and runs the one for this
+  # runner, so a broken .goreleaser.yaml or a cross-build failure shows up on
+  # the pull request, not on the tag. Nothing is published.
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: v2.18.1
+          install-only: true
+
+      - name: scripts/package.sh
+        run: scripts/package.sh
