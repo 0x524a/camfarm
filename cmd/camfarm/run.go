@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/0x524a/camfarm"
+	"github.com/0x524a/camfarm/internal/buildinfo"
 	"github.com/0x524a/camfarm/internal/dashboard"
 	"github.com/0x524a/camfarm/internal/hostmetrics"
 	"github.com/0x524a/camfarm/internal/library"
@@ -73,6 +74,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("camfarm", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() { _, _ = fmt.Fprint(stderr, usage); fs.PrintDefaults() }
+	showVersion := fs.Bool("version", false, "print the version and exit")
 	specPath := fs.String("spec", "", "path to a JSON fleet spec")
 	seedFlag := fs.Uint64("seed", 0, "root seed (drawn at random and printed when omitted)")
 	cameras := fs.Int("cameras", 1, "number of cameras cam-1..N on the bundled fixture (cannot be combined with --spec)")
@@ -99,6 +101,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			return nil
 		}
 		return &exitError{code: 2, err: err, quiet: true}
+	}
+	if *showVersion {
+		_, _ = fmt.Fprintln(stdout, buildinfo.String())
+		return nil
 	}
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
