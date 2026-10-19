@@ -11,7 +11,15 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/camfarm ./cmd/camfarm
+# Stamped by the release workflow; a plain `docker build` reports "dev".
+ARG VERSION=
+ARG COMMIT=
+ARG DATE=
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w \
+    -X github.com/0x524a/camfarm/internal/buildinfo.Version=${VERSION} \
+    -X github.com/0x524a/camfarm/internal/buildinfo.Commit=${COMMIT} \
+    -X github.com/0x524a/camfarm/internal/buildinfo.Date=${DATE}" \
+    -o /out/camfarm ./cmd/camfarm
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/camfarm /camfarm

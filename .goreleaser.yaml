@@ -1,0 +1,53 @@
+# GoReleaser configuration. Run by .github/workflows/release.yml on a vX.Y.Z tag;
+# `goreleaser release --snapshot --clean` builds the same archives locally.
+# The container image is built by the workflow from the Dockerfile, not here.
+version: 2
+
+project_name: camfarm
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - id: camfarm
+    main: ./cmd/camfarm
+    binary: camfarm
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - {goos: windows, goarch: arm64}
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X github.com/0x524a/camfarm/internal/buildinfo.Version={{ .Version }}
+      - -X github.com/0x524a/camfarm/internal/buildinfo.Commit={{ .FullCommit }}
+      - -X github.com/0x524a/camfarm/internal/buildinfo.Date={{ .CommitDate }}
+    # Reproducible: the timestamp is the commit's, not the build's.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: camfarm
+    formats: [tar.gz]
+    format_overrides:
+      - {goos: windows, formats: [zip]}
+    name_template: "camfarm_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+
+changelog:
+  # Release notes are written by hand when the draft is published.
+  disable: true
+
+release:
+  # Created as a draft so the notes can be written and the archives checked
+  # before anything is public.
+  draft: true
+  prerelease: auto

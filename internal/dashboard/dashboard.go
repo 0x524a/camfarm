@@ -250,6 +250,11 @@ func (s *server) snapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	b, err := s.snap.get(r.Context(), cam)
 	if err != nil {
+		// A camera removed while its snapshot was being taken fails the capture
+		// with a transport error; report what happened, not the symptom.
+		if _, gone := s.fleet.Camera(cam.ID()); errors.Is(gone, camfarm.ErrUnknownCamera) {
+			err = gone
+		}
 		writeErr(w, err)
 		return
 	}
