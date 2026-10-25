@@ -1,0 +1,14 @@
+# Codecov status checks. Without this file the project check fails on any drop
+# against the base commit, however small, and the project figure has been seen
+# to move between runs of unchanged code. The patch check stays strict: new code
+# must be covered by the PR that adds it.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: auto
+        threshold: 0%
