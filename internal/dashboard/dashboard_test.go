@@ -216,6 +216,23 @@ func TestSnapshotTimeoutIs504(t *testing.T) {
 	}
 }
 
+func TestSnapshotOfACameraRemovedMidCaptureIs404(t *testing.T) {
+	var fleet *camfarm.Fleet
+	capture := func(_ context.Context, c *camfarm.Camera) (image.Image, error) {
+		// What a real capture reports when the camera's RTSP source disappears
+		// under it: a transport error, not ErrUnknownCamera.
+		if err := fleet.RemoveCamera(c.ID()); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("rtsp: connection closed")
+	}
+	ts, f := newServer(t, Options{capture: capture})
+	fleet = f
+	if resp := do(t, "GET", ts.URL+"/api/v1/cameras/front-door/snapshot.jpg", ""); resp.StatusCode != 404 {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
 func TestSnapshotConcurrencyCap(t *testing.T) {
 	release := make(chan struct{})
 	capture, calls := capturing(release)

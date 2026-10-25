@@ -14,3 +14,6 @@ ARCHITECTURE_PROMPT.md
 
 # Subagent-driven-development scratch: ledger, briefs, review packages.
 .superpowers/
+
+# Release build output (goreleaser)
+/dist/

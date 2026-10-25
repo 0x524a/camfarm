@@ -355,7 +355,9 @@ func TestAppCameraIDsAreTextAndPrototypeNamesWork(t *testing.T) {
 	if err := expect().Locator(card).ToHaveCount(0); err != nil {
 		t.Fatalf("camera named constructor was not removed: %v", err)
 	}
-	s.requireCleanApp(t)
+	// The card's snapshot can still be in flight when its camera is removed; the
+	// server answers that 404, which is correct. A 500 would still fail.
+	s.requireCleanApp(t, 404)
 }
 
 // Review Focus 2: a failed snapshot shows its error on the card.

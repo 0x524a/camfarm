@@ -271,6 +271,19 @@ func TestRunRejectsBadInput(t *testing.T) {
 	}
 }
 
+func TestVersionFlagPrintsAndExitsWithoutStartingAFleet(t *testing.T) {
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"--version"}, &out, &errb); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out.String(), "camfarm ") || strings.Count(out.String(), "\n") != 1 {
+		t.Fatalf("stdout = %q", out.String())
+	}
+	if errb.Len() != 0 {
+		t.Fatalf("a version request must not start a fleet or log; stderr = %q", errb.String())
+	}
+}
+
 func TestHelpStatesTheSecurityPosture(t *testing.T) {
 	var out, errb bytes.Buffer
 	_ = run(context.Background(), []string{"--help"}, &out, &errb)
