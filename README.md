@@ -71,7 +71,7 @@ CAMFARM_DOCS_SHOTS=$PWD/docs/assets go test -tags e2e -count=1 -run TestDocsScre
 
 ## Status
 
-No tagged release yet, so the Go API and the JSON API can still change. What works, in brief:
+Latest release: [v0.1.0](https://github.com/0x524a/camfarm/releases/tag/v0.1.0) (archives, checksums and a container image; see [docs/releasing.md](docs/releasing.md)). Before 1.0, the Go API and the JSON API can still change. What works, in brief:
 
 - N RTSP cameras behind one listener, H.264 and H.265, from MPEG-TS, MP4 or fragmented MP4 sources.
 - An ONVIF® Device and Media control plane, and an opt-in WS-Discovery responder.

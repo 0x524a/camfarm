@@ -18,7 +18,7 @@ For maintainers. A release is a `vX.Y.Z` tag on `main`. Pushing the tag starts t
 3. Tag and push: `scripts/release.sh v0.1.0`. The script refuses unless you are on a clean `main` equal to `origin/main`, the tag is new, CI succeeded on the commit, and `goreleaser check` passes. It asks before pushing.
 4. Watch the `release` workflow. Its first job refuses a tag that is not reachable from `main` or whose commit has no green `ci` run, so a hand-pushed tag cannot ship unchecked code.
 5. Open the draft release, write the notes, and publish it.
-6. After the first release, update the "No tagged release yet" line in the README.
+6. Update the version in the README's Status line.
 
 Use a suffix such as `v0.2.0-rc.1` for a prerelease: the release is marked as a prerelease and the image is not tagged `latest`.
 
